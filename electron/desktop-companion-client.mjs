@@ -37,40 +37,48 @@ const cleanLabel = (value, fallback) => {
   return label || fallback;
 };
 
-/** Only an explicit MagicDNS name may carry a desktop pairing token over
- * cleartext HTTP. WireGuard protects this route; accepting LAN IPs here would
- * silently turn the long-lived bearer into plaintext Wi-Fi traffic. */
-export function normalizeTailscaleCompanionEndpoint(value) {
+/** Pairing tokens may travel through a verified OpenMausBot HTTPS endpoint or
+ * an explicit Tailscale MagicDNS name. WireGuard protects cleartext HTTP on
+ * the latter; accepting LAN IPs there would silently turn the long-lived
+ * bearer into plaintext Wi-Fi traffic. */
+export function normalizeDesktopCompanionEndpoint(value) {
   let raw = String(value ?? "").trim();
   if (!raw) return "";
-  if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
+  if (!/^https?:\/\//i.test(raw)) {
+    raw = /\.ts\.net(?::\d+)?\/?$/i.test(raw) ? `http://${raw}` : `https://${raw}`;
+  }
   let parsed;
   try {
     parsed = new URL(raw);
   } catch {
     return "";
   }
+  const hostname = parsed.hostname.toLowerCase();
+  const tailscaleHttp = parsed.protocol === "http:" && hostname.endsWith(".ts.net");
+  const managedHttps =
+    parsed.protocol === "https:" && hostname.endsWith(".openmausbot.com");
   if (
-    parsed.protocol !== "http:" ||
+    (!tailscaleHttp && !managedHttps) ||
     parsed.username ||
     parsed.password ||
     (parsed.pathname !== "" && parsed.pathname !== "/") ||
     parsed.search ||
-    parsed.hash ||
-    !parsed.hostname.toLowerCase().endsWith(".ts.net")
+    parsed.hash
   ) {
     return "";
   }
-  if (!parsed.port) parsed.port = "8810";
+  if (tailscaleHttp && !parsed.port) parsed.port = "8810";
   const port = Number(parsed.port);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return "";
+  if (parsed.port && (!Number.isSafeInteger(port) || port < 1 || port > 65_535)) return "";
   return parsed.origin;
 }
 
+/** Compatibility name for code that labels the Tailscale form explicitly. */
+export const normalizeTailscaleCompanionEndpoint = normalizeDesktopCompanionEndpoint;
 export function desktopCompanionAccess(credentials) {
   const stored = credentials?.[DESKTOP_COMPANION_FIELD];
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) return null;
-  const endpoint = normalizeTailscaleCompanionEndpoint(stored.endpoint);
+  const endpoint = normalizeDesktopCompanionEndpoint(stored.endpoint);
   const token = typeof stored.token === "string" ? stored.token : "";
   const deviceId = typeof stored.deviceId === "string" ? stored.deviceId : "";
   if (!endpoint || !DEVICE_TOKEN.test(token) || !DEVICE_ID.test(deviceId)) return null;
@@ -110,8 +118,10 @@ export async function pairDesktopCompanion({
   fetchImpl = fetch,
   requestId = randomUUID(),
 }) {
-  const endpoint = normalizeTailscaleCompanionEndpoint(rawEndpoint);
-  if (!endpoint) throw new Error("Enter the computer's full Tailscale name, ending in .ts.net");
+  const endpoint = normalizeDesktopCompanionEndpoint(rawEndpoint);
+  if (!endpoint) {
+    throw new Error("Enter the OpenMausBot HTTPS companion address or full Tailscale name ending in .ts.net");
+  }
   const code = String(rawCode ?? "").trim();
   if (!PAIRING_CODE.test(code)) throw new Error("Enter the six-digit code shown on the other computer");
   const response = await fetchImpl(`${endpoint}/api/pair`, {

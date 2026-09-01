@@ -7,6 +7,16 @@ Every OpenMausBot desktop build can play either role:
 
 The roles are platform-independent. A Windows, macOS, or Ubuntu build can host, and any other desktop build can be its client. One app installation uses one role at a time; disconnecting a client returns that installation to host mode without deleting its local host data.
 
+## Pair over secure HTTPS
+
+1. On the host, open **Settings → Phone** and finish **Secure HTTPS pairing**.
+2. Open a pairing window so the host displays a six-digit code.
+3. On the client, open **Settings → Remote computer**.
+4. Enter the host's managed `https://…openmausbot.com` companion address and the six-digit code.
+5. Choose **Pair and switch to client mode**. The client restarts and opens the host's bot UI.
+
+The HTTPS address uses the host's managed outbound tunnel. TLS is verified by the operating system, and the client does not need Tailscale. HTTPS is intentionally restricted to OpenMausBot-managed companion names so a typo cannot redirect a paired-device token to an unrelated site.
+
 ## Pair over Tailscale
 
 1. Install Tailscale on both computers, sign into the same tailnet, and leave MagicDNS enabled.
@@ -17,7 +27,7 @@ The roles are platform-independent. A Windows, macOS, or Ubuntu build can host, 
 
 To switch that installation back, open **Settings → Remote computer** and choose **Disconnect and use this computer**.
 
-The host must be running and awake. The client accepts only an HTTP `.ts.net` hostname because that cleartext-looking connection is encrypted inside Tailscale's WireGuard tunnel; raw IP addresses, LAN hostnames, paths, credentials in URLs, and HTTPS addresses are rejected by this transport.
+The host must be running and awake. Cleartext HTTP is accepted only for a `.ts.net` MagicDNS hostname because that connection is encrypted inside Tailscale's WireGuard tunnel. Raw IP addresses, LAN hostnames, URL credentials, paths, queries, and fragments are rejected.
 
 ## Security model
 
@@ -26,7 +36,7 @@ Pairing creates an independent device identity on the host. The resulting bearer
 - stored only in Electron's OS-encrypted credential document on the client;
 - never returned through the preload bridge, inserted into the page, placed in a URL, or written to browser storage;
 - injected by a loopback-only Electron relay after browser `Origin` headers are removed;
-- sent only to the exact saved `.ts.net` origin; absolute-form request targets cannot redirect it elsewhere.
+- sent only to the exact saved managed HTTPS or `.ts.net` origin; absolute-form request targets cannot redirect it elsewhere.
 
 The host companion remains the authorization boundary. Its route list defaults to deny, strips sensitive response fields, and can revoke the desktop client from **Settings → Phone** like any other paired device. Client mode does not expose host-only settings, local browser surfaces, local VM controls, plugins, or the event inspector.
 
@@ -39,7 +49,7 @@ desktop renderer
       │ same-origin HTTP/SSE, no bearer
       ▼
 Electron relay 127.0.0.1:8798 (fallbacks: 18798, 28798)
-      │ bearer injection over Tailscale/WireGuard
+      │ bearer injection over verified managed HTTPS or Tailscale/WireGuard
       ▼
 host companion :8810
       │ authentication + route allowlist + response scrubbing

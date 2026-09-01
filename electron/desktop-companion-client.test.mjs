@@ -7,6 +7,7 @@ import {
   desktopCompanionAccess,
   desktopCompanionProxyTarget,
   normalizeTailscaleCompanionEndpoint,
+  normalizeDesktopCompanionEndpoint,
   pairDesktopCompanion,
   startDesktopCompanionRelay,
   withDesktopCompanionAccess,
@@ -31,26 +32,41 @@ afterEach(async () => {
 });
 
 describe("desktop companion endpoint", () => {
-  it("accepts only cleartext Tailscale MagicDNS names and supplies the companion port", () => {
+  it("accepts managed HTTPS and cleartext only for Tailscale MagicDNS", () => {
     expect(normalizeTailscaleCompanionEndpoint("host.example-tailnet.ts.net")).toBe(
       "http://host.example-tailnet.ts.net:8810",
     );
     expect(normalizeTailscaleCompanionEndpoint("http://HOST.example-tailnet.ts.net:9910/")).toBe(
       "http://host.example-tailnet.ts.net:9910",
     );
+    expect(normalizeDesktopCompanionEndpoint("https://c-opaque.openmausbot.com")).toBe(
+      "https://c-opaque.openmausbot.com",
+    );
+    expect(normalizeDesktopCompanionEndpoint("c-opaque.openmausbot.com")).toBe(
+      "https://c-opaque.openmausbot.com",
+    );
     for (const endpoint of [
-      "https://host.example-tailnet.ts.net",
+      "https://unrelated.example.com",
+      "http://c-opaque.openmausbot.com",
       "http://10.0.0.4:8810",
       "http://host.local:8810",
+      "https://10.0.0.4",
       "http://host.example-tailnet.ts.net/path",
+      "https://c-opaque.openmausbot.com/path",
       "http://user@host.example-tailnet.ts.net",
       "http://host.example-tailnet.ts.net.evil.test",
+      "https://c-opaque.openmausbot.com.evil.test",
     ]) {
-      expect(normalizeTailscaleCompanionEndpoint(endpoint), endpoint).toBe("");
+      expect(normalizeDesktopCompanionEndpoint(endpoint), endpoint).toBe("");
     }
   });
 
   it("validates, adds, and removes the encrypted credential document field", () => {
+    const hostedAccess = { ...access, endpoint: "https://c-opaque.openmausbot.com" };
+    expect(desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: hostedAccess })).toEqual(
+      hostedAccess,
+    );
+
     expect(desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: access })).toEqual(access);
     expect(desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: { ...access, token: "bad" } })).toBeNull();
     expect(withDesktopCompanionAccess({ existing: true }, access)).toEqual({
@@ -89,6 +105,27 @@ describe("desktop companion pairing", () => {
       deviceName: "Laptop",
       pairRequestId: "request-00000001",
     });
+  });
+
+  it("pairs through a managed HTTPS companion address", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ token, device: { id: deviceId }, serverName: "Office computer" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const paired = await pairDesktopCompanion({
+      endpoint: "https://c-opaque.openmausbot.com",
+      code: "654321",
+      deviceName: "Desktop client",
+      requestId: "request-https-01",
+      fetchImpl,
+    });
+    expect(paired).toEqual({ ...access, endpoint: "https://c-opaque.openmausbot.com" });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://c-opaque.openmausbot.com/api/pair",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("rejects bad codes and surfaces a sidecar error without returning secrets", async () => {

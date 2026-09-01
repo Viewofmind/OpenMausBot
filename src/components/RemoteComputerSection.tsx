@@ -87,14 +87,14 @@ export function RemoteComputerSection() {
       ) : (
         <div className="flex flex-col gap-3">
           <p className="text-[12.5px] leading-relaxed text-ink-secondary">
-            On the host computer, open Settings → Phone, enable Tailscale access, and open a pairing window. Then enter its full <span className="text-ink">.ts.net</span> name and six-digit code here.
+            On the host computer, open Settings → Phone, enable Secure HTTPS or Tailscale access, and open a pairing window. Then enter that companion address and the six-digit code here.
           </p>
           <label className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
-            Host Tailscale name
+            Host companion address
             <input
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
-              placeholder="computer.tailnet-name.ts.net:8810"
+              placeholder="https://…openmausbot.com or computer.tailnet.ts.net"
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
