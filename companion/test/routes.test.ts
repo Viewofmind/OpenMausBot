@@ -59,6 +59,8 @@ describe("what the app may do", () => {
     ["POST", "/api/bots/bot_123/avatar/generate"],
     ["POST", "/api/bots/bot_123/computer/join"],
     ["POST", "/api/bots/bot_123/secret-cards/message_1/provide"],
+    ["POST", "/api/bots/bot_123/computer/control"],
+    ["POST", "/api/bots/bot_123/computer/viewer-close"],
     ["POST", "/api/groups/room-1/messages"],
     ["POST", "/api/groups/room-1/read"],
     ["POST", "/api/groups/room-1/tasks"],
@@ -155,7 +157,11 @@ describe("what it may not", () => {
 
   it("opens only a fresh cloud viewer, not the cloud computer control API", () => {
     expect(allowed("POST", "/api/bots/bot_123/computer/join")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/control")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/viewer-close")).toBe(true);
     expect(allowed("GET", "/api/bots/bot_123/computer")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/computer/control")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/computer/viewer-close")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/provision")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/sleep")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/exec")).toBe(false);

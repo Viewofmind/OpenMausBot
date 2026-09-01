@@ -2503,7 +2503,7 @@ app.on("before-quit", (e) => {
   // Release the sleep blocker synchronously; child shutdown is awaited below.
   syncCompanionKeepAwake(false, false);
   try {
-    desktopCompanionRelay?.server.close();
+    desktopCompanionRelay?.close?.();
   } catch {}
   // a live dictation session runs its own helper child that holds the mic —
   // stop it here so quitting never orphans a recording process

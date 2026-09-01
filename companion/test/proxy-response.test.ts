@@ -138,6 +138,23 @@ describe("preparing a harness response for a device", () => {
     expect(companionDevice).toBe("phone-1");
   });
 
+  it("turns a host-loopback VPS viewer into a device-scoped companion path", async () => {
+    respond = (res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        joinUrl: "http://127.0.0.1:45678/vnc.html#autoconnect=true&password=viewer-secret",
+        state: "running",
+      }));
+    };
+    const { status, text } = await device("/api/bots/b1/computer/join", "POST");
+    expect(status).toBe(200);
+    const joinUrl = String(JSON.parse(text).joinUrl);
+    expect(joinUrl).toMatch(/^\/vps-viewer\/[A-Za-z0-9_-]{32}\/vnc\.html#/);
+    expect(joinUrl).toContain("password=viewer-secret");
+    expect(joinUrl).toContain("path=vps-viewer%2F");
+    expect(joinUrl).not.toContain("127.0.0.1:45678");
+  });
+
   it("never forwards a body it could not scrub", async () => {
     // `scrub` recurses once per level, so a deeply nested body throws
     // RangeError while JSON.parse handles it without complaint. That gap is

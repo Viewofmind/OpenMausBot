@@ -152,7 +152,9 @@ const proxy = createProxyHandler({
     connected: connectedDevices.open,
   });
 const companion = createServer(proxy);
+companion.on("upgrade", proxy.upgrade);
 const managedOrigin = PRIVATE_ORIGIN ? createServer(proxy) : null;
+managedOrigin?.on("upgrade", proxy.upgrade);
 
 const control = createControlServer({
   devices,

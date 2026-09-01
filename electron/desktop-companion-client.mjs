@@ -251,6 +251,78 @@ function proxyApi(req, res, access) {
   req.pipe(upstream);
 }
 
+function websocketHeaders(req, authorization) {
+  if (req.method !== "GET" || String(req.headers.upgrade ?? "").toLowerCase() !== "websocket") return null;
+  const headers = { authorization, connection: "Upgrade", upgrade: "websocket" };
+  for (const name of [
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-protocol",
+    "sec-websocket-extensions",
+  ]) {
+    const value = req.headers[name];
+    if (typeof value === "string") headers[name] = value;
+  }
+  return headers;
+}
+
+function writeUpgrade(socket, response) {
+  const lines = [];
+  for (const name of [
+    "upgrade",
+    "connection",
+    "sec-websocket-accept",
+    "sec-websocket-protocol",
+    "sec-websocket-extensions",
+  ]) {
+    const value = response.headers[name];
+    if (typeof value === "string") lines.push(`${name}: ${value}`);
+  }
+  socket.write(
+    `HTTP/1.1 ${response.statusCode ?? 101} ${response.statusMessage ?? "Switching Protocols"}\r\n`
+      + `${lines.join("\r\n")}\r\n\r\n`,
+  );
+}
+
+export function proxyDesktopCompanionUpgrade(req, socket, head, access, activeSockets = new Set()) {
+  let target;
+  try {
+    target = desktopCompanionProxyTarget(access.endpoint, req.url);
+  } catch {
+    socket.destroy();
+    return;
+  }
+  if (!target.pathname.startsWith("/vps-viewer/")) return socket.destroy();
+  const headers = websocketHeaders(req, `Bearer ${access.token}`);
+  if (!headers) return socket.destroy();
+  const request = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const upstream = request(target, { method: "GET", headers });
+  upstream.setTimeout(30_000, () => upstream.destroy(new Error("The remote viewer did not answer")));
+  upstream.once("upgrade", (response, remote, remoteHead) => {
+    upstream.setTimeout(0);
+    remote.setTimeout(0);
+    writeUpgrade(socket, response);
+    activeSockets.add(socket);
+    activeSockets.add(remote);
+    const release = () => {
+      activeSockets.delete(socket);
+      activeSockets.delete(remote);
+    };
+    socket.once("close", release);
+    remote.once("close", release);
+    if (head.length) remote.write(head);
+    if (remoteHead.length) socket.write(remoteHead);
+    socket.pipe(remote).pipe(socket);
+  });
+  upstream.once("response", (response) => {
+    response.resume();
+    socket.destroy();
+  });
+  upstream.once("error", () => socket.destroy());
+  socket.once("close", () => upstream.destroy());
+  upstream.end();
+}
+
 function listen(server, port) {
   return new Promise((resolve) => {
     const onError = (error) => {
@@ -275,16 +347,34 @@ export async function startDesktopCompanionRelay({
   const normalized = desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: access });
   if (!normalized) throw new Error("The saved remote computer credential is invalid");
   for (const port of ports) {
+    const activeSockets = new Set();
     const server = createServer((req, res) => {
       if (!isLoopbackHost(req.headers.host) || !allowedOrigin(req.headers.origin, req.headers.host)) {
         return json(res, 403, { error: "forbidden: loopback client required" });
       }
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-      if (pathname.startsWith("/api/")) return proxyApi(req, res, normalized);
+      if (pathname.startsWith("/api/") || pathname.startsWith("/vps-viewer/")) {
+        return proxyApi(req, res, normalized);
+      }
       return serveStatic(req, res, staticDir);
     });
+    server.on("upgrade", (req, socket, head) => {
+      if (!isLoopbackHost(req.headers.host) || !allowedOrigin(req.headers.origin, req.headers.host)) {
+        return socket.destroy();
+      }
+      proxyDesktopCompanionUpgrade(req, socket, head, normalized, activeSockets);
+    });
     const result = await listen(server, port);
-    if (result.ok) return { server, port, access: normalized };
+    if (result.ok) return {
+      server,
+      port,
+      access: normalized,
+      close() {
+        for (const socket of activeSockets) socket.destroy();
+        activeSockets.clear();
+        server.close();
+      },
+    };
     server.close();
     if (result.error?.code !== "EADDRINUSE") throw result.error;
   }

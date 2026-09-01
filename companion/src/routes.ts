@@ -48,12 +48,22 @@ export const MESSAGE_FILE_ROUTE = {
   path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/file$/,
 } as const;
 
+export const CLOUD_DESKTOP_CONTROL_ROUTE = {
+  method: "POST",
+  path: /^\/api\/bots\/[\w-]+\/computer\/(?:control|viewer-close)$/,
+} as const;
+
 export function isCloudDesktopJoin(method: string, path: string): boolean {
   return method === CLOUD_DESKTOP_JOIN_ROUTE.method && CLOUD_DESKTOP_JOIN_ROUTE.path.test(path);
 }
 
 export function isMessageFileDownload(method: string, path: string): boolean {
   return method === MESSAGE_FILE_ROUTE.method && MESSAGE_FILE_ROUTE.path.test(path);
+}
+
+export function isCloudDesktopAccess(method: string, path: string): boolean {
+  return isCloudDesktopJoin(method, path)
+    || (method === CLOUD_DESKTOP_CONTROL_ROUTE.method && CLOUD_DESKTOP_CONTROL_ROUTE.path.test(path));
 }
 
 /** Every request the iOS app makes, and nothing else.
@@ -103,6 +113,7 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // second, per-device capability check before it reaches the harness.
   CLOUD_DESKTOP_JOIN_ROUTE,
 
+  CLOUD_DESKTOP_CONTROL_ROUTE,
   // rooms — making one, and talking in one
   { method: "POST", path: /^\/api\/groups$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/messages$/ },

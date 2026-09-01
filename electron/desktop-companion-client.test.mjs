@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
+import { createServer } from "node:http";
+import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -9,6 +11,7 @@ import {
   normalizeTailscaleCompanionEndpoint,
   normalizeDesktopCompanionEndpoint,
   pairDesktopCompanion,
+  proxyDesktopCompanionUpgrade,
   startDesktopCompanionRelay,
   withDesktopCompanionAccess,
   withoutDesktopCompanionAccess,
@@ -24,9 +27,11 @@ const access = {
 };
 
 const servers = [];
+const sockets = [];
 const tempDirs = [];
 
 afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.destroy();
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
   for (const directory of tempDirs.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
@@ -172,5 +177,72 @@ describe("desktop companion loopback relay", () => {
       headers: { origin: "http://127.0.0.1:65534" },
     });
     expect(foreignLoopbackOrigin.status).toBe(403);
+  });
+
+  it("injects the paired bearer into a VPS viewer WebSocket without forwarding browser Origin", async () => {
+    let received = null;
+    const companion = createServer();
+    companion.on("upgrade", (req, socket) => {
+      sockets.push(socket);
+      received = {
+        authorization: req.headers.authorization,
+        origin: req.headers.origin,
+        path: req.url,
+      };
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n"
+          + "Upgrade: websocket\r\n"
+          + "Connection: Upgrade\r\n"
+          + "Sec-WebSocket-Accept: test\r\n\r\n"
+          + "remote-viewer-ready",
+      );
+    });
+    servers.push(companion);
+    const companionPort = await new Promise((resolve) =>
+      companion.listen(0, "127.0.0.1", () => resolve(companion.address().port)));
+
+    const upgraded = new Set();
+    const relay = createServer();
+    relay.on("upgrade", (req, socket, head) =>
+      proxyDesktopCompanionUpgrade(
+        req,
+        socket,
+        head,
+        { ...access, endpoint: `http://127.0.0.1:${companionPort}` },
+        upgraded,
+      ));
+    servers.push(relay);
+    const relayPort = await new Promise((resolve) =>
+      relay.listen(0, "127.0.0.1", () => resolve(relay.address().port)));
+
+    const response = await new Promise((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port: relayPort });
+      sockets.push(socket);
+      let text = "";
+      socket.setEncoding("utf8");
+      socket.once("connect", () => socket.write(
+        "GET /vps-viewer/session-id/websockify HTTP/1.1\r\n"
+          + `Host: 127.0.0.1:${relayPort}\r\n`
+          + "Origin: http://127.0.0.1:8798\r\n"
+          + "Connection: Upgrade\r\n"
+          + "Upgrade: websocket\r\n"
+          + "Sec-WebSocket-Key: dGVzdA==\r\n"
+          + "Sec-WebSocket-Version: 13\r\n\r\n",
+      ));
+      socket.on("data", (chunk) => {
+        text += chunk;
+        if (text.includes("remote-viewer-ready")) resolve(text);
+      });
+      socket.once("error", reject);
+      socket.setTimeout(2_000, () => reject(new Error("desktop relay WebSocket timed out")));
+    });
+
+    expect(response).toContain("101 Switching Protocols");
+    expect(received).toEqual({
+      authorization: `Bearer ${token}`,
+      origin: undefined,
+      path: "/vps-viewer/session-id/websockify",
+    });
+    for (const socket of upgraded) socket.destroy();
   });
 });

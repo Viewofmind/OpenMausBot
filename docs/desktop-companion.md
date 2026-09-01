@@ -27,6 +27,14 @@ The HTTPS address uses the host's managed outbound tunnel. TLS is verified by th
 
 To switch that installation back, open **Settings → Remote computer** and choose **Disconnect and use this computer**.
 
+## Control a VPS desktop remotely
+
+A desktop client can open an agent's self-hosted VPS display through either paired transport. On the host, enable **Cloud desktop access** for that paired desktop in **Settings → Phone**. On the client, open the bot's **Computer** panel and choose **Take control**.
+
+The VPS still publishes no VNC port. The host opens its existing loopback-only SSH tunnel, the companion creates a random device-scoped viewer path, and the client relays noVNC HTTP and WebSocket traffic through its loopback Electron service. Closing the viewer removes the companion session, closes the SSH tunnel, and hands control back to the agent.
+
+Remote clients can open and close the viewer only. VPS provisioning, replacement, sleep, removal, SSH aliases, Local VM controls, and host browser surfaces remain available only on the host.
+
 The host must be running and awake. Cleartext HTTP is accepted only for a `.ts.net` MagicDNS hostname because that connection is encrypted inside Tailscale's WireGuard tunnel. Raw IP addresses, LAN hostnames, URL credentials, paths, queries, and fragments are rejected.
 
 ## Security model
@@ -38,9 +46,9 @@ Pairing creates an independent device identity on the host. The resulting bearer
 - injected by a loopback-only Electron relay after browser `Origin` headers are removed;
 - sent only to the exact saved managed HTTPS or `.ts.net` origin; absolute-form request targets cannot redirect it elsewhere.
 
-The host companion remains the authorization boundary. Its route list defaults to deny, strips sensitive response fields, and can revoke the desktop client from **Settings → Phone** like any other paired device. Client mode does not expose host-only settings, local browser surfaces, local VM controls, plugins, or the event inspector.
+The host companion remains the authorization boundary. Its route list defaults to deny, strips sensitive response fields, and can revoke the desktop client from **Settings → Phone** like any other paired device. Interactive desktop access is a separate per-device capability that defaults off. Client mode does not expose host-only settings, local browser surfaces, local VM controls, plugins, or the event inspector.
 
-The first desktop slice intentionally matches the companion feature surface: chats, rooms, streamed responses, approvals, search, routines, attachments, and any cloud-desktop join the host explicitly grants to that paired device. Expanding the desktop client must be done by explicitly reviewing and adding companion routes; it must not bypass the companion API or proxy the full harness.
+The desktop client matches the reviewed companion feature surface: chats, rooms, streamed responses, approvals, search, routines, attachments, and a narrowly scoped cloud/VPS viewer the host explicitly grants to that paired device. Expanding the desktop client must be done by explicitly reviewing and adding companion routes; it must not bypass the companion API or proxy the full harness.
 
 ## Runtime shape
 

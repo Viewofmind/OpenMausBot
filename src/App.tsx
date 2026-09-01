@@ -9,6 +9,7 @@ import { GroupView } from "@/components/GroupView";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { PluginsPanel, preloadConnectedApps } from "@/components/PluginsPanel";
 import { ComputerPanel } from "@/components/ComputerPanel";
+import { RemoteDesktopPanel } from "@/components/remote-desktop-panel";
 import { InspectorPanel } from "@/components/InspectorPanel";
 import { SettingsModal } from "@/components/SettingsModal";
 import { UpdateBanner } from "@/components/UpdateBanner";
@@ -281,13 +282,17 @@ function Shell() {
         </main>
       )}
       {!remoteClient && state.settingsOpen && bot && <SettingsPanel bot={bot} />}
-      {!remoteClient && state.computerOpen && bot && (
-        <ComputerPanel
-          key={bot.id}
-          bot={bot}
-          onOpenVmWorkspace={openLocalVmWorkspace}
-          onExpandBrowser={openBrowserWorkspace}
-        />
+      {state.computerOpen && bot && (
+        remoteClient ? (
+          <RemoteDesktopPanel key={bot.id} bot={bot} />
+        ) : (
+          <ComputerPanel
+            key={bot.id}
+            bot={bot}
+            onOpenVmWorkspace={openLocalVmWorkspace}
+            onExpandBrowser={openBrowserWorkspace}
+          />
+        )
       )}
       {!remoteClient && state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
       {state.appSettingsOpen && <SettingsModal />}

@@ -11237,11 +11237,6 @@ const server = createServer(async (req, res) => {
             return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
           }
           if (m[2] === "join") {
-            if (req.headers["x-openmausbot-companion"] === "1") {
-              return json(res, 409, {
-                error: "VPS live desktop control is currently available in the desktop app; the SSH viewer is loopback-only",
-              });
-            }
             return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
           }
           if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
