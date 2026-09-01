@@ -29,6 +29,7 @@ function Shell() {
   const unreadCount =
     state.bots.filter((bot) => !bot.hidden && bot.unread).length +
     state.groups.filter((group) => group.unread).length;
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   // Mobile-only drawer state. Above md, none of these properties are emitted
   // at all — Sidebar scopes every mobile class with max-md: rather than
   // cancelling them with md:, which would still emit a translate value and
@@ -251,9 +252,9 @@ function Shell() {
         <RoutinesPage onBack={closeCalendar} onOpenRoom={openCalendarRoom} />
       ) : state.activeView === "skill-recorder" ? (
         <SkillRecorderPage />
-      ) : browserWorkspaceBotId && bot && bot.id === browserWorkspaceBotId ? (
+      ) : !remoteClient && browserWorkspaceBotId && bot && bot.id === browserWorkspaceBotId ? (
         <BrowserWorkspace bot={bot} onClose={closeBrowserWorkspace} />
-      ) : localVmWorkspaceBotId ? (
+      ) : !remoteClient && localVmWorkspaceBotId ? (
         <LocalVmWorkspace
           primaryBotId={localVmWorkspaceBotId}
           overlayOpen={nativeViewOverlayOpen}
@@ -279,8 +280,8 @@ function Shell() {
           )}
         </main>
       )}
-      {state.settingsOpen && bot && <SettingsPanel bot={bot} />}
-      {state.computerOpen && bot && (
+      {!remoteClient && state.settingsOpen && bot && <SettingsPanel bot={bot} />}
+      {!remoteClient && state.computerOpen && bot && (
         <ComputerPanel
           key={bot.id}
           bot={bot}
@@ -288,9 +289,9 @@ function Shell() {
           onExpandBrowser={openBrowserWorkspace}
         />
       )}
-      {state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
+      {!remoteClient && state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
       {state.appSettingsOpen && <SettingsModal />}
-      {state.pluginsOpen && <PluginsPanel />}
+      {!remoteClient && state.pluginsOpen && <PluginsPanel />}
       {/* mounted after the modals: same z-50 tier, so DOM order keeps the
           palette on top when one of them is open underneath */}
       <CommandPalette onOpenChange={setPaletteOpen} />
@@ -300,7 +301,7 @@ function Shell() {
 }
 
 export default function App() {
-  const [gated, setGated] = useState(() => !emailGateDone());
+  const [gated, setGated] = useState(() => window.ogb?.remoteClient?.active !== true && !emailGateDone());
   useEffect(() => {
     initAnalytics();
   }, []);
