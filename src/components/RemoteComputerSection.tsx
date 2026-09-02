@@ -55,7 +55,7 @@ export function RemoteComputerSection() {
 
   return (
     <Card
-      title="Remote computer"
+      title={state.active ? "Remote connection" : "Connect to another computer"}
       subtitle="Use this desktop app as a secure client for OpenMausBot running on another computer."
     >
       {!bridge ? (
@@ -87,10 +87,10 @@ export function RemoteComputerSection() {
       ) : (
         <div className="flex flex-col gap-3">
           <p className="text-[12.5px] leading-relaxed text-ink-secondary">
-            On the host computer, open Settings → Phone, enable Secure HTTPS or Tailscale access, and open a pairing window. Then enter that companion address and the six-digit code here.
+            On the host computer, open Settings → Remote access and open a pairing window over HTTPS, Tailscale, or Wi-Fi. Then enter its address and six-digit code here.
           </p>
           <label className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
-            Host companion address
+            Host address
             <input
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}

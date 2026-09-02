@@ -19,7 +19,7 @@ describe("credentials", () => {
     expect(ask("POST", "/api/pair", false)).toBeNull();
     expect(ask("GET", "/api/bots", false)).toEqual({
       status: 401,
-      error: "pair this device from Phone settings in OpenMausBot on your computer",
+      error: "pair this device from Remote access settings on the host computer",
     });
     expect(ask("POST", "/api/files", false)?.status).toBe(401);
   });
@@ -40,6 +40,7 @@ describe("what the app may do", () => {
     ["GET", "/api/config"],
     ["GET", "/api/events"],
     ["GET", "/api/instances"],
+    ["GET", "/api/team-map"],
     ["GET", "/api/companion/endpoints"],
     ["GET", "/api/bots"],
     ["POST", "/api/bots"],
@@ -115,15 +116,15 @@ describe("what it may not", () => {
     ] as Array<[string, string]>) {
       const denial = ask(method, path);
       expect(denial?.status, `${method} ${path}`).toBe(403);
-      expect(denial?.error, `${method} ${path}`).toMatch(/on your computer/);
+      expect(denial?.error, `${method} ${path}`).toMatch(/on (?:your|the host) computer/);
     }
     expect(ask("GET", "/api/devices")).toEqual({
       status: 403,
-      error: "Phone settings are managed on your computer",
+      error: "Remote access settings are managed on the host computer",
     });
     expect(ask("GET", "/api/companion")).toEqual({
       status: 403,
-      error: "Phone settings are managed on your computer",
+      error: "Remote access settings are managed on the host computer",
     });
   });
 

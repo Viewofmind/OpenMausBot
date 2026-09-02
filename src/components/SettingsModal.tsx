@@ -3,7 +3,7 @@
 // is the stuff shared by every bot: who you are, your keys, and the
 // machine your bots can borrow.
 import { useEffect, useRef, useState } from "react";
-import { Coins, FlaskConical, Globe, KeyRound, Laptop, Monitor, Search, Smartphone, Terminal, Trash2, User, X } from "lucide-react";
+import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, X } from "lucide-react";
 import { api, useStore, type AppSettingsSection, type ConfigStatus } from "@/state/store";
 import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
 import { builtInBrowserEnabled, showToolCallsEnabled, skillRecorderEnabled } from "@/lib/feature-flags";
@@ -35,9 +35,8 @@ const SECTIONS: Array<{
   { id: "experimental", label: "Experimental", icon: FlaskConical, keywords: ["early", "preview", "teach", "skill", "browser", "profiles"] },
   { id: "connections", label: "Connections", icon: KeyRound, keywords: ["keys", "api", "composio", "box", "xai", "vps"] },
   { id: "engines", label: "Engines", icon: Terminal, keywords: ["models", "claude", "grok", "providers", "cli"] },
-  { id: "companion", label: "Phone", icon: Smartphone, keywords: ["companion", "phone", "pair", "pairing", "mobile", "https", "secure", "tailscale", "wifi", "advanced"] },
-  { id: "remote", label: "Remote computer", icon: Laptop, keywords: ["desktop", "client", "host", "pair", "tailscale", "remote"] },
-  { id: "computer", label: "Computers", icon: Monitor, keywords: ["vm", "virtual", "desktop", "cloud", "box", "sleep"] },
+  { id: "companion", label: "Remote access", icon: TabletSmartphone, keywords: ["companion", "device", "phone", "desktop", "client", "host", "pair", "pairing", "mobile", "https", "secure", "tailscale", "wifi", "remote", "advanced"] },
+  { id: "computer", label: "Local VM", icon: Monitor, keywords: ["vm", "virtual", "desktop"] },
   { id: "usage", label: "Usage", icon: Coins, keywords: ["tokens", "cost", "billing"] },
 ];
 
@@ -517,14 +516,15 @@ function DiagnosticsRow() {
 export function SettingsModal() {
   const { state, dispatch } = useStore();
   const remoteActive = window.ogb?.remoteClient?.active === true;
-  const section: AppSettingsSection = remoteActive ? "remote" : state.appSettingsSection;
+  const section: AppSettingsSection =
+    remoteActive || state.appSettingsSection === "remote" ? "companion" : state.appSettingsSection;
   const dialogRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
-  const visibleSections = SECTIONS.filter((entry) => (!remoteActive || entry.id === "remote") && sectionMatches(entry, q));
+  const visibleSections = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
 
   useEffect(() => {
-    const visible = SECTIONS.filter((entry) => (!remoteActive || entry.id === "remote") && sectionMatches(entry, q));
+    const visible = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
     if (visible.some((entry) => entry.id === section)) return;
     const first = visible[0];
     if (first) dispatch({ type: "toggleAppSettings", open: true, section: first.id });
@@ -700,9 +700,12 @@ export function SettingsModal() {
               </Card>
             )}
 
-            {section === "companion" && <CompanionSection profileEmail={state.config?.profile?.email} />}
-
-            {section === "remote" && <RemoteComputerSection />}
+            {section === "companion" && (
+              <>
+                <RemoteComputerSection />
+                {!remoteActive && <CompanionSection profileEmail={state.config?.profile?.email} />}
+              </>
+            )}
 
             {section === "computer" && <LocalComputerSection />}
 

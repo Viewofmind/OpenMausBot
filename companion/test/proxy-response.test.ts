@@ -106,7 +106,7 @@ describe("preparing a harness response for a device", () => {
         const { status, text } = await device(`/api/bots/b1/computer/${action}`, "POST");
         expect(status).toBe(403);
         expect(text).toContain("enable it in OpenMausBot");
-        expect(text).toContain("Settings → Phone");
+        expect(text).toContain("Settings → Remote access");
       }
     } finally {
       cloudDesktopAccess = true;

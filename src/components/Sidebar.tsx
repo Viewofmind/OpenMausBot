@@ -978,6 +978,7 @@ function ArchivedBotsPanel({
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const { capabilities } = useDesktopCapabilities();
   const importReturnRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -1611,7 +1612,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
       <div className={cn("pb-3 pt-2", density === "icons" ? "px-2" : "px-3")}>
         {density === "icons" && (
           <>
-        <button
+          <button
             onClick={() => dispatch({ type: "showTeamMap" })}
             aria-label={density === "icons" ? "Team map" : undefined}
             title={density === "icons" ? "Team map" : undefined}
@@ -1624,7 +1625,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
           </button>
-          {skillRecorderEnabled(state.config) && (
+          {!remoteClient && skillRecorderEnabled(state.config) && (
             <button
               onClick={() => dispatch({ type: "showSkillRecorder" })}
               aria-label={density === "icons" ? "Teach a skill" : undefined}
@@ -1682,7 +1683,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                 active: state.activeView === "team-map",
                 onSelect: () => dispatch({ type: "showTeamMap" }),
               },
-              ...(skillRecorderEnabled(state.config)
+              ...(!remoteClient && skillRecorderEnabled(state.config)
                 ? [
                     {
                       key: "skill-recorder",

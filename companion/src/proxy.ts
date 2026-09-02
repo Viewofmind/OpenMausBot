@@ -283,7 +283,7 @@ export function createProxyHandler(options: ProxyOptions) {
     // The computer owner enables this capability per device, off by default.
     if (isCloudDesktopAccess(method, path) && !device?.cloudDesktopAccess) {
       return sendJson(res, 403, {
-        error: "cloud desktop access is off for this phone — enable it in OpenMausBot → Settings → Phone",
+        error: "cloud desktop access is off for this device — enable it in OpenMausBot → Settings → Remote access",
       });
     }
 
@@ -408,7 +408,7 @@ export function createProxyHandler(options: ProxyOptions) {
           if (tracksDeviceConnection && currentDevice?.id !== device?.id) {
             harness.destroy();
             return sendJson(res, 401, {
-              error: "pair this device from Phone settings in OpenMausBot on your computer",
+              error: "pair this device from Remote access settings on the host computer",
             });
           }
           const disconnect = () => {

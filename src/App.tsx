@@ -7,6 +7,7 @@ import { Sidebar } from "@/components/Sidebar";
 import { ChatView } from "@/components/ChatView";
 import { GroupView } from "@/components/GroupView";
 import { SettingsPanel } from "@/components/SettingsPanel";
+import { RemoteAgentSettingsPanel } from "@/components/RemoteAgentSettingsPanel";
 import { PluginsPanel, preloadConnectedApps } from "@/components/PluginsPanel";
 import { ComputerPanel } from "@/components/ComputerPanel";
 import { RemoteDesktopPanel } from "@/components/remote-desktop-panel";
@@ -251,7 +252,7 @@ function Shell() {
         <TeamMapPage />
       ) : state.activeView === "routines" ? (
         <RoutinesPage onBack={closeCalendar} onOpenRoom={openCalendarRoom} />
-      ) : state.activeView === "skill-recorder" ? (
+      ) : !remoteClient && state.activeView === "skill-recorder" ? (
         <SkillRecorderPage />
       ) : !remoteClient && browserWorkspaceBotId && bot && bot.id === browserWorkspaceBotId ? (
         <BrowserWorkspace bot={bot} onClose={closeBrowserWorkspace} />
@@ -281,7 +282,11 @@ function Shell() {
           )}
         </main>
       )}
-      {!remoteClient && state.settingsOpen && bot && <SettingsPanel bot={bot} />}
+      {state.settingsOpen && bot && (
+        remoteClient
+          ? <RemoteAgentSettingsPanel bot={bot} />
+          : <SettingsPanel bot={bot} />
+      )}
       {state.computerOpen && bot && (
         remoteClient ? (
           <RemoteDesktopPanel key={bot.id} bot={bot} />

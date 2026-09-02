@@ -17,9 +17,11 @@ const SAMPLE = "Morning. Overnight the tests went green, and I left two notes fo
 export function VoiceSettings({
   bot,
   onPatch,
+  workspaceConfigurationLocked = false,
 }: {
   bot: Bot;
   onPatch: (patch: Partial<Pick<Bot, "voice" | "speakReplies">>) => void;
+  workspaceConfigurationLocked?: boolean;
 }) {
   const { state, dispatch } = useStore();
   const tts = state.config?.tts;
@@ -34,8 +36,10 @@ export function VoiceSettings({
   const { capabilities } = useDesktopCapabilities();
   // Built-in voices are offered where the desktop contract says they exist —
   // never inferred from a user agent.
-  const systemVoicesAvailable = capabilities.host.platform === "darwin";
   const provider = tts?.provider ?? "elevenlabs";
+  const systemVoicesAvailable = workspaceConfigurationLocked
+    ? provider === "system"
+    : capabilities.host.platform === "darwin";
   const configured = Boolean(tts?.configured);
 
   useEffect(() => {
@@ -96,15 +100,17 @@ export function VoiceSettings({
     <div className="rounded-xl bg-card p-4">
       <div className="text-[15px] font-medium text-ink">Voice</div>
       <div className="mt-0.5 text-[13px] text-ink-secondary">
-        Give this agent a voice for calls and spoken replies. The voice choice belongs to this agent;
-        {provider === "system"
-          ? systemVoicesAvailable
-            ? " the voices are the ones already installed on this Mac."
-            : " built-in Mac voices are unavailable here. Switch to ElevenLabs to keep using voice."
-          : " the ElevenLabs key is shared by the workspace."}
+        {workspaceConfigurationLocked
+          ? "Choose this agent’s voice and spoken-reply preference. The voice engine and credentials are managed on the host."
+          : <>Give this agent a voice for calls and spoken replies. The voice choice belongs to this agent;
+              {provider === "system"
+                ? systemVoicesAvailable
+                  ? " the voices are the ones already installed on this Mac."
+                  : " built-in Mac voices are unavailable here. Switch to ElevenLabs to keep using voice."
+                : " the ElevenLabs key is shared by the workspace."}</>}
       </div>
 
-      {(systemVoicesAvailable || provider === "system") && (
+      {!workspaceConfigurationLocked && (systemVoicesAvailable || provider === "system") && (
         <div className="mt-4">
           <div className="mb-2 text-[13px] text-ink-secondary">Voice engine</div>
           <div className="inline-flex rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice engine">
@@ -132,7 +138,7 @@ export function VoiceSettings({
         </div>
       )}
 
-      {provider === "elevenlabs" && (
+      {!workspaceConfigurationLocked && provider === "elevenlabs" && (
         <div className="mt-4">
         <div className="mb-1.5 flex items-center gap-2 text-[13px] text-ink-secondary">
           <span className={cn("size-1.5 rounded-full", configured ? "bg-success" : "bg-raised-hover")} />
