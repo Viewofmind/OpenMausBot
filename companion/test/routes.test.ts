@@ -60,6 +60,7 @@ describe("what the app may do", () => {
     ["POST", "/api/bots/bot_123/computer/join"],
     ["POST", "/api/bots/bot_123/secret-cards/message_1/provide"],
     ["POST", "/api/bots/bot_123/computer/control"],
+    ["POST", "/api/bots/bot_123/computer/screenshot"],
     ["POST", "/api/bots/bot_123/computer/viewer-close"],
     ["POST", "/api/groups/room-1/messages"],
     ["POST", "/api/groups/room-1/read"],
@@ -84,6 +85,8 @@ describe("what the app may do", () => {
     ["PATCH", "/api/routines/routine_1"],
     ["DELETE", "/api/routines/routine_1"],
     ["POST", "/api/routines/routine_1/run"],
+    ["POST", "/api/routine-runs/run_1/cancel"],
+    ["POST", "/api/routine-runs/run_1/seen"],
     ["GET", "/api/connectors/catalog"],
     ["GET", "/api/connectors/connected"],
     ["GET", "/api/connectors"],
@@ -155,9 +158,10 @@ describe("what it may not", () => {
     expect(ask("GET", "/index.html")?.status).toBe(404);
   });
 
-  it("opens only a fresh cloud viewer, not the cloud computer control API", () => {
+  it("opens and previews only an explicitly granted cloud viewer", () => {
     expect(allowed("POST", "/api/bots/bot_123/computer/join")).toBe(true);
     expect(allowed("POST", "/api/bots/bot_123/computer/control")).toBe(true);
+    expect(allowed("POST", "/api/bots/bot_123/computer/screenshot")).toBe(true);
     expect(allowed("POST", "/api/bots/bot_123/computer/viewer-close")).toBe(true);
     expect(allowed("GET", "/api/bots/bot_123/computer")).toBe(false);
     expect(allowed("GET", "/api/bots/bot_123/computer/control")).toBe(false);
@@ -165,7 +169,6 @@ describe("what it may not", () => {
     expect(allowed("POST", "/api/bots/bot_123/computer/provision")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/sleep")).toBe(false);
     expect(allowed("POST", "/api/bots/bot_123/computer/exec")).toBe(false);
-    expect(allowed("POST", "/api/bots/bot_123/computer/screenshot")).toBe(false);
   });
 
   it("allows only the exact encrypted credential submission verb", () => {
@@ -196,7 +199,8 @@ describe("what it may not", () => {
     expect(allowed("GET", "/api/attachments/../config.json")).toBe(false);
     expect(allowed("GET", "/api/files")).toBe(false);
     expect(allowed("POST", "/api/files/anything")).toBe(false);
-    expect(allowed("POST", "/api/routine-runs/run_1/cancel")).toBe(false);
+    expect(allowed("GET", "/api/routine-runs/run_1/cancel")).toBe(false);
+    expect(allowed("POST", "/api/routine-runs/run_1/retry")).toBe(false);
     expect(allowed("DELETE", "/api/connectors/slack")).toBe(false);
     expect(allowed("GET", "/api/connectors/connected/all")).toBe(false);
     // revocation is a Mac-only affordance: the phone can list and add

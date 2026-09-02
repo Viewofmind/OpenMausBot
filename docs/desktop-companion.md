@@ -31,9 +31,11 @@ To switch that installation back, open **Settings → Remote computer** and choo
 
 A desktop client can open an agent's self-hosted VPS display through either paired transport. On the host, enable **Cloud desktop access** for that paired desktop in **Settings → Phone**. On the client, open the bot's **Computer** panel and choose **Take control**.
 
-The VPS still publishes no VNC port. The host opens its existing loopback-only SSH tunnel, the companion creates a random device-scoped viewer path, and the client relays noVNC HTTP and WebSocket traffic through its loopback Electron service. Closing the viewer removes the companion session, closes the SSH tunnel, and hands control back to the agent.
+The Computer panel also shows a periodically refreshed VPS screenshot. Preview and live control share the same per-device permission, which defaults off. The VPS still publishes no VNC port. The host opens its existing loopback-only SSH tunnel, the companion creates a random device-scoped viewer path, and the client relays noVNC HTTP and WebSocket traffic through its loopback Electron service. Closing the viewer removes the companion session, closes the SSH tunnel, and hands control back to the agent.
 
-Remote clients can open and close the viewer only. VPS provisioning, replacement, sleep, removal, SSH aliases, Local VM controls, and host browser surfaces remain available only on the host.
+Remote clients can preview, open, and close the viewer only. VPS provisioning, replacement, sleep, removal, SSH aliases, Local VM controls, and host browser surfaces remain available only on the host.
+
+The client Calendar supports scheduled routines end to end: create, edit, move, resize, pause, delete, run now, cancel an active run, and acknowledge failures. Scheduled calls and webhooks remain host-only and are omitted from client mode.
 
 The host must be running and awake. Cleartext HTTP is accepted only for a `.ts.net` MagicDNS hostname because that connection is encrypted inside Tailscale's WireGuard tunnel. Raw IP addresses, LAN hostnames, URL credentials, paths, queries, and fragments are rejected.
 

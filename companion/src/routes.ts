@@ -50,7 +50,7 @@ export const MESSAGE_FILE_ROUTE = {
 
 export const CLOUD_DESKTOP_CONTROL_ROUTE = {
   method: "POST",
-  path: /^\/api\/bots\/[\w-]+\/computer\/(?:control|viewer-close)$/,
+  path: /^\/api\/bots\/[\w-]+\/computer\/(?:control|screenshot|viewer-close)$/,
 } as const;
 
 export function isCloudDesktopJoin(method: string, path: string): boolean {
@@ -153,6 +153,7 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "PATCH", path: /^\/api\/routines\/[\w-]+$/ },
   { method: "DELETE", path: /^\/api\/routines\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/routines\/[\w-]+\/run$/ },
+  { method: "POST", path: /^\/api\/routine-runs\/[\w-]+\/(?:cancel|seen)$/ },
 
   // Multi-account Composio management exposes opaque ids and aliases only.
   // Revocation stays on the Mac: the account DELETE route is deliberately

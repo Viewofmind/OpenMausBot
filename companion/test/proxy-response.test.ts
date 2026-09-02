@@ -99,13 +99,15 @@ describe("preparing a harness response for a device", () => {
     }
   });
 
-  it("requires the Mac to enable cloud desktop for this phone", async () => {
+  it("requires the host to enable cloud desktop for viewer and preview requests", async () => {
     cloudDesktopAccess = false;
     try {
-      const { status, text } = await device("/api/bots/b1/computer/join", "POST");
-      expect(status).toBe(403);
-      expect(text).toContain("enable it in OpenMausBot");
-      expect(text).toContain("Settings → Phone");
+      for (const action of ["join", "screenshot"]) {
+        const { status, text } = await device(`/api/bots/b1/computer/${action}`, "POST");
+        expect(status).toBe(403);
+        expect(text).toContain("enable it in OpenMausBot");
+        expect(text).toContain("Settings → Phone");
+      }
     } finally {
       cloudDesktopAccess = true;
     }

@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { Loader2, Monitor, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ImageOff, Loader2, Monitor, X } from "lucide-react";
 
+import { usePageVisible } from "@/lib/page-visible";
 import { api, useStore, type Bot } from "@/state/store";
 
 function viewerAddress(raw: unknown): string {
@@ -9,10 +10,78 @@ function viewerAddress(raw: unknown): string {
   return raw;
 }
 
+export function remoteScreenshotSource(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const frame = raw as { png?: unknown; format?: unknown };
+  if (typeof frame.png !== "string" || !frame.png || !/^[A-Za-z0-9+/=]+$/.test(frame.png)) return null;
+  if (frame.format !== "png" && frame.format !== "jpeg") return null;
+  return `data:${frame.format === "jpeg" ? "image/jpeg" : "image/png"};base64,${frame.png}`;
+}
+
 export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
   const { dispatch } = useStore();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [frame, setFrame] = useState<string | null>(null);
+  const [previewPending, setPreviewPending] = useState(true);
+  const [previewUnavailable, setPreviewUnavailable] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const pageVisible = usePageVisible();
+
+  useEffect(() => {
+    setFrame(null);
+    setPreviewPending(true);
+    setPreviewUnavailable(false);
+  }, [bot.id]);
+
+  useEffect(() => {
+    const viewer = window.ogb?.desktopViewer;
+    if (!viewer) return;
+    let alive = true;
+    void viewer.currentState().then((state) => {
+      if (alive) setViewerOpen(state.open && state.contextId === bot.id);
+    }).catch(() => {});
+    const dispose = viewer.onState((state) => {
+      if (state.contextId === bot.id || !state.open) setViewerOpen(state.open && state.contextId === bot.id);
+    });
+    return () => {
+      alive = false;
+      dispose();
+    };
+  }, [bot.id]);
+
+  useEffect(() => {
+    if (!pageVisible || viewerOpen) return;
+    let alive = true;
+    let requestRunning = false;
+    const shoot = async () => {
+      if (requestRunning) return;
+      requestRunning = true;
+      try {
+        const source = remoteScreenshotSource(await api(`/api/bots/${bot.id}/computer/screenshot`, {
+          method: "POST",
+          body: "{}",
+        }));
+        if (alive && source) {
+          setFrame(source);
+          setPreviewUnavailable(false);
+        } else if (alive) {
+          setPreviewUnavailable(true);
+        }
+      } catch {
+        if (alive) setPreviewUnavailable(true);
+      } finally {
+        if (alive) setPreviewPending(false);
+        requestRunning = false;
+      }
+    };
+    void shoot();
+    const timer = window.setInterval(shoot, bot.busy ? 4_000 : 30_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [bot.busy, bot.id, pageVisible, viewerOpen]);
 
   const open = async () => {
     setPending(true);
@@ -71,10 +140,30 @@ export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
         </button>
       </div>
 
-      <div className="flex flex-1 flex-col items-center justify-center gap-4 px-8 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-control text-ink-secondary">
-          <Monitor size={26} />
-        </div>
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+        <button
+          type="button"
+          onClick={() => void open()}
+          disabled={pending || !frame}
+          className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-hairline bg-black disabled:cursor-default"
+          aria-label={frame ? `Open ${bot.name}'s live desktop` : "VPS preview unavailable"}
+        >
+          {frame ? (
+            <img src={frame} alt={`${bot.name}'s VPS desktop preview`} className="h-full w-full object-contain" />
+          ) : previewPending ? (
+            <Loader2 size={22} className="animate-spin text-ink-secondary" />
+          ) : (
+            <div className="flex flex-col items-center gap-2 text-ink-secondary">
+              <ImageOff size={24} />
+              <span className="text-[11px]">{previewUnavailable ? "Preview unavailable" : "Waiting for preview"}</span>
+            </div>
+          )}
+          {frame && (
+            <span className="absolute inset-x-0 bottom-0 bg-black/65 py-2 text-[11px] font-medium text-white opacity-0 transition-opacity group-hover:opacity-100">
+              Open live desktop
+            </span>
+          )}
+        </button>
         <div>
           <div className="text-[14px] font-medium text-ink">Open the live desktop</div>
           <p className="mt-2 text-[12px] leading-relaxed text-ink-secondary">
