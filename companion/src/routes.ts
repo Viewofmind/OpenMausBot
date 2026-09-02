@@ -89,6 +89,7 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // unlike the desktop's broad PATCH it cannot alter execution policy.
   { method: "POST", path: /^\/api\/sidebar-sections$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages$/ },
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/respond$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/always-allow$/ },

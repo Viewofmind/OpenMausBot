@@ -39,7 +39,7 @@ The client Calendar supports scheduled routines end to end: create, edit, move, 
 
 The remote Computer panel includes the host panel's per-agent **Scheduled tasks** card. It lists that agent's next routines and active run, opens the full schedule view, and creates a new schedule already assigned to the agent.
 
-Spoken replies and read-aloud audio are synthesized by the host and can play on a Windows client, including when the host uses macOS built-in voices. Dictation and live-call microphone input run on the client itself; the current recognizer is macOS-only, so a Windows client needs a future cross-platform speech-to-text implementation for full voice calls.
+A Mac remote client supports dictation and live calls against a Windows host: Apple Speech runs locally on the Mac, and only the transcript crosses the paired connection. Reply audio is synthesized by the host and relayed back byte for byte. ElevenLabs works on either host platform; built-in system voices currently require the host itself to be a Mac. A Windows remote client still needs a future Windows speech-to-text implementation for microphone input.
 
 The host must be running and awake. Cleartext HTTP is accepted only for a `.ts.net` MagicDNS hostname because that connection is encrypted inside Tailscale's WireGuard tunnel. Raw IP addresses, LAN hostnames, URL credentials, paths, queries, and fragments are rejected.
 

@@ -269,4 +269,26 @@ describe("preparing a harness response for a device", () => {
     expect(response.headers.get("content-disposition")).toContain("report.json");
     expect(response.headers.get("cache-control")).toBe("private, no-store");
   });
+
+  it("relays generated speech to a paired desktop byte for byte", async () => {
+    const audio = Uint8Array.from([0x49, 0x44, 0x33, 0x00, 0xff, 0x17]);
+    respond = (res) => {
+      res.writeHead(200, {
+        "content-type": "audio/mpeg",
+        "content-length": String(audio.byteLength),
+        "cache-control": "public, max-age=86400",
+      });
+      res.end(audio);
+    };
+
+    const response = await fetch(`http://127.0.0.1:${sidecarPort}/api/tts/speak`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ text: "Hello from the agent" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(audio);
+  });
 });

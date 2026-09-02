@@ -45,6 +45,7 @@ describe("what the app may do", () => {
     ["POST", "/api/bots"],
     ["POST", "/api/sidebar-sections"],
     ["POST", "/api/bots/bot_123/messages"],
+    ["POST", "/api/bots/bot_123/respond"],
     ["POST", "/api/bots/bot_123/interrupt"],
     ["POST", "/api/bots/bot_123/read"],
     ["POST", "/api/bots/bot_123/always-allow"],
