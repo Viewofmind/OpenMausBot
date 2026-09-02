@@ -52,10 +52,6 @@ export function RemoteAgentSettingsPanel({ bot }: { bot: Bot }) {
 
       <div className="flex-1 overflow-y-auto px-5 pb-5">
         <div className="flex flex-col gap-4 pt-4">
-          <div className="rounded-xl bg-inset px-4 py-3 text-[12.5px] leading-relaxed text-ink-secondary">
-            These settings are safe to use from this client. Engines, credentials, computers, and learned skills remain managed on the host.
-          </div>
-
           <VoiceSettings
             bot={bot}
             workspaceConfigurationLocked

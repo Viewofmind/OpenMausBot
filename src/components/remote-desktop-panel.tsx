@@ -237,9 +237,6 @@ export function RemoteDesktopPanel({ bot }: { bot: Bot }) {
               </span>
             )}
           </div>
-          <div className="mt-0.5 text-[13px] text-ink-secondary">
-            Schedule work for {bot.name} using the host&apos;s existing agent setup.
-          </div>
           {activeRoutineRun && (
             <button
               type="button"
