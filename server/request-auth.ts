@@ -100,8 +100,18 @@ export function isSameOrigin(req: IncomingMessage): boolean {
 export function requestSource(req: IncomingMessage): string {
   const peer = req.socket?.remoteAddress || "unknown";
   const viaLocalProxy = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
-  const forwarded = viaLocalProxy ? headerValue(req.headers["x-forwarded-for"])?.split(",")[0]?.trim() : undefined;
-  return forwarded || peer;
+  // The LAST hop is the one the adjacent (trusted, same-machine) proxy wrote;
+  // earlier hops are whatever the client or an outer proxy put there.
+  const hops = viaLocalProxy ? (headerValue(req.headers["x-forwarded-for"]) ?? "").split(",").map((h) => h.trim()).filter(Boolean) : [];
+  const forwarded = hops.length ? hops[hops.length - 1] : undefined;
+  return sanitizeSource(forwarded || peer);
+}
+
+/** Only what an address can contain, bounded, so a hostile header cannot
+ * carry control characters into logs or grow the lockout map without limit. */
+export function sanitizeSource(value: string): string {
+  const clean = value.replace(/[^\w.:%[\]-]/g, "");
+  return (clean || "unknown").slice(0, 64);
 }
 
 /** "Safari on iPhone" beats "Unnamed device" in the sessions list. */
