@@ -79,6 +79,7 @@ describe("what the app may do", () => {
     ["GET", "/api/attachments/avatar-123.webp"],
     ["POST", "/api/files"],
     ["GET", "/api/tts/voices"],
+    ["POST", "/api/tts/prepare"],
     ["POST", "/api/tts/speak"],
     ["GET", "/api/routines"],
     ["POST", "/api/routines"],

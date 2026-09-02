@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { remoteScreenshotSource } from "./remote-desktop-panel";
+import { remoteScreenshotSource } from "@/lib/remote-desktop";
 
 describe("remote VPS preview", () => {
   it("accepts only validated screenshot response shapes", () => {

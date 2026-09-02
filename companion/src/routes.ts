@@ -141,9 +141,10 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // only this exact upload route crosses the companion boundary.
   { method: "POST", path: /^\/api\/files$/ },
 
-  // Renderer-neutral voice operations. Neither route reads or writes the
-  // workspace ElevenLabs key; the phone receives labels or audio only.
+  // Renderer-neutral voice operations. These routes never expose or mutate
+  // the workspace ElevenLabs key; the client receives labels or audio only.
   { method: "GET", path: /^\/api\/tts\/voices$/ },
+  { method: "POST", path: /^\/api\/tts\/prepare$/ },
   { method: "POST", path: /^\/api\/tts\/speak$/ },
 
   // Routines create ordinary tasks using an existing agent configuration.
