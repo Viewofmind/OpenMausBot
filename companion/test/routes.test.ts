@@ -206,7 +206,7 @@ describe("what it may not", () => {
     expect(allowed("POST", "/api/routine-runs/run_1/retry")).toBe(false);
     expect(allowed("DELETE", "/api/connectors/slack")).toBe(false);
     expect(allowed("GET", "/api/connectors/connected/all")).toBe(false);
-    // revocation is a Mac-only affordance: the phone can list and add
+    // revocation is a host-only affordance: a paired client can list and add
     // accounts but the account DELETE route is deliberately not allowed
     expect(allowed("DELETE", "/api/connectors/slack/accounts/ca_123")).toBe(false);
     expect(allowed("PATCH", "/api/groups/room-1")).toBe(false);

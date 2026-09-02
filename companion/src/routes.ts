@@ -159,8 +159,8 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "POST", path: /^\/api\/routine-runs\/[\w-]+\/(?:cancel|seen)$/ },
 
   // Multi-account Composio management exposes opaque ids and aliases only.
-  // Revocation stays on the Mac: the account DELETE route is deliberately
-  // absent — a paired phone can see and add accounts, never remove one.
+  // Revocation stays on the host: the account DELETE route is deliberately
+  // absent — a paired client can see and add accounts, never remove one.
   { method: "GET", path: /^\/api\/connectors\/catalog$/ },
   { method: "GET", path: /^\/api\/connectors\/connected$/ },
   { method: "GET", path: /^\/api\/connectors$/ },

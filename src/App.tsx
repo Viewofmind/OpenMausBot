@@ -301,7 +301,7 @@ function Shell() {
       )}
       {!remoteClient && state.inspectorOpen && bot && <InspectorPanel bot={bot} />}
       {state.appSettingsOpen && <SettingsModal />}
-      {!remoteClient && state.pluginsOpen && <PluginsPanel />}
+      {state.pluginsOpen && <PluginsPanel />}
       {/* mounted after the modals: same z-50 tier, so DOM order keeps the
           palette on top when one of them is open underneath */}
       <CommandPalette onOpenChange={setPaletteOpen} />
