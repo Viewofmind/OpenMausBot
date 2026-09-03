@@ -23,6 +23,17 @@ function routineScheduleLabel(routine: Routine) {
       minute: "2-digit",
     });
   }
+  if (routine.schedule.type === "interval") {
+    const cadence = routine.schedule.everyMinutes % 60 === 0
+      ? `Every ${routine.schedule.everyMinutes / 60} hr`
+      : `Every ${routine.schedule.everyMinutes} min`;
+    return `${cadence} · starting ${new Date(routine.schedule.anchorAt).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    })}`;
+  }
   const days = routine.schedule.weekdays;
   const cadence =
     days.length === 7
