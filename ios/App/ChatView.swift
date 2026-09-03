@@ -43,6 +43,7 @@ struct ChatView: View {
     @State private var fileOpenError: String?
     @State private var filePreview: FilePreviewItem?
     @State private var fileDownloadTask: Task<Void, Never>?
+    @State private var fileDownloadRequestID: UUID?
     @State private var acceptsNextHardwareLineBreak = false
     @FocusState private var composerFocused: Bool
     @StateObject private var dictation = SpeechDictation()
@@ -320,9 +321,15 @@ struct ChatView: View {
             // bit here rather than leaving a badge on an open conversation.
             if unread { Task { await session.markRead(current) } }
         }
+        .onChange(of: threadId) { _, _ in
+            // ChatView follows a bot when its active task changes. A download
+            // started in the previous task must not open a sheet (or surface
+            // its error) in the new one when the network reply arrives late.
+            resetFilePreview()
+        }
         .onDisappear {
             dictation.stop()
-            fileDownloadTask?.cancel()
+            resetFilePreview()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { dictation.stop() }
@@ -891,30 +898,55 @@ struct ChatView: View {
 
     private func openFile(path: String, from message: Message) {
         fileDownloadTask?.cancel()
+        let requestID = UUID()
+        fileDownloadRequestID = requestID
+        let requestedThreadID = threadId
         fileOpenError = nil
         let name = URL(fileURLWithPath: path).lastPathComponent
         openingFileName = name.isEmpty ? "file" : name
         let task = Task {
             let downloaded = await session.downloadFile(
-                threadId: threadId,
+                threadId: requestedThreadID,
                 messageId: message.id,
                 path: path
             )
-            guard !Task.isCancelled else { return }
+            if let downloaded, let preview = FilePreviewItem(downloaded: downloaded) {
+                // Own the temporary file before checking cancellation so an
+                // old link tap cannot strand it between Session and the sheet.
+                guard !Task.isCancelled, fileDownloadRequestID == requestID else {
+                    preview.cleanUp()
+                    return
+                }
+                openingFileName = nil
+                filePreview?.cleanUp()
+                filePreview = preview
+                fileDownloadRequestID = nil
+                fileDownloadTask = nil
+                return
+            }
+            guard !Task.isCancelled, fileDownloadRequestID == requestID else { return }
             openingFileName = nil
-            guard let downloaded, downloaded.localURL != nil else {
+            fileDownloadRequestID = nil
+            fileDownloadTask = nil
+            guard downloaded != nil else {
                 fileOpenError = session.actionError ?? "Couldn't open that file. Try again."
                 session.actionError = nil
                 return
             }
-            filePreview?.cleanUp()
-            guard let preview = FilePreviewItem(downloaded: downloaded) else {
-                fileOpenError = "The downloaded file couldn't be previewed."
-                return
-            }
-            filePreview = preview
+            fileOpenError = "The downloaded file couldn't be previewed."
         }
         fileDownloadTask = task
+    }
+
+    /// End the preview lifecycle owned by the task that just left the screen.
+    private func resetFilePreview() {
+        fileDownloadTask?.cancel()
+        fileDownloadTask = nil
+        fileDownloadRequestID = nil
+        openingFileName = nil
+        fileOpenError = nil
+        filePreview?.cleanUp()
+        filePreview = nil
     }
 
     // MARK: - Composer
@@ -1164,6 +1196,12 @@ struct MessageRow: View {
         session.state.versions(of: message, inThread: chat.threadId)
     }
 
+    /// Transport tags contain paths on the paired computer. They belong in
+    /// attachment cards, never on the clipboard or in the text-selection UI.
+    private var attachedContent: AttachedMessageContent {
+        AttachedMessageContent.parse(message.text ?? "")
+    }
+
     var body: some View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
             content
@@ -1213,20 +1251,27 @@ struct MessageRow: View {
                     Task { await session.react(to: message, in: chat.threadId, emoji: emoji) }
                 }
             }
-            if let text = message.text, !text.isEmpty {
+            let visibleText = attachedContent.text
+            if !visibleText.isEmpty {
                 Divider()
                 Button("Copy", systemImage: "doc.on.doc") {
-                    PlatformBridge.copyToPasteboard(text)
+                    PlatformBridge.copyToPasteboard(visibleText)
                 }
             }
             // Copy above takes the whole reply. Selection happens in a sheet
             // because long-press on the bubble already opens this menu.
-            if let body = message.text, !body.isEmpty {
+            if !visibleText.isEmpty {
                 Button("Select Text", systemImage: "selection.pin.in.out") {
-                    selecting = SelectableText(text: body)
+                    selecting = SelectableText(text: visibleText)
                 }
             }
-            if message.role == .user, message.kind == .text, case let .bot(bot) = chat {
+            // An attachment edit cannot faithfully reconstruct the upload.
+            // Hiding this action is safer than silently dropping the file or
+            // sending its computer-local transport path back as prose.
+            if message.role == .user,
+               message.kind == .text,
+               attachedContent.attachments.isEmpty,
+               case let .bot(bot) = chat {
                 Divider()
                 Button("Edit and retry", systemImage: "pencil") {
                     editingText = message.text ?? ""
@@ -1416,18 +1461,10 @@ struct TextBubble: View {
                 } else if mine {
                     let shared = attachedContent
                     ForEach(Array(shared.attachments.enumerated()), id: \.offset) { _, attachment in
-                        Label(
-                            attachment.name,
-                            systemImage: attachment.kind == .image ? "photo" : "doc"
-                        )
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .foregroundStyle(BubbleColor.mineText.opacity(0.82))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(BubbleColor.mineText.opacity(0.10), in: Capsule())
-                        .accessibilityLabel(
-                            "\(attachment.kind == .image ? "Image" : "File"): \(attachment.name)"
+                        TranscriptAttachmentView(
+                            attachment: attachment,
+                            threadId: chat.threadId,
+                            messageId: message.id
                         )
                     }
                     if !shared.text.isEmpty {

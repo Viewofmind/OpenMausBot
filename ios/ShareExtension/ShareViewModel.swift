@@ -268,7 +268,11 @@ final class ShareViewModel: ObservableObject {
                             uploadId: attachment.id.uuidString
                         )
                     }
-                    uploaded.append(SharedAttachmentReference(path: path, kind: .image))
+                    uploaded.append(SharedAttachmentReference(
+                        path: path,
+                        kind: .image,
+                        displayName: attachment.name
+                    ))
                 case .file:
                     let uploadedFile = try await withFailover(
                         requestTimeout: 20,
