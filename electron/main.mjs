@@ -82,7 +82,7 @@ const {
   decodeBrowserLifecycleMessage,
 } = require("./browser-control-sync.cjs");
 const { createCuaConnectionStore: createDescriptorStore } = require("./cua-connection.cjs");
-const { normalizeUnreadCount, parseWindowState, resolveWindowState } = require("./window-state.cjs");
+const { MIN_BOUNDS, normalizeUnreadCount, parseWindowState, resolveWindowState } = require("./window-state.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 127.0.0.1 explicitly — vite binds IPv4; a bare "localhost" here can
@@ -1528,8 +1528,8 @@ function createWindow() {
   const restored = resolveWindowState(readWindowState(), displays.map((display) => display.workArea));
   const win = new BrowserWindow({
     ...restored.bounds,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: MIN_BOUNDS.width,
+    minHeight: MIN_BOUNDS.height,
     // The renderer restores its persisted skin before mounting React and
     // mirrors it over desktop:skin. Keep Windows hidden until that handshake
     // recolors the native caption-button overlay, otherwise a saved light
