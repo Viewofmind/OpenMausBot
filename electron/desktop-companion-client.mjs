@@ -18,6 +18,16 @@ const DEVICE_ID = /^[0-9a-f-]{36}$/i;
 const PAIRING_CODE = /^\d{6}$/;
 const MAX_ERROR_BYTES = 64 * 1024;
 
+/** Keep Electron's trusted-renderer boundary and companion client marker
+ * together. The former was added upstream after client mode shipped; losing
+ * either argument makes the renderer unsafe or makes a live relay look local. */
+export function desktopCompanionRendererArguments(localOrigin, remoteAccess) {
+  return [
+    `--omb-local-origin=${localOrigin}`,
+    ...(remoteAccess ? ["--openmausbot-remote-client"] : []),
+  ];
+}
+
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",

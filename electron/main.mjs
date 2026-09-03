@@ -56,6 +56,7 @@ import {
 } from "./phone-secret-identity.mjs";
 import {
   desktopCompanionAccess,
+  desktopCompanionRendererArguments,
   pairDesktopCompanion,
   startDesktopCompanionRelay,
   withDesktopCompanionAccess,
@@ -1661,7 +1662,11 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, "preload.cjs"),
       // The preload exposes the full bridge only to this origin (see preload.cjs).
-      additionalArguments: [`--omb-local-origin=${rendererOrigin()}`],
+      // Companion client mode still serves the bundled UI from its own
+      // loopback relay, so it is a trusted local page while also needing the
+      // renderer's remote-only feature gates. Keep the two facts independent:
+      // upstream's origin boundary must not erase the client-mode marker.
+      additionalArguments: desktopCompanionRendererArguments(rendererOrigin(), desktopRemoteAccess),
     },
   });
   mainWindow = win;

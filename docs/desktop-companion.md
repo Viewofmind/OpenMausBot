@@ -7,6 +7,13 @@ Every OpenMausBot desktop build can play either role:
 
 The roles are platform-independent. A Windows, macOS, or Ubuntu build can host, and any other desktop build can be its client. One app installation uses one role at a time; disconnecting a client returns that installation to host mode without deleting its local host data.
 
+This mode is separate from the desktop app's **Server** menu. The Server menu
+loads a remote server's web UI directly using that server's browser session.
+Desktop companion mode instead keeps the bundled UI and native integrations on
+the client, sends API traffic through the default-deny companion boundary, and
+provides the per-device VPS viewer and client-local Mac voice behavior described
+below. The two connection types intentionally do not share credentials.
+
 ## Pair over secure HTTPS
 
 1. On the host, open **Settings → Remote access** and finish **Secure HTTPS pairing**.

@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   DESKTOP_COMPANION_FIELD,
   desktopCompanionAccess,
+  desktopCompanionRendererArguments,
   desktopCompanionProxyTarget,
   normalizeTailscaleCompanionEndpoint,
   normalizeDesktopCompanionEndpoint,
@@ -37,6 +38,16 @@ afterEach(async () => {
 });
 
 describe("desktop companion endpoint", () => {
+  it("preserves the local-origin boundary while marking companion client mode", () => {
+    expect(desktopCompanionRendererArguments("http://127.0.0.1:8799", null)).toEqual([
+      "--omb-local-origin=http://127.0.0.1:8799",
+    ]);
+    expect(desktopCompanionRendererArguments("http://127.0.0.1:8798", access)).toEqual([
+      "--omb-local-origin=http://127.0.0.1:8798",
+      "--openmausbot-remote-client",
+    ]);
+  });
+
   it("accepts managed HTTPS and cleartext only for Tailscale MagicDNS", () => {
     expect(normalizeTailscaleCompanionEndpoint("host.example-tailnet.ts.net")).toBe(
       "http://host.example-tailnet.ts.net:8810",
