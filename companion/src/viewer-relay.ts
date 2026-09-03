@@ -127,6 +127,12 @@ export class CompanionViewerRelay {
     }
   }
 
+  closeDevice(deviceId: string): void {
+    for (const session of this.#sessions.values()) {
+      if (session.deviceId === deviceId) this.#remove(session);
+    }
+  }
+
   rewriteJoinResponse(path: string, value: unknown, deviceId?: string): unknown {
     const botId = BOT_JOIN_PATH.exec(path)?.[1];
     if (!botId || !value || typeof value !== "object" || Array.isArray(value)) return value;

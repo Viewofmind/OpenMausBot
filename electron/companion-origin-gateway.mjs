@@ -253,6 +253,7 @@ export function createCompanionOriginGateway({
   isTargetAlive = () => true,
   createServer = http.createServer,
   request = http.request,
+  upstreamTimeoutMs = 30_000,
 } = {}) {
   if (!validCompanionOriginTarget(target)) {
     throw new Error("The companion origin target is invalid");
@@ -270,8 +271,10 @@ export function createCompanionOriginGateway({
         method: incoming.method,
         path: incoming.url,
         socketPath: target.socketPath,
+        timeout: upstreamTimeoutMs,
       },
       (response) => {
+        upstream.setTimeout(0);
         if (!accepting || !isTargetAlive(target)) {
           response.destroy();
           return unavailable(outgoing);
@@ -289,6 +292,7 @@ export function createCompanionOriginGateway({
         response.pipe(outgoing);
       },
     );
+    upstream.once("timeout", () => upstream.destroy(new Error("companion origin timed out")));
     upstream.once("error", () => unavailable(outgoing));
     incoming.once("aborted", () => upstream.destroy());
     outgoing.once("close", () => upstream.destroy());
@@ -298,26 +302,32 @@ export function createCompanionOriginGateway({
     if (!accepting || !isTargetAlive(target)) return socket.destroy();
     const headers = upgradeHeaders(incoming.headers);
     if (!headers || incoming.method !== "GET") return socket.destroy();
+    upgradedSockets.add(socket);
+    let remoteSocket = null;
+    const release = () => {
+      upgradedSockets.delete(socket);
+      if (remoteSocket) upgradedSockets.delete(remoteSocket);
+    };
+    socket.once("close", release);
     const upstream = request({
       headers,
       method: "GET",
       path: incoming.url,
       socketPath: target.socketPath,
+      timeout: upstreamTimeoutMs,
     });
+    upstream.once("timeout", () => upstream.destroy(new Error("companion origin upgrade timed out")));
     upstream.once("upgrade", (response, remote, remoteHead) => {
+      upstream.setTimeout(0);
+      remote.setTimeout(0);
       if (!accepting || !isTargetAlive(target)) {
         remote.destroy();
         socket.destroy();
         return;
       }
       writeUpgrade(socket, response);
-      upgradedSockets.add(socket);
+      remoteSocket = remote;
       upgradedSockets.add(remote);
-      const release = () => {
-        upgradedSockets.delete(socket);
-        upgradedSockets.delete(remote);
-      };
-      socket.once("close", release);
       remote.once("close", release);
       if (head.length) remote.write(head);
       if (remoteHead.length) socket.write(remoteHead);

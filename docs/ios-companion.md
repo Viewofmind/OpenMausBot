@@ -112,7 +112,7 @@ not belong in the message database.
 
 The QR code is still the primary path on the same Wi-Fi. If it is unavailable,
 the user can open **Other ways to connect** and choose a nearby computer or
-enter the address shown in desktop Phone settings. Nearby discovery does not
+enter the address shown in desktop Settings → Remote access. Nearby discovery does not
 run until the user opens that fallback.
 
 Nearby discovery uses Bonjour and direct LAN traffic. Use it only on a network

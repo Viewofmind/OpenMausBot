@@ -634,5 +634,6 @@ export function createProxyHandler(options: ProxyOptions) {
     const device = options.authenticate(token);
     viewers.handleUpgrade(req, socket, head, device);
   };
+  handle.disconnectDevice = (deviceId: string): void => viewers.closeDevice(deviceId);
   return handle;
 }

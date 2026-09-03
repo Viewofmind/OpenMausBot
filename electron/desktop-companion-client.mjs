@@ -231,7 +231,7 @@ export function desktopCompanionProxyTarget(endpoint, requestUrl) {
   return target;
 }
 
-function proxyApi(req, res, access) {
+export function proxyDesktopCompanionApi(req, res, access) {
   const target = desktopCompanionProxyTarget(access.endpoint, req.url);
   const request = target.protocol === "https:" ? httpsRequest : httpRequest;
   const headers = {
@@ -258,6 +258,7 @@ function proxyApi(req, res, access) {
     if (res.headersSent) return res.destroy();
     json(res, 502, { error: error.message || "Could not reach the remote computer" });
   });
+  res.once("close", () => upstream.destroy());
   req.pipe(upstream);
 }
 
@@ -364,7 +365,7 @@ export async function startDesktopCompanionRelay({
       }
       const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
       if (pathname.startsWith("/api/") || pathname.startsWith("/vps-viewer/")) {
-        return proxyApi(req, res, normalized);
+        return proxyDesktopCompanionApi(req, res, normalized);
       }
       return serveStatic(req, res, staticDir);
     });

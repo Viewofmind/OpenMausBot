@@ -1079,7 +1079,7 @@ export function PhoneSetupFlowView({
               <ShieldCheck size={15} /> Pair over Tailscale
             </button>
             <p className="mt-2 text-center text-[11px] leading-relaxed text-ink-secondary">
-              Your iPhone must be signed in to the same tailnet.
+              The other device must be signed in to the same tailnet.
             </p>
           </>
         )}

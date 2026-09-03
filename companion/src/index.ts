@@ -169,7 +169,10 @@ const control = createControlServer({
   },
   discovery: () => ({ advertising: mdns.advertising, name: service().name }),
   connectedDeviceIds: connectedDevices.ids,
-  disconnectDevice: connectedDevices.disconnect,
+  disconnectDevice: (deviceId) => {
+    connectedDevices.disconnect(deviceId);
+    proxy.disconnectDevice(deviceId);
+  },
   refreshTailscale: () => refreshTailnetName(),
 });
 

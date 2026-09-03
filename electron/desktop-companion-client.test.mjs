@@ -12,6 +12,7 @@ import {
   normalizeTailscaleCompanionEndpoint,
   normalizeDesktopCompanionEndpoint,
   pairDesktopCompanion,
+  proxyDesktopCompanionApi,
   proxyDesktopCompanionUpgrade,
   startDesktopCompanionRelay,
   withDesktopCompanionAccess,
@@ -188,6 +189,39 @@ describe("desktop companion loopback relay", () => {
       headers: { origin: "http://127.0.0.1:65534" },
     });
     expect(foreignLoopbackOrigin.status).toBe(403);
+  });
+
+  it("closes an outbound event stream when its loopback client disconnects", async () => {
+    let remoteClosed;
+    const remoteClosedPromise = new Promise((resolve) => {
+      remoteClosed = resolve;
+    });
+    const companion = createServer((req, res) => {
+      req.once("close", remoteClosed);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: ready\n\n");
+    });
+    servers.push(companion);
+    const companionPort = await new Promise((resolve) =>
+      companion.listen(0, "127.0.0.1", () => resolve(companion.address().port)));
+
+    const relay = createServer((req, res) => proxyDesktopCompanionApi(
+      req,
+      res,
+      { ...access, endpoint: `http://127.0.0.1:${companionPort}` },
+    ));
+    servers.push(relay);
+    const relayPort = await new Promise((resolve) =>
+      relay.listen(0, "127.0.0.1", () => resolve(relay.address().port)));
+    const response = await fetch(`http://127.0.0.1:${relayPort}/api/events`);
+    const reader = response.body.getReader();
+    expect(await reader.read()).toMatchObject({ done: false });
+    await reader.cancel();
+
+    await expect(Promise.race([
+      remoteClosedPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("outbound SSE stayed open")), 2_000)),
+    ])).resolves.toBeUndefined();
   });
 
   it("injects the paired bearer into a VPS viewer WebSocket without forwarding browser Origin", async () => {

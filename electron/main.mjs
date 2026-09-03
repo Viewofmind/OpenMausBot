@@ -1867,7 +1867,9 @@ function createWindow() {
   }
 
   const remote = activeEnvironment(environmentsState);
-  if (remote) {
+  if (desktopRemoteAccess) {
+    win.loadURL(serverReady ? `http://127.0.0.1:${SERVER_PORT}` : buildErrorPage({ allPortsOccupied: serverStartConflictOnly }));
+  } else if (remote) {
     win.loadURL(remote.origin);
   } else if (app.isPackaged) {
     win.loadURL(serverReady ? `http://127.0.0.1:${SERVER_PORT}` : buildErrorPage({ allPortsOccupied: serverStartConflictOnly }));

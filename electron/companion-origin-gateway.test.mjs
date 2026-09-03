@@ -216,6 +216,47 @@ describe("managed Companion loopback gateway", () => {
     await gateway.close();
   });
 
+  it("invalidates a viewer socket while its upstream upgrade is still pending", async () => {
+    const allocated = endpoint();
+    let receivedUpgrade;
+    const receivedUpgradePromise = new Promise((resolve) => {
+      receivedUpgrade = resolve;
+    });
+    const target = createHttpServer();
+    target.on("upgrade", (_request, socket) => {
+      sockets.push(socket);
+      receivedUpgrade();
+    });
+    servers.push(target);
+    await listen(target, allocated.socketPath);
+
+    const gateway = createCompanionOriginGateway({
+      target: { pid: process.pid, socketPath: allocated.socketPath },
+      originPort: 0,
+      upstreamTimeoutMs: 2_000,
+    });
+    const address = await gateway.start();
+    const socket = createConnection({ host: "127.0.0.1", port: address.port });
+    sockets.push(socket);
+    const closed = new Promise((resolve) => socket.once("close", resolve));
+    socket.once("connect", () => socket.write(
+      "GET /vps-viewer/session/websockify HTTP/1.1\r\n"
+        + `Host: 127.0.0.1:${address.port}\r\n`
+        + "Connection: Upgrade\r\n"
+        + "Upgrade: websocket\r\n"
+        + "Sec-WebSocket-Key: dGVzdA==\r\n"
+        + "Sec-WebSocket-Version: 13\r\n\r\n",
+    ));
+    await receivedUpgradePromise;
+
+    gateway.invalidate();
+    await expect(Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("pending viewer socket stayed open")), 2_000)),
+    ])).resolves.not.toBe("timeout");
+    await gateway.close();
+  });
+
   it("fails closed when the exact sidecar pid is no longer alive", async () => {
     const allocated = endpoint();
     const target = createHttpServer((_request, response) => response.end("must not be reached"));

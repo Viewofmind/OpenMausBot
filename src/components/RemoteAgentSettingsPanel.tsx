@@ -19,23 +19,36 @@ export function RemoteAgentSettingsPanel({ bot }: { bot: Bot }) {
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const avatarInput = useRef<HTMLInputElement>(null);
+  const pendingPatch = useRef<RemoteProfilePatch | null>(null);
+  const patchQueue = useRef<Promise<void> | null>(null);
 
   const close = () => dispatch({ type: "toggleSettings", open: false });
-  const patch = async (next: RemoteProfilePatch) => {
-    if (saving) return;
+  const patch = (next: RemoteProfilePatch): Promise<void> => {
+    pendingPatch.current = { ...pendingPatch.current, ...next };
+    if (patchQueue.current) return patchQueue.current;
     setSaving(true);
     setError("");
-    try {
-      const result: { bot: Bot } = await api(`/api/bots/${bot.id}/profile`, {
-        method: "PATCH",
-        body: JSON.stringify(next),
-      });
-      dispatch({ type: "botPatched", bot: result.bot });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not update this agent.");
-    } finally {
+    const drain = async () => {
+      while (pendingPatch.current) {
+        const current = pendingPatch.current;
+        pendingPatch.current = null;
+        setError("");
+        try {
+          const result: { bot: Bot } = await api(`/api/bots/${bot.id}/profile`, {
+            method: "PATCH",
+            body: JSON.stringify(current),
+          });
+          dispatch({ type: "botPatched", bot: result.bot });
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : "Could not update this agent.");
+        }
+      }
+    };
+    patchQueue.current = drain().finally(() => {
+      patchQueue.current = null;
       setSaving(false);
-    }
+    });
+    return patchQueue.current;
   };
 
   const uploadAvatar = async (file: File | undefined) => {

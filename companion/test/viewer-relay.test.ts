@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -84,12 +84,13 @@ describe("VPS companion viewer relay", () => {
     const wrongPort = await listen(wrongDevice);
     expect((await fetch(`http://127.0.0.1:${wrongPort}${sessionPath}`)).status).toBe(404);
 
+    let clientSocket: Socket | null = null;
     const received = await new Promise<string>((resolve, reject) => {
-      const socket = createConnection({ host: "127.0.0.1", port: sidecarPort });
-      sockets.push(socket);
+      clientSocket = createConnection({ host: "127.0.0.1", port: sidecarPort });
+      sockets.push(clientSocket);
       let text = "";
-      socket.setEncoding("utf8");
-      socket.once("connect", () => socket.write(
+      clientSocket.setEncoding("utf8");
+      clientSocket.once("connect", () => clientSocket?.write(
         `GET /vps-viewer/${sessionId}/websockify HTTP/1.1\r\n`
           + `Host: 127.0.0.1:${sidecarPort}\r\n`
           + "Connection: Upgrade\r\n"
@@ -97,15 +98,22 @@ describe("VPS companion viewer relay", () => {
           + "Sec-WebSocket-Key: dGVzdA==\r\n"
           + "Sec-WebSocket-Version: 13\r\n\r\n",
       ));
-      socket.on("data", (chunk) => {
+      clientSocket.on("data", (chunk) => {
         text += chunk;
         if (text.includes("viewer-ready")) resolve(text);
       });
-      socket.once("error", reject);
-      socket.setTimeout(2_000, () => reject(new Error("viewer WebSocket timed out")));
+      clientSocket.once("error", reject);
+      clientSocket.setTimeout(2_000, () => reject(new Error("viewer WebSocket timed out")));
     });
     expect(received).toContain("101 Switching Protocols");
     expect(received).toContain("viewer-ready");
     expect(upgradedPath).toBe("/websockify");
+
+    const closed = new Promise<void>((resolve) => clientSocket?.once("close", () => resolve()));
+    relay.closeDevice("device-1");
+    await expect(Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("viewer WebSocket stayed open")), 2_000)),
+    ])).resolves.toBeUndefined();
   });
 });

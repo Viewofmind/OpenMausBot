@@ -55,6 +55,10 @@ export function VoiceSettings({
   const configured = usesLocalSystem || hostConfigured;
 
   useEffect(() => {
+    setDeviceVoice(remoteSystemVoice(bot.id));
+  }, [bot.id]);
+
+  useEffect(() => {
     if (usesLocalSystem) {
       const load = () => setVoices(listLocalSystemVoices());
       load();
