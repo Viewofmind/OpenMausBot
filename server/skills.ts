@@ -41,6 +41,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -422,7 +423,10 @@ function removeNativeLinksForUnsafeSkillsRoot(
       const link = join(linkDir, name);
       if (!nativeLinkDirectlyTargetsOwnedSkill(link, root, name, previouslyManaged.includes(name))) continue;
       try {
-        rmSync(link, { recursive: true, force: true });
+        // `rmSync` can silently leave a broken directory symlink behind on
+        // macOS/Node 24. This path was just proven to be an owned symlink, so
+        // unlink it directly and never follow its target.
+        unlinkSync(link);
       } catch {
         retry.add(name);
       }
@@ -473,7 +477,7 @@ export function syncSkillLinks(botId: string): void {
         managed.add(name);
       } else if (nativeLinkDirectlyTargetsOwnedSkill(link, root, name, previouslyManaged.includes(name))) {
         try {
-          rmSync(link, { recursive: true, force: true });
+          unlinkSync(link);
         } catch {
           // Leave an undeletable app link visible for a later repair attempt.
           managed.add(name);

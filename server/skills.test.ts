@@ -206,7 +206,9 @@ describe("install → review → enable lifecycle", () => {
     const userTarget = join(scratch, "replacement");
     mkdirSync(userTarget, { recursive: true });
     const replaced = join(root, ".claude", "skills", "link-safety");
-    rmSync(replaced, { force: true });
+    // Node 24 on macOS reports a directory symlink as EISDIR unless recursive
+    // removal is enabled; rm still unlinks the symlink without following it.
+    rmSync(replaced, { recursive: true, force: true });
     symlinkSync(userTarget, replaced, process.platform === "win32" ? "junction" : "dir");
 
     // The other two app links now point at a missing target and are broken.
@@ -230,7 +232,7 @@ describe("install → review → enable lifecycle", () => {
     });
     expect(existsSync(join(outsideRoot, "escaped"))).toBe(false);
 
-    rmSync(join(root, "skills"), { force: true });
+    rmSync(join(root, "skills"), { recursive: true, force: true });
     mkdirSync(join(root, "skills"));
     const content = SKILL("linked-skill");
     const outsideSkill = join(scratch, "outside-skill");
@@ -282,7 +284,7 @@ describe("install → review → enable lifecycle", () => {
     const userTarget = join(scratch, "user-native-target");
     mkdirSync(userTarget, { recursive: true });
     const userLink = join(root, ".claude", "skills", "root-replaced-user-link");
-    rmSync(userLink, { force: true });
+    rmSync(userLink, { recursive: true, force: true });
     symlinkSync(userTarget, userLink, process.platform === "win32" ? "junction" : "dir");
 
     const outsideRoot = join(scratch, "replacement-skills-user-link");
@@ -614,7 +616,7 @@ describe("staged skill writes", () => {
     const userDirectory = join(scratch, "user-owned-link");
     mkdirSync(userDirectory);
     const claudeLink = join(workspaceDir(bot), ".claude", "skills", "link-owner");
-    rmSync(claudeLink, { force: true });
+    rmSync(claudeLink, { recursive: true, force: true });
     symlinkSync(userDirectory, claudeLink, process.platform === "win32" ? "junction" : "dir");
 
     const staged = stageSkillWrite(bot, {
