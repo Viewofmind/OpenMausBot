@@ -29,6 +29,7 @@ import {
   setSkillEnabled,
   skillsSystemPrompt,
   stageSkillWrite,
+  syncSkillLinks,
 } from "./skills.ts";
 import { parseSkillSource } from "./skill-fetch.ts";
 import { workspaceDir } from "./workspace.ts";
@@ -297,6 +298,30 @@ describe("install → review → enable lifecycle", () => {
     for (const dir of [".agents/skills", ".grok/skills"]) {
       expect(() => lstatSync(join(root, dir, "root-replaced-user-link"))).toThrow();
     }
+  });
+
+  it("does not unlink a regular file swapped in during unsafe-root cleanup", () => {
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SKILL("unsafe-root-race") }]);
+    setSkillEnabled(bot, "unsafe-root-race", true);
+    const root = workspaceDir(bot);
+    const racedLink = join(root, ".agents", "skills", "unsafe-root-race");
+    const outsideRoot = join(scratch, "unsafe-root-race-skills");
+    mkdirSync(join(outsideRoot, "unsafe-root-race"), { recursive: true });
+    rmSync(join(root, "skills"), { recursive: true, force: true });
+    symlinkSync(outsideRoot, join(root, "skills"), process.platform === "win32" ? "junction" : "dir");
+
+    let swapped = false;
+    syncSkillLinks(bot, {
+      beforeRemove: (link) => {
+        if (link !== racedLink || swapped) return;
+        swapped = true;
+        rmSync(link, { recursive: true, force: true });
+        writeFileSync(link, "workspace replacement\n");
+      },
+    });
+
+    expect(swapped).toBe(true);
+    expect(readFileSync(racedLink, "utf8")).toBe("workspace replacement\n");
   });
 
   it("skips a native discovery directory that is a symlink", () => {
@@ -629,6 +654,30 @@ describe("staged skill writes", () => {
     expect(realpathSync(claudeLink)).toBe(realpathSync(userDirectory));
     expect(realpathSync(join(workspaceDir(bot), ".agents", "skills", "link-owner")))
       .toContain(join("skills", ".revisions"));
+  });
+
+  it("does not unlink a regular file swapped in during ordinary link cleanup", () => {
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SKILL("link-cleanup-race") }]);
+    setSkillEnabled(bot, "link-cleanup-race", true);
+    const root = workspaceDir(bot);
+    const racedLink = join(root, ".agents", "skills", "link-cleanup-race");
+    writeFileSync(
+      join(root, "skills", "link-cleanup-race", "SKILL.md"),
+      SKILL("link-cleanup-race", "Changed after review."),
+    );
+
+    let swapped = false;
+    syncSkillLinks(bot, {
+      beforeRemove: (link) => {
+        if (link !== racedLink || swapped) return;
+        swapped = true;
+        rmSync(link, { recursive: true, force: true });
+        writeFileSync(link, "workspace replacement\n");
+      },
+    });
+
+    expect(swapped).toBe(true);
+    expect(readFileSync(racedLink, "utf8")).toBe("workspace replacement\n");
   });
 
   it("refuses a stale update without overwriting the changed skill", () => {

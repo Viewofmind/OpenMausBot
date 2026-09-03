@@ -13,7 +13,7 @@ interface ViewerSession {
   deviceId: string;
   origin: string;
   expiresAt: number;
-  sockets: Set<Duplex>;
+  sockets: Set<{ destroy(): void }>;
 }
 
 const VIEWER_PATH = /^\/vps-viewer\/([A-Za-z0-9_-]{32})(\/.*)?$/;
@@ -119,6 +119,10 @@ export class CompanionViewerRelay {
     this.#sessions.delete(session.id);
     for (const socket of session.sockets) socket.destroy();
     session.sockets.clear();
+  }
+
+  #isActive(session: ViewerSession): boolean {
+    return this.#sessions.get(session.id) === session;
   }
 
   close(deviceId: string, botId: string): void {
@@ -230,12 +234,21 @@ export class CompanionViewerRelay {
     if (!resolved || !headers) return socketError(socket, 404, "viewer session not found");
 
     const upstream = httpRequest(resolved.target, { method: "GET", headers });
+    resolved.session.sockets.add(socket);
+    resolved.session.sockets.add(upstream);
+    socket.once("close", () => resolved.session.sockets.delete(socket));
+    upstream.once("close", () => resolved.session.sockets.delete(upstream));
     upstream.setTimeout(30_000, () => upstream.destroy(new Error("viewer upgrade timed out")));
     upstream.once("upgrade", (response, remote, remoteHead) => {
       upstream.setTimeout(0);
       remote.setTimeout(0);
+      if (!this.#isActive(resolved.session) || socket.destroyed) {
+        remote.destroy();
+        socket.destroy();
+        return;
+      }
+      resolved.session.sockets.delete(upstream);
       acceptUpgrade(socket, response);
-      resolved.session.sockets.add(socket);
       resolved.session.sockets.add(remote);
       const release = () => {
         resolved.session.sockets.delete(socket);

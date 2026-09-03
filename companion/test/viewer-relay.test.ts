@@ -116,4 +116,61 @@ describe("VPS companion viewer relay", () => {
       new Promise((_, reject) => setTimeout(() => reject(new Error("viewer WebSocket stayed open")), 2_000)),
     ])).resolves.toBeUndefined();
   });
+
+  it("closes a viewer removed while its upstream WebSocket handshake is pending", async () => {
+    let handshakeStarted: (() => void) | undefined;
+    const handshake = new Promise<void>((resolve) => {
+      handshakeStarted = resolve;
+    });
+    const viewer = createServer();
+    viewer.on("upgrade", (_req, socket) => {
+      sockets.push(socket);
+      handshakeStarted?.();
+      // Deliberately leave the handshake unanswered until the device is
+      // removed. A late 101 must never resurrect this session.
+    });
+    servers.push(viewer);
+    const viewerPort = await listen(viewer);
+
+    const relay = new CompanionViewerRelay();
+    const rewritten = relay.rewriteJoinResponse(
+      "/api/bots/bot-1/computer/join",
+      { joinUrl: `http://127.0.0.1:${viewerPort}/vnc.html` },
+      "device-1",
+    ) as { joinUrl: string };
+    const sessionId = rewritten.joinUrl.split("/")[2];
+    const sidecar = createServer();
+    sidecar.on("upgrade", (req, socket, head) => relay.handleUpgrade(
+      req,
+      socket,
+      head,
+      { id: "device-1", cloudDesktopAccess: true },
+    ));
+    servers.push(sidecar);
+    const sidecarPort = await listen(sidecar);
+
+    const client = createConnection({ host: "127.0.0.1", port: sidecarPort });
+    sockets.push(client);
+    let response = "";
+    client.setEncoding("utf8");
+    client.on("data", (chunk) => {
+      response += chunk;
+    });
+    client.once("connect", () => client.write(
+      `GET /vps-viewer/${sessionId}/websockify HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${sidecarPort}\r\n`
+        + "Connection: Upgrade\r\n"
+        + "Upgrade: websocket\r\n"
+        + "Sec-WebSocket-Key: dGVzdA==\r\n"
+        + "Sec-WebSocket-Version: 13\r\n\r\n",
+    ));
+    await handshake;
+    const closed = new Promise<void>((resolve) => client.once("close", () => resolve()));
+    relay.closeDevice("device-1");
+    await expect(Promise.race([
+      closed,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("pending viewer stayed open")), 2_000)),
+    ])).resolves.toBeUndefined();
+    expect(response).not.toContain("101 Switching Protocols");
+  });
 });
