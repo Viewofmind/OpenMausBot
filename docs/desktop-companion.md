@@ -39,7 +39,7 @@ The client Calendar supports scheduled routines end to end: create, edit, move, 
 
 The remote Computer panel includes the host panel's per-agent **Scheduled tasks** card. It lists that agent's next routines and active run, opens the full schedule view, and creates a new schedule already assigned to the agent.
 
-A Mac remote client supports dictation and live calls against a Windows host: Apple Speech runs locally on the Mac, and only the transcript crosses the paired connection. Reply audio is synthesized by the host and relayed back byte for byte. ElevenLabs works on either host platform; built-in system voices currently require the host itself to be a Mac. A Windows remote client still needs a future Windows speech-to-text implementation for microphone input.
+A Mac remote client supports dictation and live calls against any host: Apple Speech runs locally on the Mac, and only the transcript crosses the paired connection. When a Mac client selects a built-in system voice, reply speech is synthesized and played locally on that Mac; ElevenLabs reply audio is synthesized by the host and relayed byte for byte. A Windows remote client still needs a future Windows speech-to-text implementation for microphone input.
 
 The host must be running and awake. Cleartext HTTP is accepted only for a `.ts.net` MagicDNS hostname because that connection is encrypted inside Tailscale's WireGuard tunnel. Raw IP addresses, LAN hostnames, URL credentials, paths, queries, and fragments are rejected.
 
@@ -52,9 +52,9 @@ Pairing creates an independent device identity on the host. The resulting bearer
 - injected by a loopback-only Electron relay after browser `Origin` headers are removed;
 - sent only to the exact saved managed HTTPS or `.ts.net` origin; absolute-form request targets cannot redirect it elsewhere.
 
-The host companion remains the authorization boundary. Its route list defaults to deny, strips sensitive response fields, and can revoke the desktop client from **Settings → Remote access** like any other paired device. Interactive desktop access is a separate per-device capability that defaults off. Client mode does not expose host-only settings, local browser surfaces, local VM controls, plugins, or the event inspector.
+The host companion remains the authorization boundary. Its route list defaults to deny, strips sensitive response fields, and can revoke the desktop client from **Settings → Remote access** like any other paired device. Interactive desktop access is a separate per-device capability that defaults off. Client mode does not expose host-only settings, local browser surfaces, Local VM controls, plugin credentials, destructive account revocation, or the event inspector. Connected Apps may be viewed and authorized remotely while their tokens and execution remain on the host.
 
-The desktop client matches the reviewed companion feature surface: chats, rooms, streamed responses, approvals, search, routines, attachments, and a narrowly scoped cloud/VPS viewer the host explicitly grants to that paired device. Expanding the desktop client must be done by explicitly reviewing and adding companion routes; it must not bypass the companion API or proxy the full harness.
+The desktop client matches the reviewed companion feature surface: chats, rooms, streamed responses, approvals, inline Connected Apps authorization, search, routines, attachments, and a narrowly scoped cloud/VPS viewer the host explicitly grants to that paired device. Expanding the desktop client must be done by explicitly reviewing and adding companion routes; it must not bypass the companion API or proxy the full harness.
 
 ## Runtime shape
 

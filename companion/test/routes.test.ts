@@ -46,8 +46,10 @@ describe("what the app may do", () => {
     ["POST", "/api/bots"],
     ["POST", "/api/sidebar-sections"],
     ["POST", "/api/bots/bot_123/messages"],
+    ["PATCH", "/api/bots/bot_123/cards/msg_2"],
     ["POST", "/api/bots/bot_123/respond"],
     ["POST", "/api/bots/bot_123/interrupt"],
+    ["DELETE", "/api/bots/bot_123/queue/queue_1"],
     ["POST", "/api/bots/bot_123/read"],
     ["POST", "/api/bots/bot_123/always-allow"],
     ["POST", "/api/bots/bot_123/messages/msg_2/edit"],
@@ -65,6 +67,8 @@ describe("what the app may do", () => {
     ["POST", "/api/bots/bot_123/computer/screenshot"],
     ["POST", "/api/bots/bot_123/computer/viewer-close"],
     ["POST", "/api/groups/room-1/messages"],
+    ["POST", "/api/groups/room-1/interrupt"],
+    ["DELETE", "/api/groups/room-1/queue/queue_1"],
     ["POST", "/api/groups/room-1/read"],
     ["POST", "/api/groups/room-1/tasks"],
     ["POST", "/api/groups/room-1/tasks/th_1"],
@@ -94,6 +98,12 @@ describe("what the app may do", () => {
     ["GET", "/api/connectors/connected"],
     ["GET", "/api/connectors"],
     ["POST", "/api/connectors/slack/authorize"],
+    ["GET", "/api/bots/bot_123/connector-cards/msg_2/status"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/authorize"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/resume"],
+    ["POST", "/api/bots/bot_123/connector-cards/msg_2/dismiss"],
+    ["POST", "/api/bots/bot_123/secret-cards/msg_2/resume"],
+    ["POST", "/api/bots/bot_123/secret-cards/msg_2/dismiss"],
   ];
 
   for (const [method, path] of calls) {
@@ -209,6 +219,7 @@ describe("what it may not", () => {
     // revocation is a host-only affordance: a paired client can list and add
     // accounts but the account DELETE route is deliberately not allowed
     expect(allowed("DELETE", "/api/connectors/slack/accounts/ca_123")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/secret-cards/msg_2/provided")).toBe(false);
     expect(allowed("PATCH", "/api/groups/room-1")).toBe(false);
   });
 

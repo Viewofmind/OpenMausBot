@@ -90,8 +90,10 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // unlike the desktop's broad PATCH it cannot alter execution policy.
   { method: "POST", path: /^\/api\/sidebar-sections$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages$/ },
+  { method: "PATCH", path: /^\/api\/bots\/[\w-]+\/cards\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/respond$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
+  { method: "DELETE", path: /^\/api\/bots\/[\w-]+\/queue\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/always-allow$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages\/[\w-]+\/edit$/ },
@@ -119,6 +121,8 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   // rooms — making one, and talking in one
   { method: "POST", path: /^\/api\/groups$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/messages$/ },
+  { method: "POST", path: /^\/api\/groups\/[\w-]+\/interrupt$/ },
+  { method: "DELETE", path: /^\/api\/groups\/[\w-]+\/queue\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/tasks$/ },
   { method: "POST", path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+$/ },
@@ -165,6 +169,15 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "GET", path: /^\/api\/connectors\/connected$/ },
   { method: "GET", path: /^\/api\/connectors$/ },
   { method: "POST", path: /^\/api\/connectors\/[\w-]+\/authorize$/ },
+  // Inline connector cards are scoped by bot, transcript message, and
+  // thread. They expose the same opaque OAuth authorization already allowed
+  // above, then only poll, resume, or dismiss that exact pending card.
+  { method: "GET", path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/status$/ },
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/(?:authorize|resume|dismiss)$/ },
+  // A remote client may decline or retry a credential request, but never
+  // claim that it stored a host credential. Saving and `provided` stay local
+  // to the host's OS-backed credential store.
+  { method: "POST", path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/(?:resume|dismiss)$/ },
 ];
 
 /** Route families worth naming in the refusal.

@@ -1784,16 +1784,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               action.onError?.(error instanceof Error ? error.message : String(error));
             });
           if (action.alwaysAllow) {
-            const bot = stateRef.current.bots.find((b) => b.id === action.alwaysAllow!.botId);
-            const next = [...new Set([...(bot?.alwaysAllow ?? []), action.alwaysAllow.key])];
             // save the grant BEFORE releasing the bot: it may ask again
             // within milliseconds, and a grant that hasn't landed yet
             // would make "always allow" ask a second time. A failed save
             // still lets this one through — losing a preference must not
             // strand the turn — but it says so.
-            void api(`/api/bots/${action.alwaysAllow.botId}`, {
-              method: "PATCH",
-              body: JSON.stringify({ alwaysAllow: next }),
+            void api(`/api/bots/${action.alwaysAllow.botId}/always-allow`, {
+              method: "POST",
+              body: JSON.stringify({ allowKey: action.alwaysAllow.key }),
             })
               .catch(showError)
               .finally(respond);
@@ -1904,16 +1902,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const bot = stateRef.current.bots.find((b) => b.id === action.id);
           const group = stateRef.current.groups.find((g) => g.id === action.id);
           if (bot?.unread) {
-            api(`/api/bots/${action.id}`, { method: "PATCH", body: JSON.stringify({ unread: false }) }).catch(() => {});
+            api(`/api/bots/${action.id}/read`, { method: "POST" }).catch(() => {});
           } else if (group?.unread) {
-            api(`/api/groups/${action.id}`, { method: "PATCH", body: JSON.stringify({ unread: false }) }).catch(() => {});
+            api(`/api/groups/${action.id}/read`, { method: "POST" }).catch(() => {});
           }
           break;
         }
         case "createGroup":
           api(`/api/groups`, {
             method: "POST",
-            body: JSON.stringify({ memberIds: action.memberIds, name: action.name, section: action.section }),
+            body: JSON.stringify({
+              memberIds: action.memberIds,
+              name: action.name,
+              section: action.section,
+              ...(window.ogb?.remoteClient?.active
+                ? { setup: { bulletin: "", defaultResponder: { kind: "mentions" } } }
+                : {}),
+            }),
           })
             .then(({ group }) => {
               rawDispatch({ type: "groupPatched", group });
@@ -2273,11 +2278,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // reading the selected chat clears its badge immediately
           if (bot.unread && bot.id === stateRef.current.selectedId) {
             bot.unread = false;
-            fetch(`/api/bots/${bot.id}`, {
-              method: "PATCH",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ unread: false }),
-            }).catch(() => {});
+            fetch(`/api/bots/${bot.id}/read`, { method: "POST" }).catch(() => {});
           }
           rawDispatch({
             type: "botPatched",
@@ -2290,11 +2291,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // reading the selected room clears its badge immediately
           if (group.unread && group.id === stateRef.current.selectedId) {
             group.unread = false;
-            fetch(`/api/groups/${group.id}`, {
-              method: "PATCH",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ unread: false }),
-            }).catch(() => {});
+            fetch(`/api/groups/${group.id}/read`, { method: "POST" }).catch(() => {});
           }
           rawDispatch({ type: "groupPatched", group });
           break;

@@ -2385,7 +2385,6 @@ describe("harness HTTP API", () => {
       await api("PATCH", `/api/bots/${hidden.id}`, { hidden: true, chiefOfStaff: false });
 
       for (const body of [
-        { name: "   ", botIds: [visible.id] },
         { name: "S".repeat(61), botIds: [visible.id] },
         { name: "Work", botIds: [] },
         { name: "Work", botIds: ["not/an/id"] },

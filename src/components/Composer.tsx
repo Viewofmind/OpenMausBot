@@ -205,6 +205,7 @@ export function Composer({
 }) {
   const { state, dispatch } = useStore();
   const { capabilities } = useDesktopCapabilities();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   // Unified target: a 1:1 bot thread or a room. In a room the @ picker
   // offers members plus @everyone; explicit mentions override the room's
   // configured default responder.
@@ -858,7 +859,7 @@ export function Composer({
                   {effectiveChannelMode === "goal" ? "/goal" : "Goal"}
                 </button>
               )}
-              {autoBot && <PermissionModeSelector bot={autoBot} onSetAuto={setAuto} />}
+              {autoBot && !remoteClient && <PermissionModeSelector bot={autoBot} onSetAuto={setAuto} />}
             </div>
           )}
           <textarea
