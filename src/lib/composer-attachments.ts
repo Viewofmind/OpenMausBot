@@ -80,6 +80,26 @@ function newId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `a${Math.random().toString(36).slice(2)}`;
 }
 
+/** The upload id is a server-validated UUID and remains stable across the
+ * one recovery attempt. That makes a lost success response safe to retry:
+ * the server returns the already committed attachment instead of creating a
+ * second file. */
+function newUploadId(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 export function fileAttachment(name: string, path: string, size: number): FileAttachment {
   return { kind: "file", id: newId(), path, name, size };
 }
@@ -87,12 +107,100 @@ export function fileAttachment(name: string, path: string, size: number): FileAt
 /** Matches the server's IMAGE_MAX_BYTES — checked client-side so an
  * oversized paste is refused before the upload starts, not mid-stream. */
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const FILE_MAX_BYTES = 25 * 1024 * 1024;
+
+const DOCUMENT_MIMES: Readonly<Record<string, string>> = {
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
+  json: "application/json",
+  pdf: "application/pdf",
+  rtf: "application/rtf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+};
+
+const ACCEPTED_DOCUMENT_MIMES = new Set(Object.values(DOCUMENT_MIMES));
+
+export function documentMime(file: Pick<File, "name" | "type">): string | null {
+  const declared = file.type.split(";", 1)[0]!.trim().toLowerCase();
+  if (ACCEPTED_DOCUMENT_MIMES.has(declared)) return declared;
+  const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+  return DOCUMENT_MIMES[extension] ?? null;
+}
 
 export function isImageFile(file: { type: string; size: number }): boolean {
   return (
     file.type.startsWith("image/") &&
     ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type.split(";")[0]!.trim().toLowerCase())
   );
+}
+
+const IMAGE_EXTENSION_BY_MIME: Readonly<Record<string, string>> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+};
+
+const UPLOAD_ATTEMPTS = 2;
+
+function retryableUploadStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+/** Retry only failures where the server may already have committed the body.
+ * A validation/authentication response is final, while a network failure or
+ * transient response gets one replay with the same upload id. */
+async function uploadWithRetry<T>(url: string, init: RequestInit): Promise<T> {
+  for (let attempt = 0; attempt < UPLOAD_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      const aborted = typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+      if (aborted || attempt === UPLOAD_ATTEMPTS - 1) throw error;
+      continue;
+    }
+    if (!response.ok) {
+      if (retryableUploadStatus(response.status) && attempt < UPLOAD_ATTEMPTS - 1) {
+        await response.body?.cancel().catch(() => undefined);
+        continue;
+      }
+      const detail = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
+      throw Object.assign(new Error(detail.error ?? "upload failed"), { status: response.status });
+    }
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      if (attempt === UPLOAD_ATTEMPTS - 1) {
+        throw new Error("upload returned an invalid response", { cause: error });
+      }
+    }
+  }
+  throw new Error("upload failed");
+}
+
+function canonicalImageName(originalName: string, path: string, mime: string): string {
+  const normalizedMime = mime.split(";", 1)[0]!.trim().toLowerCase();
+  const extension = IMAGE_EXTENSION_BY_MIME[normalizedMime];
+  const pathName = attachmentBasename(path);
+  if (!extension || !pathName.toLowerCase().endsWith(extension)) {
+    throw new Error("upload returned invalid image metadata");
+  }
+  const original = attachmentBasename(originalName.trim());
+  const dot = original.lastIndexOf(".");
+  const stem = (dot > 0 ? original.slice(0, dot) : original).trim() || "pasted image";
+  return `${stem}${extension}`;
 }
 
 /** Persist a pasted image server-side and return the attachment chip data.
@@ -102,17 +210,44 @@ export async function imageAttachmentFromFile(file: File): Promise<ImageAttachme
   if (!isImageFile(file)) return null;
   if (file.size > IMAGE_MAX_BYTES) throw Object.assign(new Error(`${file.name} exceeds 10 MB`), { status: 413 });
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const response = await fetch("/api/attachments", {
-    method: "POST",
-    headers: { "content-type": file.type },
-    body: bytes,
-  });
-  if (!response.ok) {
-    const detail = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
-    throw Object.assign(new Error(detail.error ?? "upload failed"), { status: response.status });
+  const uploadId = newUploadId();
+  const saved = await uploadWithRetry<{ path: string; mime: string; bytes: number }>(
+    `/api/attachments?uploadId=${encodeURIComponent(uploadId)}`,
+    {
+      method: "POST",
+      headers: { "content-type": file.type },
+      body: bytes,
+    },
+  );
+  return {
+    kind: "image",
+    id: newId(),
+    path: saved.path,
+    name: canonicalImageName(file.name, saved.path, saved.mime),
+    size: saved.bytes,
+    mime: saved.mime,
+  };
+}
+
+/** Copy a supported document into the private attachment store. The prompt
+ * then carries the same durable path for the local agent and paired phones,
+ * instead of exposing an arbitrary Finder path to the companion route. */
+export async function fileAttachmentFromFile(file: File): Promise<FileAttachment | null> {
+  const mime = documentMime(file);
+  if (!mime) return null;
+  if (file.size > FILE_MAX_BYTES) {
+    throw Object.assign(new Error(`${file.name} exceeds 25 MB`), { status: 413 });
   }
-  const saved = (await response.json()) as { path: string; mime: string; bytes: number };
-  return { kind: "image", id: newId(), path: saved.path, name: file.name || "pasted image", size: saved.bytes, mime: saved.mime };
+  const uploadId = newUploadId();
+  const saved = await uploadWithRetry<{ path: string; name: string; bytes: number }>(
+    `/api/files?name=${encodeURIComponent(file.name)}&uploadId=${encodeURIComponent(uploadId)}`,
+    {
+      method: "POST",
+      headers: { "content-type": mime },
+      body: file,
+    },
+  );
+  return fileAttachment(saved.name || file.name, saved.path, saved.bytes);
 }
 
 export function pasteAttachment(text: string): PasteAttachment {
@@ -131,7 +266,8 @@ export function appendPastedText(text: string, pasted: string): string {
 
 export const INLINE_DROP_LIMIT = 512 * 1024;
 
-export type DroppedFile = Pick<File, "name" | "size" | "type" | "text">;
+export type DroppedFile = Pick<File, "name" | "size" | "type" | "text"> &
+  Partial<Pick<File, "arrayBuffer">>;
 
 /** Turn a browser drop into composer attachments. Electron-backed files
  * keep their disk path; small pathless text drops keep their contents.
@@ -195,16 +331,16 @@ export function formatSize(bytes: number): string {
 /** The prompt the bot receives: what was typed, then one block per
  * attachment. Tagged blocks rather than fences — pasted code and markdown
  * carry fences of their own, and nesting them loses the boundary. A file
- * needs only its path: every driver here is an agent that can open it. */
+ * carries its path for the agent and its original name for the transcript. */
 export function composeMessage(text: string, attachments: Attachment[]): string {
   const parts = [text.trim()];
   attachments.forEach((a, i) => {
     if (a.kind === "paste") {
       parts.push(`<pasted-text index="${i + 1}">\n${a.text}\n</pasted-text>`);
     } else if (a.kind === "image") {
-      parts.push(`<attached-image path="${escapeAttribute(a.path)}" />`);
+      parts.push(`<attached-image path="${escapeAttribute(a.path)}" name="${escapeAttribute(a.name)}" />`);
     } else {
-      parts.push(`<attached-file path="${escapeAttribute(a.path)}" />`);
+      parts.push(`<attached-file path="${escapeAttribute(a.path)}" name="${escapeAttribute(a.name)}" />`);
     }
   });
   return parts.filter(Boolean).join("\n\n");
@@ -226,11 +362,18 @@ export function escapeAttribute(value: string): string {
 export type TranscriptFileAttachment = {
   path: string;
   name: string;
+  private?: boolean;
+};
+
+export type TranscriptImageAttachment = {
+  path: string;
+  name: string;
+  private?: boolean;
 };
 
 export type TranscriptAttachments = {
   display: string;
-  images: string[];
+  images: TranscriptImageAttachment[];
   files: TranscriptFileAttachment[];
 };
 
@@ -265,34 +408,180 @@ function transcriptFileName(path: string, suppliedName?: string): string {
   return Array.from(safe || fallback || "Attached file").slice(0, 180).join("");
 }
 
+export function isPrivateAttachmentPath(path: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-z0-9]+$/i
+    .test(attachmentBasename(path));
+}
+
+type TranscriptFence = {
+  marker: "`" | "~";
+  length: number;
+};
+
+type TranscriptBlock =
+  | { kind: "untilBlank" }
+  | { kind: "untilToken"; closingToken: string };
+
+/** Recognise CommonMark-style fenced code without pulling a Markdown parser
+ * into the composer bundle. An unterminated fence deliberately protects the
+ * rest of the message: examples must never turn into actionable attachments. */
+function transcriptFenceMarker(line: string): (TranscriptFence & { remainder: string }) | null {
+  let index = 0;
+  while (index < line.length && index < 4 && line[index] === " ") index += 1;
+  if (index > 3) return null;
+  const marker = line[index];
+  if (marker !== "`" && marker !== "~") return null;
+  const start = index;
+  while (index < line.length && line[index] === marker) index += 1;
+  const length = index - start;
+  if (length < 3) return null;
+  return { marker, length, remainder: line.slice(index) };
+}
+
+const COMMONMARK_BLOCK_TAGS = [
+  "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center", "col",
+  "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
+  "footer", "form", "frame", "frameset", "h[1-6]", "head", "header", "hr", "html", "iframe", "legend",
+  "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p",
+  "param", "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title",
+  "tr", "track", "ul",
+].join("|");
+
+const COMMONMARK_TYPE_1 = /^ {0,3}<(script|pre|style|textarea)(?:[\t ]|>|$)/i;
+const COMMONMARK_TYPE_6 = new RegExp(
+  `^ {0,3}</?(?:${COMMONMARK_BLOCK_TAGS})(?:[\\t ]|/?>|$)`,
+  "i",
+);
+const HTML_ATTRIBUTE_NAME = "[A-Za-z_:][A-Za-z0-9_.:-]*";
+const HTML_ATTRIBUTE_VALUE = `(?:[^\\s"'=<>\\x60]+|'[^']*'|"[^"]*")`;
+const HTML_ATTRIBUTE = `(?:[\\t ]+${HTML_ATTRIBUTE_NAME}(?:[\\t ]*=[\\t ]*${HTML_ATTRIBUTE_VALUE})?)`;
+const COMMONMARK_TYPE_7 = new RegExp(
+  `^ {0,3}(?:<[A-Za-z][A-Za-z0-9-]*${HTML_ATTRIBUTE}*[\\t ]*/?>|</[A-Za-z][A-Za-z0-9-]*[\\t ]*>)[\\t ]*$`,
+);
+
+/** Attachment-looking examples inside CommonMark HTML blocks stay literal.
+ * Types 1-5 use their specified terminator; types 6-7 last through the next
+ * blank line. The app's pasted-text wrapper is deliberately stronger than a
+ * generic custom tag and lasts through its closing tag, including blanks. */
+function transcriptBlockStarting(line: string): TranscriptBlock | null {
+  const lower = line.toLowerCase();
+  const commentStart = lower.indexOf("<!--");
+  if (commentStart >= 0 && lower.indexOf("-->", commentStart + 4) < 0) {
+    return { kind: "untilToken", closingToken: "-->" };
+  }
+
+  const content = line.match(/^ {0,3}(.*)$/)?.[1];
+  if (content === undefined) return null;
+  const lowerContent = content.toLowerCase();
+
+  const pastedText = /^<pasted-text(?:[\t >]|$)/i.exec(content);
+  if (pastedText) {
+    return lowerContent.includes("</pasted-text>")
+      ? null
+      : { kind: "untilToken", closingToken: "</pasted-text>" };
+  }
+
+  const typeOne = COMMONMARK_TYPE_1.exec(line);
+  if (typeOne) {
+    const closingToken = `</${typeOne[1]!.toLowerCase()}>`;
+    return lower.includes(closingToken)
+      ? null
+      : { kind: "untilToken", closingToken };
+  }
+
+  const processing = lowerContent.indexOf("<?");
+  if (processing === 0) {
+    return lowerContent.indexOf("?>", 2) >= 0
+      ? null
+      : { kind: "untilToken", closingToken: "?>" };
+  }
+  const cdata = lowerContent.indexOf("<![cdata[");
+  if (cdata === 0) {
+    return lowerContent.indexOf("]]>", 9) >= 0
+      ? null
+      : { kind: "untilToken", closingToken: "]]>" };
+  }
+  if (/^<![A-Za-z]/.test(content)) {
+    return content.indexOf(">", 2) >= 0
+      ? null
+      : { kind: "untilToken", closingToken: ">" };
+  }
+
+  if (COMMONMARK_TYPE_6.test(line) || COMMONMARK_TYPE_7.test(line)) {
+    return { kind: "untilBlank" };
+  }
+  return null;
+}
+
+const TRANSCRIPT_ATTACHMENT_TAG =
+  /^<attached-(image|file)[\t ]+path="([^"\r\n]*)"(?:[\t ]+name="([^"\r\n]*)")?[\t ]*\/>[\t ]*$/;
+
 /** Split a stored user message into its display text and attachments for
  * transcript rendering. Prompt-only tags never show in the bubble. */
 export function splitTranscriptAttachments(text: string): TranscriptAttachments {
-  const images: string[] = [];
+  const images: TranscriptImageAttachment[] = [];
   const files: TranscriptFileAttachment[] = [];
-  const display = text.replace(
-    /^[\t ]*<attached-(image|file)\b((?:[\t ]+[A-Za-z_:][\w:.-]*="[^"\r\n]*")*)[\t ]*\/>[\t ]*(?:\r?\n)?/gm,
-    (match, kind: "image" | "file", rawAttributes: string) => {
-      const attributes = new Map<string, string>();
-      for (const attribute of rawAttributes.matchAll(/\s+([A-Za-z_:][\w:.-]*)="([^"]*)"/g)) {
-        if (!attributes.has(attribute[1]!)) attributes.set(attribute[1]!, attribute[2]!);
+  let display = "";
+  let fence: TranscriptFence | null = null;
+  let block: TranscriptBlock | null = null;
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const newline = text.indexOf("\n", cursor);
+    const lineEnd = newline >= 0 ? newline : text.length;
+    const wholeLineEnd = newline >= 0 ? newline + 1 : text.length;
+    const rawLine = text.slice(cursor, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const marker = transcriptFenceMarker(line);
+    let consumed = false;
+
+    if (fence) {
+      if (
+        marker &&
+        marker.marker === fence.marker &&
+        marker.length >= fence.length &&
+        /^[\t ]*$/.test(marker.remainder)
+      ) {
+        fence = null;
       }
-      const rawPath = attributes.get("path");
-      if (rawPath === undefined) return match;
-      const path = decodeAttachmentAttribute(rawPath);
-      if (!path) return match;
-      if (kind === "image") images.push(path);
-      else files.push({ path, name: transcriptFileName(path, attributes.get("name")) });
-      return "";
-    },
-  );
+    } else if (block) {
+      if (block.kind === "untilBlank") {
+        if (/^[\t ]*$/.test(line)) block = null;
+      } else if (line.toLowerCase().includes(block.closingToken)) {
+        block = null;
+      }
+    } else if (marker) {
+      fence = { marker: marker.marker, length: marker.length };
+    } else {
+      const match = TRANSCRIPT_ATTACHMENT_TAG.exec(line);
+      if (match) {
+        const kind = match[1] as "image" | "file";
+        const path = decodeAttachmentAttribute(match[2]!);
+        if (path) {
+          const attachment = {
+            path,
+            name: transcriptFileName(path, match[3]),
+            ...(isPrivateAttachmentPath(path) ? { private: true } : {}),
+          };
+          if (kind === "image") images.push(attachment);
+          else files.push(attachment);
+          consumed = true;
+        }
+      }
+      if (!consumed) block = transcriptBlockStarting(line);
+    }
+
+    if (!consumed) display += text.slice(cursor, wholeLineEnd);
+    cursor = wholeLineEnd;
+  }
+
   return { display: display.trim(), images, files };
 }
 
 /** Kept for callers outside the desktop bundle that used the old helper. */
 export function splitAttachedImages(text: string): { display: string; images: string[] } {
   const { display, images } = splitTranscriptAttachments(text);
-  return { display, images };
+  return { display, images: images.map((image) => image.path) };
 }
 
 /** The bare filename a saved attachment path ends in — what the serving
@@ -314,21 +603,26 @@ export function attachmentImageUrl(path: string): string | null {
 
 /** One intake path for files arriving by drop OR by the composer's attach
  * button, so a picked file and a dropped one can never behave differently.
- * The image uploader is injected: the caller owns the network, this owns
- * the ordering and the sentence the user reads when something is refused. */
+ * Uploaders are injected for deterministic tests: callers own the network,
+ * while this function owns ordering and the sentence shown on failure. */
 export async function intakeFiles<T extends DroppedFile & { type: string }>(
   _files: readonly T[],
   _opts: {
     allowImages: boolean;
     getPath: (file: T) => string;
     uploadImage: (file: T) => Promise<Attachment | null>;
+    uploadFile?: (file: T) => Promise<FileAttachment | null>;
   },
 ): Promise<{ attachments: Attachment[]; notice: string | null }> {
   const files = [..._files];
   const { allowImages, getPath, uploadImage } = _opts;
+  const uploadFile = _opts.uploadFile ?? (async (file: T) => {
+    if (!file.arrayBuffer) return null;
+    return fileAttachmentFromFile(file as unknown as File);
+  });
   const attachments: Attachment[] = [];
   const rejectedNames: string[] = [];
-  const imageErrors: string[] = [];
+  const uploadErrors: string[] = [];
   // Finish each selected file in sequence so the chips retain the order in
   // which the user chose or dropped them.
   for (const file of files) {
@@ -337,8 +631,18 @@ export async function intakeFiles<T extends DroppedFile & { type: string }>(
         const attachment = await uploadImage(file);
         if (attachment) attachments.push(attachment);
       } catch (err) {
-        imageErrors.push(`${file.name}: ${err instanceof Error ? err.message : "upload failed"}`);
+        uploadErrors.push(`${file.name}: ${err instanceof Error ? err.message : "upload failed"}`);
       }
+      continue;
+    }
+    try {
+      const attachment = await uploadFile(file);
+      if (attachment) {
+        attachments.push(attachment);
+        continue;
+      }
+    } catch (err) {
+      uploadErrors.push(`${file.name}: ${err instanceof Error ? err.message : "upload failed"}`);
       continue;
     }
     const result = await attachmentsFromDroppedFiles([file], getPath);
@@ -348,7 +652,7 @@ export async function intakeFiles<T extends DroppedFile & { type: string }>(
   const pathless = rejectedNames.length
     ? `${rejectedNames.join(", ")} — that file has no path on disk. Save it first, then attach it from Finder.`
     : null;
-  const failed = imageErrors.length ? imageErrors.join("; ") : null;
+  const failed = uploadErrors.length ? uploadErrors.join("; ") : null;
   return {
     attachments,
     notice: pathless && failed ? `${pathless} (${failed})` : (pathless ?? failed),

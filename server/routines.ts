@@ -347,7 +347,9 @@ function composeExecutionPrompt(prompt: string, attachments: readonly RoutineCon
   const parts = [prompt];
   for (const attachment of attachments ?? []) {
     const tag = attachment.kind === "image" ? "attached-image" : "attached-file";
-    parts.push(`<${tag} path="${escapeAttachmentPath(attachment.path)}" />`);
+    parts.push(
+      `<${tag} path="${escapeAttachmentPath(attachment.path)}" name="${escapeAttachmentPath(attachment.name)}" />`,
+    );
   }
   return parts.filter(Boolean).join("\n\n");
 }

@@ -266,6 +266,7 @@ const Transcript = memo(function Transcript({
                       {attachments && attachments.files.length > 0 && (
                         <AttachedFileChips
                           files={attachments.files}
+                          message={{ threadId: group.threadId, messageId: m.id }}
                           className={!attachments.display ? "mb-0" : undefined}
                         />
                       )}
@@ -279,7 +280,7 @@ const Transcript = memo(function Transcript({
                           className={m.text ? "justify-start" : "mb-0 justify-start"}
                         />
                       ) : null}
-                      {m.text ? <ChatMarkdown text={m.text} /> : null}
+                      {m.text ? <ChatMarkdown text={m.text} message={{ threadId: group.threadId, messageId: m.id }} /> : null}
                     </>
                   )}
                 </div>
@@ -1287,7 +1288,7 @@ export function GroupView({ group }: { group: Group }) {
                       className={popping.text ? "justify-start" : "mb-0 justify-start"}
                     />
                   ) : null}
-                  {popping.text ? <ChatMarkdown text={popping.text} /> : null}
+                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: group.threadId, messageId: popping.id }} /> : null}
                 </div>
               ) : null}
             </TurnPresence>
