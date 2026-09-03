@@ -317,10 +317,11 @@ function Bubble({
   const webhookView = user ? webhookMessageView(text) : null;
   const attachments = user && !webhookView ? splitTranscriptAttachments(text) : null;
   const visibleText = webhookView?.task ?? attachments?.display ?? text;
+  const hasAttachments = Boolean(attachments && (attachments.images.length || attachments.files.length));
   const collapsible =
     user && !webhookView && !expanded && (visibleText.length > USER_COLLAPSE_CHARS || visibleText.split("\n").length > USER_COLLAPSE_LINES);
 
-  if (user && editing && !webhookView) {
+  if (user && editing && !webhookView && !hasAttachments) {
     return (
       <div className="flex w-full justify-end">
         <BubbleEditor initial={text} onCancel={onCancelEdit} onSubmit={onSubmitEdit} />
@@ -340,7 +341,7 @@ function Bubble({
       <div className={cn("flex w-full items-center gap-1.5", user ? "justify-end" : "justify-start")}>
         {/* editing rewinds the thread, so it waits for the turn to end —
             same rule as the version switcher below */}
-        {user && message.kind === "text" && !webhookView && !bot.busy && (
+        {user && message.kind === "text" && !webhookView && !hasAttachments && !bot.busy && (
           <button
             onClick={onStartEdit}
             aria-label="Edit message"
@@ -350,7 +351,7 @@ function Bubble({
             <Pencil size={14} />
           </button>
         )}
-        {user && <CopyButton text={visibleText} />}
+        {user && Boolean(visibleText.trim()) && <CopyButton text={visibleText} />}
         {user && (
           <>
             <button
@@ -425,7 +426,7 @@ function Bubble({
                 <AttachedImageGallery paths={attachments.images} />
               )}
               {attachments && attachments.files.length > 0 && (
-                <AttachedFileChips files={attachments.files} className={!visibleText ? "mb-0" : undefined} />
+                <AttachedFileChips files={attachments.files} message={{ threadId: bot.threadId, messageId: message.id }} className={!visibleText ? "mb-0" : undefined} />
               )}
               {visibleText && (
                 <div
@@ -458,7 +459,7 @@ function Bubble({
                   className={text ? "justify-start" : "mb-0 justify-start"}
                 />
               ) : null}
-              {text ? <ChatMarkdown text={text} /> : null}
+              {text ? <ChatMarkdown text={text} message={{ threadId: bot.threadId, messageId: message.id }} /> : null}
             </MessageBoundary>
           )}
         </div>
@@ -922,6 +923,11 @@ export function ChatView({ bot }: { bot: Bot }) {
     () => [...messages].reverse().find((m) => m.role === "user" && m.kind === "text"),
     [messages],
   );
+  const lastUserMessageHasAttachments = useMemo(() => {
+    if (!lastUserMessage?.text) return false;
+    const attached = splitTranscriptAttachments(lastUserMessage.text);
+    return attached.images.length > 0 || attached.files.length > 0;
+  }, [lastUserMessage]);
 
   // Mascot while the turn works. Streaming stays invisible — when the reply
   // is finished, the whole bubble pops in above the mascot.
@@ -1302,7 +1308,7 @@ export function ChatView({ bot }: { bot: Bot }) {
                       className={popping.text ? "justify-start" : "mb-0 justify-start"}
                     />
                   ) : null}
-                  {popping.text ? <ChatMarkdown text={popping.text} /> : null}
+                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: bot.threadId, messageId: popping.id }} /> : null}
                 </MessageBoundary>
               </div>
             ) : null}
@@ -1334,7 +1340,9 @@ export function ChatView({ bot }: { bot: Bot }) {
         onClearReply={clearReply}
         onConsumeReply={consumeReply}
         onRestoreReply={restoreReply}
-        onEditLast={lastUserMessage && !bot.busy ? () => setEditingId(lastUserMessage.id) : undefined}
+        onEditLast={lastUserMessage && !lastUserMessageHasAttachments && !bot.busy
+          ? () => setEditingId(lastUserMessage.id)
+          : undefined}
       />
       </div>
       </div>

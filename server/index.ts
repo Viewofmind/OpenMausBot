@@ -46,6 +46,8 @@ import {
 } from "./attachments.ts";
 import {
   messageFileDisposition,
+  messageFileDownloadName,
+  messageAttachmentName,
   messageFileRoots,
   messageReferencesFile,
   openMessageFile,
@@ -5027,7 +5029,7 @@ function deliverCalendarCall(call: CalendarCall, scheduledFor: number): void {
   const text = [
     `@everyone ${call.description.trim() || call.name}`,
     ...call.attachments.map((attachment) =>
-      `<${attachment.kind === "image" ? "attached-image" : "attached-file"} path="${escapeAttribute(attachment.path)}" />`
+      `<${attachment.kind === "image" ? "attached-image" : "attached-file"} path="${escapeAttribute(attachment.path)}" name="${escapeAttribute(attachment.name)}" />`
     ),
   ].join("\n\n");
   const sendId = `calendar_${call.id}_${scheduledFor}`;
@@ -6854,11 +6856,12 @@ const server = createServer(async (req, res) => {
       return res.end(bytes);
     }
 
-    // Download one local file only when this exact stored bot message links
-    // to it. The message supplies both the capability (the requested path
-    // must be an actual rendered Markdown link target, allowing only
-    // URL-decoding differences) and the bot identity used to derive the
-    // narrow set of roots; this is deliberately not a general path reader.
+    // Download one local file only when this exact stored message grants it:
+    // a bot must render a Markdown link to it, while a user message must carry
+    // the exact standalone attachment tag written by the composer. The bot
+    // branch derives conversation/workspace roots; the user branch is limited
+    // to OpenMausBot's private attachment directory. This is deliberately not
+    // a general path reader.
     m = path.match(/^\/api\/threads\/([\w-]+)\/messages\/([\w-]+)\/file$/);
     if (m && method === "POST") {
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
@@ -6874,37 +6877,53 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const href = typeof body.path === "string" ? body.path : "";
       if (!href) return json(res, 400, { error: "path is required" });
-      if (message.role !== "bot" || message.kind !== "text" || !message.text || !messageReferencesFile(message.text, href)) {
-        return json(res, 403, { error: "that bot message does not link to this file" });
+      if (message.kind !== "text" || !message.text) {
+        return json(res, 403, { error: "that message does not share this file" });
       }
 
-      const senderId = directBot?.id ?? message.from?.botId;
-      if (!senderId || (group && !group.memberIds.includes(senderId))) {
-        return json(res, 403, { error: "the file's bot author could not be verified" });
-      }
-      let pinnedCwd: string | null | undefined;
-      let configuredCwd: string | undefined;
-      if (directBot) {
-        pinnedCwd = store.taskByThread(directBot.id, threadId)?.cwd;
-        configuredCwd = directBot.cwd;
-      } else if (group) {
-        const task = store.groupTaskByThread(group.id, threadId);
-        pinnedCwd = task ? task.pinnedCwd : group.threadId === threadId ? group.pinnedCwd : undefined;
-        configuredCwd = group.cwd;
-      }
+      let roots: string[];
+      let downloadName: string | undefined;
+      if (message.role === "user") {
+        downloadName = messageAttachmentName(message.text, href) ?? undefined;
+        if (!downloadName) {
+          return json(res, 403, { error: "that message does not share this file" });
+        }
+        roots = [ATTACHMENTS_DIR];
+      } else {
+        if (!messageReferencesFile(message.text, href)) {
+          return json(res, 403, { error: "that bot message does not link to this file" });
+        }
+        const senderId = directBot?.id ?? message.from?.botId;
+        // The persisted bot-role message is the author record. Membership is
+        // intentionally not consulted: removing a bot must not break files it
+        // already shared in channel history.
+        if (!senderId) {
+          return json(res, 403, { error: "the file's bot author could not be verified" });
+        }
+        let pinnedCwd: string | null | undefined;
+        let configuredCwd: string | undefined;
+        if (directBot) {
+          pinnedCwd = store.taskByThread(directBot.id, threadId)?.cwd;
+          configuredCwd = directBot.cwd;
+        } else if (group) {
+          const task = store.groupTaskByThread(group.id, threadId);
+          pinnedCwd = task ? task.pinnedCwd : group.threadId === threadId ? group.pinnedCwd : undefined;
+          configuredCwd = group.cwd;
+        }
 
-      const roots = messageFileRoots({
-        senderWorkspace: workspaceDir(senderId),
-        attachments: ATTACHMENTS_DIR,
-        pinnedCwd,
-        configuredCwd,
-      });
+        roots = messageFileRoots({
+          senderWorkspace: workspaceDir(senderId),
+          attachments: ATTACHMENTS_DIR,
+          pinnedCwd,
+          configuredCwd,
+        });
+      }
 
       const file = await openMessageFile(href, roots);
       res.writeHead(200, {
         "content-type": file.mime,
         "content-length": String(file.bytes),
-        "content-disposition": messageFileDisposition(file.name),
+        "content-disposition": messageFileDisposition(messageFileDownloadName(downloadName, file.name)),
         "cache-control": "private, no-store",
         "cdn-cache-control": "no-store",
         "cloudflare-cdn-cache-control": "no-store",
@@ -6985,8 +7004,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ── shared files ────────────────────────────────────────────────────
-    // The iOS share extension sends documents as raw bytes over the same
-    // authenticated companion connection as messages. saveFile writes each
+    // Companion apps and the desktop composer send documents as raw bytes
+    // over the same authenticated connection as messages. saveFile writes each
     // incoming chunk directly to disk, atomically commits it, and removes
     // partial uploads on error. Its optional UUID uploadId is stable across
     // route retries, while the aggregate store quota rejects rather than

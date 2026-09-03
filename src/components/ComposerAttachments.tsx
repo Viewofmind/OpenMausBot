@@ -30,6 +30,7 @@ export function ComposerAttachments({
   allowImages = true,
   notice,
   onNotice,
+  onPendingChange,
 }: {
   items: Attachment[];
   onAdd: (attachments: Attachment[]) => void;
@@ -38,15 +39,18 @@ export function ComposerAttachments({
   allowImages?: boolean;
   notice: string | null;
   onNotice: (notice: string | null) => void;
+  onPendingChange?: (pending: boolean) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<PreviewImage | null>(null);
   // dragenter/dragleave fire once per element crossed, so the overlay
   // tracks depth rather than the last event it happened to see
   const depth = useRef(0);
+  const callbacks = useRef({ onAdd, onNotice, onPendingChange, allowImages });
+  callbacks.current = { onAdd, onNotice, onPendingChange, allowImages };
+  const pendingDrops = useRef(new Set<symbol>());
 
   useEffect(() => {
-    let active = true;
     const carriesFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
 
     const onEnter = (e: DragEvent) => {
@@ -72,16 +76,20 @@ export function ComposerAttachments({
       const files = Array.from(e.dataTransfer?.files ?? []);
       // Same intake the attach button uses: a dropped file and a picked one
       // must not appear in a different order.
-      const { attachments, notice: message } = await intakeFiles(files, {
-        allowImages,
-        getPath: pathForFile,
-        uploadImage: imageAttachmentFromFile,
-      });
-      if (!active) return;
-      if (attachments.length) onAdd(attachments);
-      // Only a failure changes the notice. This keeps a concurrent successful
-      // intake from clearing an error before the user can read it.
-      if (message) onNotice(message);
+      const operation = Symbol("attachment-drop");
+      pendingDrops.current.add(operation);
+      callbacks.current.onPendingChange?.(true);
+      try {
+        const { attachments, notice: message } = await intakeFiles(files, {
+          allowImages: callbacks.current.allowImages,
+          getPath: pathForFile,
+          uploadImage: imageAttachmentFromFile,
+        });
+        if (attachments.length) callbacks.current.onAdd(attachments);
+        if (message) callbacks.current.onNotice(message);
+      } finally {
+        if (pendingDrops.current.delete(operation)) callbacks.current.onPendingChange?.(false);
+      }
     };
 
     window.addEventListener("dragenter", onEnter);
@@ -89,20 +97,19 @@ export function ComposerAttachments({
     window.addEventListener("dragover", onOver);
     window.addEventListener("drop", onDrop);
     return () => {
-      active = false;
       window.removeEventListener("dragenter", onEnter);
       window.removeEventListener("dragleave", onLeave);
       window.removeEventListener("dragover", onOver);
       window.removeEventListener("drop", onDrop);
     };
-  }, [onAdd, allowImages, onNotice]);
+  }, []);
 
   return (
     <>
       {dragging && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-10">
           <div className="rounded-2xl border-2 border-dashed border-accent/70 bg-panel/90 px-8 py-6 text-[14px] font-medium text-ink shadow-2xl">
-            Drop to attach — the bot gets the file path
+            Drop to attach
           </div>
         </div>
       )}
@@ -152,7 +159,7 @@ export function ComposerAttachments({
               <Chip key={a.id} label="IMAGE" title={a.name} onRemove={() => onRemove(a.id)}>
                 <button
                   type="button"
-                  onClick={() => setPreview(previewImage(a.path))}
+                  onClick={() => setPreview(previewImage(a.path, a.name))}
                   className="flex h-[76px] w-full items-center justify-center overflow-hidden rounded-lg bg-inset focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
                   aria-label={`Preview ${a.name}`}
                 >

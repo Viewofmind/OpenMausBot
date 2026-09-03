@@ -558,6 +558,28 @@ class MessageActionsTest {
     }
 
     @Test
+    fun `copy and selection text omit attachment transport paths`() {
+        val attached = message(
+            Message.Kind.TEXT,
+            """Please review this.
+<attached-file path="/Users/alice/private/report.md" name="report.md" />""",
+        )
+
+        assertEquals("Please review this.", MessageActions.copyableText(attached))
+        assertFalse(MessageActions.copyableText(attached).orEmpty().contains("/Users/alice"))
+    }
+
+    @Test
+    fun `an attachment-only message offers no raw transport text to copy`() {
+        val attached = message(
+            Message.Kind.TEXT,
+            """<attached-image path="C:\\Users\\alice\\secret.png" name="secret.png" />""",
+        )
+
+        assertNull(MessageActions.copyableText(attached))
+    }
+
+    @Test
     fun `an unknown kind carrying text is copyable, like it is renderable`() {
         assertEquals("hello", MessageActions.copyableText(message(Message.Kind.UNKNOWN, "hello")))
     }
@@ -597,5 +619,24 @@ class MessageActionsTest {
         assertNull(MessageActions.copyableText(message(Message.Kind.ACTIVITY, "shell")))
         assertNull(MessageActions.copyableText(message(Message.Kind.SCREEN)))
     }
-}
 
+    @Test
+    fun `plain user text can be edited but attachment messages cannot`() {
+        val plain = Message(
+            id = "plain",
+            role = Message.Role.USER,
+            kind = Message.Kind.TEXT,
+            at = 0.0,
+            text = "Try this again",
+        )
+        val attached = plain.copy(
+            id = "attached",
+            text = """Try this again
+<attached-file path="/Users/alice/private/report.md" name="report.md" />""",
+        )
+
+        assertEquals("Try this again", MessageActions.editableText(plain))
+        assertNull(MessageActions.editableText(attached))
+        assertNull(MessageActions.editableText(plain.copy(role = Message.Role.BOT)))
+    }
+}

@@ -209,8 +209,9 @@ beforeAll(async () => {
         id: "test-linked-file-room",
         threadId: "test-linked-file-room-thread",
         name: "Linked file room",
-        memberIds: ["test-bot-a"],
-        defaultResponder: { kind: "member", botId: "test-bot-a" },
+        // Bot A authored the stored links before being removed from this room.
+        memberIds: ["test-bot-b"],
+        defaultResponder: { kind: "member", botId: "test-bot-b" },
         bulletin: "",
         unread: false,
         createdAt: 5,
@@ -232,12 +233,18 @@ beforeAll(async () => {
 
   const linkedWorkspace = join(home, ".openmausbot", "workspaces", "test-bot-a");
   const linkedFile = join(linkedWorkspace, "phone report.md");
+  const linkedImage = join(linkedWorkspace, "preview.png");
+  const privateAttachments = join(home, ".openmausbot", "attachments");
+  const userAttachment = join(privateAttachments, "shared-notes.pdf");
   mkdirSync(linkedWorkspace, { recursive: true });
+  mkdirSync(privateAttachments, { recursive: true, mode: 0o700 });
   writeFileSync(linkedFile, "# Phone-ready report\n");
+  writeFileSync(linkedImage, "png preview bytes");
+  writeFileSync(userAttachment, "%PDF shared from the phone\n", { mode: 0o600 });
   writeFileSync(
     join(home, ".openmausbot", "messages-test-linked-file-room-thread.json"),
     JSON.stringify({
-      activeLeafId: "prose-file-message",
+      activeLeafId: "user-outside-file-message",
       messages: [
         {
           id: "linked-file-message",
@@ -256,6 +263,31 @@ beforeAll(async () => {
           kind: "text",
           text: `I saved another copy at ${linkedFile}.`,
           from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "linked-image-message",
+          at: 6.5,
+          parentId: "prose-file-message",
+          role: "bot",
+          kind: "text",
+          text: `![Preview](<${pathToFileURL(linkedImage).href}>)`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "user-attached-file-message",
+          at: 7,
+          parentId: "linked-image-message",
+          role: "user",
+          kind: "text",
+          text: `<attached-file path="${userAttachment}" name="Trip notes.exe" />`,
+        },
+        {
+          id: "user-outside-file-message",
+          at: 8,
+          parentId: "user-attached-file-message",
+          role: "user",
+          kind: "text",
+          text: `<attached-file path="${linkedFile}" />`,
         },
       ],
     }),
@@ -3474,7 +3506,7 @@ describe("harness HTTP API", () => {
           message.sendId?.startsWith(`calendar_${callId}_`)
         )?.text;
       }, { timeout: 5_000 }).toBe(
-        '@everyone Review the launch plan.\n\n<attached-file path="/tmp/a&quot;&amp;&lt;&gt;.txt" />',
+        '@everyone Review the launch plan.\n\n<attached-file path="/tmp/a&quot;&amp;&lt;&gt;.txt" name="Launch brief.txt" />',
       );
 
       const snapshot = await api("GET", "/api/bots?messages=50");
@@ -5750,6 +5782,56 @@ describe("message pages", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path: linkedFile }),
     })).status).toBe(404);
+  });
+
+  it("downloads an image rendered by the exact stored bot message", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const linkedImage = join(home, ".openmausbot", "workspaces", "test-bot-a", "preview.png");
+    const response = await fetch(`${BASE}/api/threads/${threadId}/messages/linked-image-message/file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: linkedImage }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("png preview bytes");
+    expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
+  it("downloads an exact user attachment only from the private attachment store", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const shared = join(home, ".openmausbot", "attachments", "shared-notes.pdf");
+    const response = await fetch(
+      `${BASE}/api/threads/${threadId}/messages/user-attached-file-message/file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: shared }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("%PDF shared from the phone\n");
+    expect(response.headers.get("content-type")).toBe("application/pdf");
+    expect(response.headers.get("content-disposition")).toContain("Trip%20notes.pdf");
+    expect(response.headers.get("content-disposition")).not.toContain(".exe");
+    expect(response.headers.get("content-disposition")).not.toContain("shared-notes.pdf");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/prose-file-message/file`,
+      { path: shared },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/user-attached-file-message/file`,
+      { path: join(home, ".openmausbot", "attachments", "different.pdf") },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/user-outside-file-message/file`,
+      { path: join(home, ".openmausbot", "workspaces", "test-bot-a", "phone report.md") },
+    )).status).toBe(403);
   });
 
   it("404s an image on a conversation that does not exist, without inventing one", async () => {

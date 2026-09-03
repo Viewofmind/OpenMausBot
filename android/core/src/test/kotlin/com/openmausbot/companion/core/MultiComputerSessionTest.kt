@@ -10,6 +10,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -279,6 +280,51 @@ class MultiComputerSessionTest {
 
         assertEquals(Session.Status.Unauthorized, session.status.value)
         assertEquals(air, session.connection.value)
+    }
+
+    @Test
+    fun aDownloadThatCompletesDuringAComputerSwitchDiscardsTheOldBytes() = runTest {
+        val transferred = CompletableDeferred<Unit>()
+        val releaseResult = CompletableDeferred<Unit>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .header("Content-Type", "text/plain")
+                .header("Content-Disposition", "attachment; filename=\"old.txt\"")
+                .body("old computer".toResponseBody("text/plain".toMediaType()))
+                .build()
+        }.build()
+        val connections = RegistryStore(ConnectionRegistry(listOf(air, pro), air.id))
+        val tokens = Tokens(mapOf(air.id to "air-token", pro.id to "pro-token"))
+        val session = Session(
+            scope = backgroundScope,
+            connectionStore = connections,
+            tokenStore = tokens,
+            onboardingStore = InMemoryOnboardingStore(),
+            deviceNameProvider = { "Pixel" },
+            clientFactory = { connection, token -> CompanionClient(connection, token, http) },
+            eventsFn = { _, _, _ -> emptyFlow() },
+            afterAttachmentDownload = {
+                transferred.complete(Unit)
+                releaseResult.await()
+            },
+        )
+        session.awaitRestored()
+
+        val result = async {
+            session.downloadFile("thread-1", "message-1", "/private/old.txt")
+        }
+        transferred.await()
+        session.switchComputer(pro.id)
+        runCurrent()
+        assertEquals(pro, session.connection.value)
+        releaseResult.complete(Unit)
+
+        assertNull(result.await())
+        assertNull(session.actionError)
     }
 
     private val sampleBot = Bot(

@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -102,6 +103,8 @@ import com.openmausbot.companion.core.LocalMessageLink
 import com.openmausbot.companion.core.PendingMessageAttachment
 import com.openmausbot.companion.core.CompanionState
 import com.openmausbot.companion.core.Dictation
+import com.openmausbot.companion.core.DisplayedMessageAttachment
+import com.openmausbot.companion.core.DownloadedFile
 import com.openmausbot.companion.core.Message
 import com.openmausbot.companion.core.TranscriptRow
 import com.openmausbot.companion.core.target
@@ -221,15 +224,24 @@ private fun LoadedChat(
     var sendingMessage by remember(chatId) { mutableStateOf(false) }
     var attachmentError by remember(chatId) { mutableStateOf<String?>(null) }
     // A bot-linked file on its way from the computer, and where it landed.
-    var openingFileName by remember { mutableStateOf<String?>(null) }
-    var fileOpenError by remember { mutableStateOf<String?>(null) }
-    var filePreview by remember { mutableStateOf<FilePreviewItem?>(null) }
-    var fileDownloadJob by remember { mutableStateOf<Job?>(null) }
+    var openingFileName by remember(threadId) { mutableStateOf<String?>(null) }
+    var fileOpenError by remember(threadId) { mutableStateOf<String?>(null) }
+    var filePreview by remember(threadId) { mutableStateOf<FilePreviewItem?>(null) }
+    var fileDownloadJob by remember(threadId) { mutableStateOf<Job?>(null) }
     val filePreviews = remember(context) { FilePreviews(context) }
     DisposableEffect(filePreviews) {
         onDispose {
             fileDownloadJob?.cancel()
             filePreviews.clear()
+        }
+    }
+    DisposableEffect(filePreviews, threadId) {
+        onDispose {
+            // LoadedChat follows the bot when its task changes. Invalidate the
+            // old request and its published preview as one lifecycle step; a
+            // late completion can no longer write into the next task's UI.
+            filePreviews.invalidateCurrent()
+            fileDownloadJob?.cancel()
         }
     }
     val canAddAttachment = AttachmentImportRules.canAdd(attachments.size, preparingAttachments, sendingMessage)
@@ -279,38 +291,72 @@ private fun LoadedChat(
         }
     }
 
+    /** Every computer-local attachment takes the authenticated message-file route. */
+    fun openFile(
+        path: String,
+        message: Message,
+        prepared: DownloadedFile? = null,
+        preferredName: String? = null,
+        cacheResult: Boolean = false,
+    ) {
+        val requestGeneration = filePreviews.beginRequest()
+        val requestedThreadId = threadId
+        fileDownloadJob?.cancel()
+        fileOpenError = null
+        openingFileName = preferredName ?: prepared?.filename ?: FilePreviewRules.nameForOpening(path)
+        fileDownloadJob = scope.launch {
+            val fetched = prepared ?: session.downloadFile(
+                requestedThreadId,
+                message.id,
+                path,
+                cacheResult = cacheResult,
+            )
+            if (!filePreviews.isCurrent(requestGeneration)) return@launch
+            openingFileName = null
+            if (fetched == null) {
+                fileOpenError = session.actionError ?: "Couldn't open that file. Try again."
+                session.actionError = null
+                return@launch
+            }
+            val item = try {
+                // The tag's display name labels the card only. Materialising
+                // and sharing must use the canonical Content-Disposition name
+                // returned by the scoped download route.
+                withContext(Dispatchers.IO) { filePreviews.store(fetched, requestGeneration) }
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                if (!filePreviews.isCurrent(requestGeneration)) return@launch
+                fileOpenError = "The downloaded file couldn't be previewed."
+                return@launch
+            } ?: return@launch
+            if (!filePreviews.isCurrent(requestGeneration)) return@launch
+            filePreview = item
+        }
+    }
+
     // A tapped link in a bot reply: the web goes to the system, a desktop path
     // comes back through the computer, anything else is refused out loud.
     fun openLink(url: String, message: Message) {
         when (val target = LocalMessageLink.resolve(url)) {
             is LocalMessageLink.Web -> runCatching { uriHandler.openUri(target.url) }
                 .onFailure { fileOpenError = "This link can't be opened on this phone." }
-            is LocalMessageLink.DesktopFile -> {
-                fileDownloadJob?.cancel()
-                fileOpenError = null
-                openingFileName = FilePreviewRules.nameForOpening(target.path)
-                fileDownloadJob = scope.launch {
-                    val downloaded = session.downloadFile(threadId, message.id, target.path)
-                    openingFileName = null
-                    if (downloaded == null) {
-                        fileOpenError = session.actionError ?: "Couldn't open that file. Try again."
-                        session.actionError = null
-                        return@launch
-                    }
-                    val item = runCatching { withContext(Dispatchers.IO) { filePreviews.store(downloaded) } }
-                        .getOrElse {
-                            fileOpenError = "The downloaded file couldn't be previewed."
-                            return@launch
-                        }
-                    when (item.kind) {
-                        FilePreviewKind.MARKDOWN, FilePreviewKind.TEXT -> filePreview = item
-                        FilePreviewKind.OTHER -> filePreviews.openWithSystem(item)?.let { fileOpenError = it }
-                    }
-                }
-            }
+            is LocalMessageLink.DesktopFile -> openFile(target.path, message)
             null -> fileOpenError = "This link can't be opened securely."
         }
     }
+
+    fun openAttachment(
+        attachment: DisplayedMessageAttachment,
+        message: Message,
+        downloaded: DownloadedFile?,
+    ) = openFile(
+        attachment.path,
+        message,
+        downloaded,
+        preferredName = attachment.name,
+        cacheResult = true,
+    )
     val focusedMessageId by session.focusedMessageId.collectAsState()
 
     val dictationListening by dictation.isListening.collectAsState()
@@ -652,7 +698,10 @@ private fun LoadedChat(
             ) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .widthIn(max = CHAT_CONTENT_MAX_WIDTH)
+                        .fillMaxSize(),
                     contentPadding = PaddingValues(
                         start = 16.dp,
                         end = 16.dp,
@@ -725,6 +774,7 @@ private fun LoadedChat(
                                     // not one per bubble.
                                     endsRun = TranscriptLayout.endsRowRun(transcript, index),
                                     openLink = ::openLink,
+                                    openAttachment = ::openAttachment,
                                 )
                                 is TranscriptRow.ActivityRun -> ActivityRunChip(message.items)
                             }
@@ -767,10 +817,16 @@ private fun LoadedChat(
                             showingPlus = true
                         }
                     },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .widthIn(max = CHAT_CONTENT_MAX_WIDTH),
                 )
             }
 
             Composer(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .widthIn(max = CHAT_CONTENT_MAX_WIDTH),
                 name = chat.name,
                 draft = draft,
                 accessory = ComposerAccessories.accessory(
@@ -858,7 +914,15 @@ private fun LoadedChat(
     }
 
     filePreview?.let { item ->
-        FilePreviewSheet(item = item, onDismiss = { filePreview = null })
+        FilePreviewSheet(
+            item = item,
+            onDismiss = {
+                filePreview = null
+                scope.launch(Dispatchers.IO) { filePreviews.dismiss(item) }
+            },
+            onShare = { filePreviews.share(item) },
+            onOpen = { filePreviews.openWithSystem(item) },
+        )
     }
 }
 
@@ -877,6 +941,7 @@ private fun share(
 
 private const val LOAD_EARLIER_KEY = "companion.loadEarlier"
 private const val LIVE_BUBBLE_KEY = "companion.live"
+private val CHAT_CONTENT_MAX_WIDTH = 840.dp
 
 /** `itemsIndexed` with the message id as the key — one call site, one helper. */
 private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedKeyed(
@@ -912,9 +977,10 @@ private fun ChatHeader(
     onBack: () -> Unit,
     onWatchComputer: () -> Unit,
     onOpenProfile: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val surface = MaterialTheme.colorScheme.surface
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Box(modifier = modifier.fillMaxWidth()) {
         Spacer(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1212,6 +1278,7 @@ private fun ChatActionIcon(id: ChatActionId, tint: Color) {
 /** A round + and a pill with the send button inside it. */
 @Composable
 private fun Composer(
+    modifier: Modifier = Modifier,
     name: String,
     draft: String,
     accessory: ComposerAccessory,
@@ -1247,7 +1314,7 @@ private fun Composer(
         label = "plus",
     )
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),

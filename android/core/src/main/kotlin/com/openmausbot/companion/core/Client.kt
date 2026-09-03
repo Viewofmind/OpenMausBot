@@ -706,14 +706,7 @@ class CompanionClient(
                 ?: ordinary?.trim('"')
                 ?: fallbackPath.split('/', '\\').lastOrNull { it.isNotEmpty() }
                 ?: "file"
-            val basename = candidate.split('/', '\\').lastOrNull { it.isNotEmpty() } ?: "file"
-            val cleaned = basename.map { character ->
-                val code = character.code
-                val bidiControl = code in 0x202A..0x202E || code in 0x2066..0x2069
-                if (character.isISOControl() || bidiControl) ' ' else character
-            }.joinToString("").trim()
-            val shortened = cleaned.take(180)
-            return if (shortened.isEmpty() || shortened == "." || shortened == "..") "file" else shortened
+            return sanitisePortableFilename(candidate, "file")
         }
         private val AVATAR_MIME_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()

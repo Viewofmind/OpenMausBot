@@ -69,6 +69,8 @@ class Session(
     private val metadataFn: suspend (CompanionClient) -> CompanionConnectionMetadata = { client ->
         client.connectionMetadata()
     },
+    /** Test seam for the handoff between a completed transfer and its caller. */
+    private val afterAttachmentDownload: suspend () -> Unit = {},
 ) {
     sealed interface Status {
         data object Unpaired : Status
@@ -127,6 +129,7 @@ class Session(
     private var screenWatchers = 0
     private val gate = Mutex()
     private val notificationGate = Mutex()
+    private val attachmentDownloads = AttachmentDownloadCache(scope)
     private val restored = CompletableDeferred<Unit>()
     /** QR credentials authoritatively rejected or redeemed — never start a new request (§6). */
     private val spentQrCredentials = mutableSetOf<String>()
@@ -503,6 +506,7 @@ class Session(
     }
 
     private fun stopActiveRuntimeLocked() {
+        attachmentDownloads.clear()
         streamGeneration += 1
         streamJob?.cancel()
         streamJob = null
@@ -1098,6 +1102,7 @@ class Session(
                     PendingMessageAttachment.Kind.IMAGE -> SharedAttachmentReference(
                         path = activeClient.uploadImage(attachment.data, mime, attachment.id),
                         kind = SharedAttachmentKind.IMAGE,
+                        displayName = attachment.name,
                     )
                     PendingMessageAttachment.Kind.FILE -> {
                         val file = activeClient.uploadFile(attachment.data, attachment.name, mime, attachment.id)
@@ -1153,16 +1158,33 @@ class Session(
      * Where the bytes are kept for viewing is the app's business (it owns a
      * cache directory); this only fetches and reports.
      */
-    suspend fun downloadFile(threadId: String, messageId: String, path: String): DownloadedFile? {
+    suspend fun downloadFile(
+        threadId: String,
+        messageId: String,
+        path: String,
+        reportError: Boolean = true,
+        cacheResult: Boolean = false,
+    ): DownloadedFile? {
         val activeClient = client ?: run {
-            _actionError.value = "This computer is offline."
+            if (reportError) _actionError.value = "This computer is offline."
             return null
         }
         val connectionId = _connection.value?.id
-        _actionError.value = null
+        if (reportError) _actionError.value = null
         return try {
-            val download = activeClient.downloadFile(threadId, messageId, path)
+            val id = connectionId ?: throw APIError.Transport("This computer is offline.")
+            val download = attachmentDownloads.getOrLoad(
+                AttachmentDownloadKey(id, threadId, messageId, path),
+                retainResult = cacheResult,
+            ) {
+                activeClient.downloadFile(threadId, messageId, path)
+            }
+            afterAttachmentDownload()
             currentCoroutineContext().ensureActive()
+            // A computer switch invalidates the meaning of every local path.
+            // The cache is cleared during the switch, but a transfer that won
+            // the completion race must still never surface old-computer bytes.
+            if (_connection.value?.id != id) return null
             download
         } catch (error: CancellationException) {
             throw error
@@ -1174,10 +1196,10 @@ class Session(
                     }
                 }
             }
-            _actionError.value = error.message
+            if (reportError) _actionError.value = error.message
             null
         } catch (error: Throwable) {
-            _actionError.value = error.message
+            if (reportError) _actionError.value = error.message
             null
         }
     }

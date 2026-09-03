@@ -376,6 +376,8 @@ function EventEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [attachmentNotice, setAttachmentNotice] = useState("");
+  const [attachmentPendingCount, setAttachmentPendingCount] = useState(0);
+  const attachmentPending = attachmentPendingCount > 0;
   const fileInput = useRef<HTMLInputElement>(null);
   const cloudInstance = state.instances.find((instance) => instance.driverKind === "boxAgent");
   const cloudReady = Boolean(state.config?.box.configured && cloudInstance?.snapshot.state === "available");
@@ -429,20 +431,26 @@ function EventEditor({
 
   const pickFiles = async (files: FileList | null) => {
     if (!files?.length || isRoomGoal) return;
-    const result = await intakeFiles(Array.from(files), {
-      allowImages: true,
-      getPath: pathForFile,
-      uploadImage: imageAttachmentFromFile,
-    });
-    const added = toContextAttachments(result.attachments);
-    if (added.length) {
-      setAttachments((current) => [...current, ...added].slice(0, 20));
-      if (runOn === "cloud") setRunOn("maus");
+    setAttachmentPendingCount((count) => count + 1);
+    try {
+      const result = await intakeFiles(Array.from(files), {
+        allowImages: true,
+        getPath: pathForFile,
+        uploadImage: imageAttachmentFromFile,
+      });
+      const added = toContextAttachments(result.attachments);
+      if (added.length) {
+        setAttachments((current) => [...current, ...added].slice(0, 20));
+        if (runOn === "cloud") setRunOn("maus");
+      }
+      if (result.notice) setAttachmentNotice(result.notice);
+    } finally {
+      setAttachmentPendingCount((count) => Math.max(0, count - 1));
     }
-    if (result.notice) setAttachmentNotice(result.notice);
   };
 
   const save = async () => {
+    if (attachmentPending) return;
     setSaving(true);
     setError("");
     try {
@@ -776,7 +784,7 @@ function EventEditor({
 
         <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t border-hairline/40 bg-panel/95 px-5 py-3.5 backdrop-blur">
           <button onClick={onClose} className="rounded-lg px-4 py-2 text-[12.5px] text-ink-secondary hover:bg-raised hover:text-ink">Cancel</button>
-          <button onClick={save} disabled={saving || !valid} className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-[12.5px] font-semibold text-white hover:brightness-110 disabled:opacity-40">{saving && <Loader2 size={14} className="animate-spin" />}{existingRoutine || existingCall ? "Save" : kind === "call" ? "Schedule call" : isRoomGoal ? "Schedule team goal" : "Schedule routine"}</button>
+          <button onClick={save} disabled={saving || attachmentPending || !valid} className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-[12.5px] font-semibold text-white hover:brightness-110 disabled:opacity-40">{(saving || attachmentPending) && <Loader2 size={14} className="animate-spin" />}{attachmentPending ? "Attaching…" : existingRoutine || existingCall ? "Save" : kind === "call" ? "Schedule call" : isRoomGoal ? "Schedule team goal" : "Schedule routine"}</button>
         </div>
       </div>
     </div>

@@ -5,12 +5,15 @@ import { useStore, visibleMessages, type Bot, type Group, type Message } from "@
 import { cn } from "@/lib/cn";
 import {
   draftRevision,
+  appendDraftAttachments,
+  changeDraftAttachmentPending,
   forgetFailedComposerSend,
   markDraftEdited,
   recoverFailedComposerSend,
   rememberFailedComposerSend,
   restoredSendId,
   useComposerDraft,
+  useDraftAttachmentPending,
   useFailedComposerSends,
   type ComposerSendSnapshot,
   type FailedComposerSend,
@@ -225,6 +228,7 @@ export function Composer({
     draftId,
     !group && bot ? `bot:${bot.id}` : undefined,
   );
+  const attachmentPending = useDraftAttachmentPending(draftId);
   const failedSends = useFailedComposerSends(draftId);
   // Goal mode is opt-in and one-shot so the next ordinary channel message
   // cannot accidentally start another multi-turn team run.
@@ -255,8 +259,8 @@ export function Composer({
     [onRestoreReply],
   );
   const addAttachments = useCallback(
-    (next: Attachment[]) => editAttachments((prev) => [...prev, ...next]),
-    [editAttachments],
+    (next: Attachment[]) => appendDraftAttachments(draftId, next),
+    [draftId],
   );
   const removeAttachment = useCallback(
     (id: string) => editAttachments((prev) => prev.filter((a) => a.id !== id)),
@@ -420,15 +424,18 @@ export function Composer({
   const autoBot = group ? undefined : bot;
   const pickFiles = async (picked: FileList | null) => {
     if (!picked?.length) return;
-    const { attachments: added, notice } = await intakeFiles(Array.from(picked), {
-      allowImages: engineSupportsImages,
-      getPath: pathForFile,
-      uploadImage: imageAttachmentFromFile,
-    });
-    if (added.length) addAttachments(added);
-    // Keep file-specific failures beside the attachments. A successful
-    // overlapping intake must not erase an earlier failure before it is read.
-    if (notice) setAttachmentNotice(notice);
+    changeDraftAttachmentPending(draftId, true);
+    try {
+      const { attachments: added, notice } = await intakeFiles(Array.from(picked), {
+        allowImages: engineSupportsImages,
+        getPath: pathForFile,
+        uploadImage: imageAttachmentFromFile,
+      });
+      if (added.length) addAttachments(added);
+      if (notice) setAttachmentNotice(notice);
+    } finally {
+      changeDraftAttachmentPending(draftId, false);
+    }
   };
   const setAuto = (auto: boolean) => {
     if (!autoBot) return;
@@ -474,7 +481,7 @@ export function Composer({
     }
   };
   const send = () => {
-    if (locked) return;
+    if (locked || attachmentPending) return;
     if (
       attachments.some((attachment) => attachment.kind === "image") &&
       !imageTargetsSupport(effectiveText, effectiveChannelMode)
@@ -718,6 +725,7 @@ export function Composer({
           allowImages={engineSupportsImages}
           notice={attachmentNotice}
           onNotice={setAttachmentNotice}
+          onPendingChange={(pending) => changeDraftAttachmentPending(draftId, pending)}
         />
         <div className="relative">
           {/* App-ground from the pill midline down, full-bleed. Bubbles may
@@ -802,17 +810,22 @@ export function Composer({
             const imageFiles = Array.from(e.clipboardData.files).filter(isImageFile);
             if (imageFiles.length && engineSupportsImages) {
               e.preventDefault();
+              changeDraftAttachmentPending(draftId, true);
               void (async () => {
-                for (const file of imageFiles) {
-                  try {
-                    const attachment = await imageAttachmentFromFile(file);
-                    if (attachment) editAttachments((prev) => [...prev, attachment]);
-                  } catch (err) {
-                    dispatch({
-                      type: "error",
-                      message: err instanceof Error ? err.message : "image upload failed",
-                    });
+                try {
+                  for (const file of imageFiles) {
+                    try {
+                      const attachment = await imageAttachmentFromFile(file);
+                      if (attachment) appendDraftAttachments(draftId, [attachment]);
+                    } catch (err) {
+                      dispatch({
+                        type: "error",
+                        message: err instanceof Error ? err.message : "image upload failed",
+                      });
+                    }
                   }
+                } finally {
+                  changeDraftAttachmentPending(draftId, false);
                 }
               })();
               return;
@@ -885,12 +898,14 @@ export function Composer({
             }
             if (e.key === "Escape" && recording) setRecording(false);
           }}
-          disabled={Boolean(approval) || locked}
+          disabled={Boolean(approval) || locked || attachmentPending}
           placeholder={
             locked
               ? "Finish room setup to start chatting"
               : approval
               ? "Answer the approval above to continue"
+              : attachmentPending
+              ? "Attaching files…"
               : recording
               ? "Listening…"
               : canInject
@@ -943,6 +958,7 @@ export function Composer({
         {hasContent && !locked && (
           <button
             onClick={send}
+            disabled={attachmentPending}
             aria-label={
               busy && canSteer
                   ? "Send into the running turn"

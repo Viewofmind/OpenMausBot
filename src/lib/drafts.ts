@@ -1,7 +1,7 @@
 // Unsent composer input, kept per task. Switching tasks unmounts the Composer
 // and its local state. Drafts live in localStorage, so coming back to a task — in this
 // session or after a restart — finds what you were typing still there.
-import { useCallback, useEffect, useState, type SetStateAction } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore, type SetStateAction } from "react";
 import { isAttachment, type Attachment } from "./composer-attachments.js";
 
 const KEY = "omb-drafts";
@@ -18,6 +18,8 @@ const replyDrafts = new Map<string, string>();
 type DraftRestore = { text: string; attachments: Attachment[] };
 type DraftRestoreListener = (draft: DraftRestore) => void;
 const restoreListeners = new Map<string, Set<DraftRestoreListener>>();
+const attachmentPendingCounts = new Map<string, number>();
+const attachmentPendingListeners = new Map<string, Set<() => void>>();
 export interface FailedComposerSend {
   id: string;
   sendId: string;
@@ -42,6 +44,29 @@ let failedSendSequence = 0;
 type Values = Record<string, unknown>;
 type Store = Pick<Storage, "getItem" | "setItem"> | undefined;
 
+// localStorage is normally authoritative, but it can be unavailable or reject
+// writes (private browsing, a full quota, hardened environments). Keep the
+// same per-store snapshot in memory so an upload completing outside React can
+// merge with the live draft instead of replacing it with an empty fallback.
+const fallbackTextDrafts = new Map<string, string>();
+const fallbackAttachmentDrafts = new Map<string, Attachment[]>();
+const textDraftsByStore = new WeakMap<object, Map<string, string>>();
+const attachmentDraftsByStore = new WeakMap<object, Map<string, Attachment[]>>();
+
+function memoryFor<T>(
+  store: Store,
+  stored: WeakMap<object, Map<string, T>>,
+  fallback: Map<string, T>,
+): Map<string, T> {
+  if (!store) return fallback;
+  const key = store as object;
+  const existing = stored.get(key);
+  if (existing) return existing;
+  const created = new Map<string, T>();
+  stored.set(key, created);
+  return created;
+}
+
 // Storage is best-effort: a full quota, a locked-down origin, or a garbled
 // value must never cost a keystroke — every failure reads as "no drafts".
 function read(store: Store, key: string): Values {
@@ -55,11 +80,16 @@ function read(store: Store, key: string): Values {
 }
 
 export function getDraft(store: Store, id: string): string {
+  const memory = memoryFor(store, textDraftsByStore, fallbackTextDrafts);
+  if (memory.has(id)) return memory.get(id)!;
   const text = read(store, KEY)[id];
-  return typeof text === "string" ? text : "";
+  const value = typeof text === "string" ? text : "";
+  memory.set(id, value);
+  return value;
 }
 
 export function setDraft(store: Store, id: string, text: string): void {
+  memoryFor(store, textDraftsByStore, fallbackTextDrafts).set(id, text);
   const drafts = read(store, KEY);
   // an emptied composer drops its entry rather than storing "" forever
   if (text) drafts[id] = text;
@@ -72,11 +102,16 @@ export function setDraft(store: Store, id: string, text: string): void {
 }
 
 export function getDraftAttachments(store: Store, id: string): Attachment[] {
+  const memory = memoryFor(store, attachmentDraftsByStore, fallbackAttachmentDrafts);
+  if (memory.has(id)) return [...memory.get(id)!];
   const attachments = read(store, ATTACHMENTS_KEY)[id];
-  return Array.isArray(attachments) ? attachments.filter(isAttachment) : [];
+  const value = Array.isArray(attachments) ? attachments.filter(isAttachment) : [];
+  memory.set(id, value);
+  return [...value];
 }
 
 export function setDraftAttachments(store: Store, id: string, attachments: Attachment[]): void {
+  memoryFor(store, attachmentDraftsByStore, fallbackAttachmentDrafts).set(id, [...attachments]);
   const drafts = read(store, ATTACHMENTS_KEY);
   if (attachments.length) drafts[id] = attachments;
   else delete drafts[id];
@@ -207,6 +242,54 @@ export function restoreComposerDraft(id: string, draft: DraftRestore): void {
   setDraft(store, id, draft.text);
   setDraftAttachments(store, id, draft.attachments);
   for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+}
+
+/** Append completed uploads directly to the keyed durable draft. This is
+ * safe after the Composer that started the upload has unmounted. */
+export function appendDraftAttachments(id: string, additions: Attachment[]): void {
+  if (additions.length === 0) return;
+  markDraftEdited(id);
+  const store = getStore();
+  const draft = {
+    text: getDraft(store, id),
+    attachments: [...getDraftAttachments(store, id), ...additions],
+  };
+  setDraftAttachments(store, id, draft.attachments);
+  for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+}
+
+/** Track upload work outside the mounted composer so task navigation cannot
+ * briefly unlock Send and detach a file that is still being persisted. */
+export function changeDraftAttachmentPending(id: string, pending: boolean): void {
+  const previous = attachmentPendingCounts.get(id) ?? 0;
+  const next = pending ? previous + 1 : Math.max(0, previous - 1);
+  if (next === previous) return;
+  if (next > 0) attachmentPendingCounts.set(id, next);
+  else attachmentPendingCounts.delete(id);
+  for (const listener of attachmentPendingListeners.get(id) ?? []) listener();
+}
+
+function subscribeToAttachmentPending(id: string, listener: () => void): () => void {
+  const listeners = attachmentPendingListeners.get(id) ?? new Set<() => void>();
+  listeners.add(listener);
+  attachmentPendingListeners.set(id, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) attachmentPendingListeners.delete(id);
+  };
+}
+
+export function isDraftAttachmentPending(id: string): boolean {
+  return (attachmentPendingCounts.get(id) ?? 0) > 0;
+}
+
+export function useDraftAttachmentPending(id: string): boolean {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeToAttachmentPending(id, listener),
+    [id],
+  );
+  const snapshot = useCallback(() => isDraftAttachmentPending(id), [id]);
+  return useSyncExternalStore(subscribe, snapshot, () => false);
 }
 
 function subscribeToDraftRestores(id: string, listener: DraftRestoreListener): () => void {

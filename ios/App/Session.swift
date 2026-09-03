@@ -19,6 +19,14 @@ import UIKit
 /// the transitions are worth being able to read.
 private let log = Logger(subsystem: "com.openmausbot.companion", category: "stream")
 
+private final class CachedAttachmentDownload: NSObject {
+    let value: DownloadedFile
+
+    init(_ value: DownloadedFile) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class Session: ObservableObject {
     enum Status: Equatable {
@@ -88,10 +96,16 @@ final class Session: ObservableObject {
     /// for the same attachment path.
     private var avatarFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var avatarCacheGeneration = 0
-    /// Only one downloaded document preview is retained. A replacement is
-    /// written completely before the previous directory is removed, so a
-    /// failed download cannot invalidate the file currently on screen.
-    private var filePreviewDirectory: URL?
+    /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
+    /// cost-bounded window so tapping that thumbnail opens immediately instead
+    /// of downloading the same image twice.
+    private let attachmentCache: NSCache<NSString, CachedAttachmentDownload> = {
+        let cache = NSCache<NSString, CachedAttachmentDownload>()
+        cache.countLimit = 12
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
+    private var attachmentCacheGeneration = 0
     /// An ambiguous network failure may happen after the server accepted a
     /// message. Reusing this id for the exact same retained draft makes Retry
     /// idempotent instead of sending the attachment twice.
@@ -417,7 +431,7 @@ final class Session: ObservableObject {
         rotation = CandidateRotation(hosts: [])
         state = CompanionState()
         resetAvatarCache()
-        clearFilePreview()
+        resetAttachmentCache()
         attachmentSendIDs.removeAll()
         NotificationCoordinator.shared.setBadge(0)
         status = .unpaired
@@ -449,7 +463,7 @@ final class Session: ObservableObject {
         token = nil
         state = CompanionState()
         resetAvatarCache()
-        clearFilePreview()
+        resetAttachmentCache()
         attachmentSendIDs.removeAll()
         NotificationCoordinator.shared.setBadge(0)
     }
@@ -851,7 +865,11 @@ final class Session: ObservableObject {
                         mime: mime,
                         uploadId: attachment.id.uuidString
                     )
-                    uploaded.append(SharedAttachmentReference(path: path, kind: .image))
+                    uploaded.append(SharedAttachmentReference(
+                        path: path,
+                        kind: .image,
+                        displayName: attachment.name
+                    ))
                 case .file:
                     let file = try await client.uploadFile(
                         data: attachment.data,
@@ -910,55 +928,112 @@ final class Session: ObservableObject {
         }
     }
 
-    /// Download one desktop path through its originating transcript message,
-    /// then place it in a private temporary directory for Quick Look.
-    func downloadFile(
+    /// Fetch one app-owned attachment through the message that introduced it.
+    /// The caller owns presentation errors so a failed thumbnail or preview can
+    /// explain itself beside the attachment that was tapped.
+    func fetchAttachment(
         threadId: String,
         messageId: String,
-        path: String
-    ) async -> DownloadedFile? {
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
         guard let client else {
-            actionError = "This computer is offline."
-            return nil
+            throw APIError.transport("This computer is offline.")
         }
-        actionError = nil
+        let cacheKey = "\(threadId)\u{1F}\(messageId)\u{1F}\(path)"
+        if cacheResult,
+           let cached = attachmentCache.object(forKey: cacheKey as NSString) {
+            return cached.value
+        }
+        let generation = attachmentCacheGeneration
         do {
+            // Keep this structured. When the row scrolls away SwiftUI cancels
+            // its task, which now propagates directly into URLSession instead
+            // of leaving a shared unstructured download running.
             let download = try await client.downloadFile(
                 threadId: threadId,
                 messageId: messageId,
                 path: path
             )
             try Task.checkCancellation()
-            let manager = FileManager.default
-            let root = manager.temporaryDirectory
-                .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
-            let nextDirectory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try manager.createDirectory(
-                at: nextDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
-            )
-            let fileURL = nextDirectory.appendingPathComponent(download.filename, isDirectory: false)
-            do {
-                try download.data.write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-                // A synchronous write cannot be interrupted halfway through.
-                // Check immediately afterwards so a cancelled preview never
-                // leaves its completed temporary copy behind.
-                try Task.checkCancellation()
-            } catch {
-                try? manager.removeItem(at: nextDirectory)
-                throw error
+            guard generation == attachmentCacheGeneration else { throw CancellationError() }
+            if cacheResult {
+                attachmentCache.setObject(
+                    CachedAttachmentDownload(download),
+                    forKey: cacheKey as NSString,
+                    cost: download.data.count
+                )
             }
-            let previous = filePreviewDirectory
-            filePreviewDirectory = nextDirectory
-            if let previous { try? manager.removeItem(at: previous) }
-            actionError = nil
-            return download.stored(at: fileURL)
-        } catch is CancellationError {
-            return nil
+            return download
         } catch let error as APIError where error.isUnauthorized {
+            // A cancelled request from the previous computer may finish after
+            // a switch. Its 401 belongs to that old token and must not evict
+            // the current live session.
+            guard generation == attachmentCacheGeneration, !Task.isCancelled else {
+                throw CancellationError()
+            }
             status = .unauthorized
-            actionError = error.localizedDescription
+            throw error
+        } catch {
+            if Task.isCancelled || generation != attachmentCacheGeneration {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    /// Fetch and materialize an attachment in a protected temporary directory
+    /// for Quick Look, markdown/text preview, and the system share sheet.
+    func prepareAttachmentPreview(
+        threadId: String,
+        messageId: String,
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
+        let download = try await fetchAttachment(
+            threadId: threadId,
+            messageId: messageId,
+            path: path,
+            cacheResult: cacheResult
+        )
+        try Task.checkCancellation()
+        let preparation = Task.detached(priority: .userInitiated) {
+            // Content-Disposition is the server's canonical, sanitised name.
+            // The transport tag's `name` is presentation-only and must never
+            // choose the on-disk preview/share filename.
+            try Self.materializePreview(download: download, filename: download.filename)
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: {
+            preparation.cancel()
+        }
+        do {
+            try Task.checkCancellation()
+            return prepared
+        } catch {
+            Self.removePreview(at: prepared.localURL)
+            throw error
+        }
+    }
+
+    /// Compatibility for file links in assistant markdown. User attachment
+    /// cards use the throwing API above so their feedback remains local.
+    func downloadFile(
+        threadId: String,
+        messageId: String,
+        path: String
+    ) async -> DownloadedFile? {
+        actionError = nil
+        do {
+            let download = try await prepareAttachmentPreview(
+                threadId: threadId,
+                messageId: messageId,
+                path: path
+            )
+            actionError = nil
+            return download
+        } catch is CancellationError {
             return nil
         } catch {
             actionError = error.localizedDescription
@@ -966,9 +1041,47 @@ final class Session: ObservableObject {
         }
     }
 
-    private func clearFilePreview() {
-        if let filePreviewDirectory { try? FileManager.default.removeItem(at: filePreviewDirectory) }
-        filePreviewDirectory = nil
+    private func resetAttachmentCache() {
+        attachmentCacheGeneration += 1
+        attachmentCache.removeAllObjects()
+    }
+
+    nonisolated private static func materializePreview(
+        download: DownloadedFile,
+        filename: String
+    ) throws -> DownloadedFile {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory
+            .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try Task.checkCancellation()
+        try manager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        let fileURL = directory.appendingPathComponent(filename, isDirectory: false)
+        do {
+            try download.data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+            )
+            try Task.checkCancellation()
+            return DownloadedFile(
+                data: download.data,
+                filename: filename,
+                contentType: download.contentType,
+                localURL: fileURL
+            )
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    nonisolated private static func removePreview(at fileURL: URL?) {
+        guard let fileURL else { return }
+        try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
     }
 
     private static func removeStaleFilePreviews() {

@@ -404,11 +404,10 @@ public enum SharedMessageComposer {
 
         for attachment in attachments {
             let tag = attachment.kind == .image ? "attached-image" : "attached-file"
-            if attachment.kind == .file,
-               let displayName = attachment.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+            if let displayName = attachment.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
                !displayName.isEmpty {
                 parts.append(
-                    "<attached-file path=\"\(escapeAttribute(attachment.path))\" " +
+                    "<\(tag) path=\"\(escapeAttribute(attachment.path))\" " +
                     "name=\"\(escapeAttribute(displayName))\" />"
                 )
             } else {
@@ -869,8 +868,38 @@ public struct CompanionClient: Sendable {
             let isBidiControl = (0x202A...0x202E).contains(code) || (0x2066...0x2069).contains(code)
             return CharacterSet.controlCharacters.contains(scalar) || isBidiControl ? " " : String(scalar)
         }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-        let shortened = String(cleaned.prefix(180))
+        let shortened = boundedFilename(cleaned)
         return shortened.isEmpty || shortened == "." || shortened == ".." ? "file" : shortened
+    }
+
+    /// APFS limits one path component by bytes, not Swift characters. Keep
+    /// enough room for the preview cache's own suffix and retain a useful
+    /// extension whenever it fits.
+    private static func boundedFilename(_ value: String, maximumUTF8Bytes: Int = 180) -> String {
+        guard value.utf8.count > maximumUTF8Bytes else { return value }
+        let pathExtension = (value as NSString).pathExtension
+        let suffix = pathExtension.isEmpty ? "" : ".\(pathExtension)"
+        if !suffix.isEmpty,
+           suffix.utf8.count <= 32,
+           suffix.utf8.count < maximumUTF8Bytes {
+            let stem = String(value.dropLast(suffix.count))
+            let prefix = utf8Prefix(stem, maximumBytes: maximumUTF8Bytes - suffix.utf8.count)
+            if !prefix.isEmpty { return prefix + suffix }
+        }
+        return utf8Prefix(value, maximumBytes: maximumUTF8Bytes)
+    }
+
+    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
+        var result = ""
+        var bytes = 0
+        for character in value {
+            let piece = String(character)
+            let pieceBytes = piece.utf8.count
+            guard bytes + pieceBytes <= maximumBytes else { break }
+            result.append(character)
+            bytes += pieceBytes
+        }
+        return result
     }
 
     /// Fetch an app-owned avatar with the paired-device bearer token. Custom
