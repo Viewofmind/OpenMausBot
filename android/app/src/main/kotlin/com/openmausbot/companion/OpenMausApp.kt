@@ -15,6 +15,7 @@ import com.openmausbot.companion.sharing.ShareInbox
 import com.openmausbot.companion.storage.DataStoreConnectionStore
 import com.openmausbot.companion.storage.OnboardingPreferences
 import com.openmausbot.companion.storage.KeystoreTokenStore
+import com.openmausbot.companion.ui.FilePreviews
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,6 +60,9 @@ class OpenMausApp : Application() {
         super.onCreate()
         shareInbox = ShareInbox()
         ShareInbox.cleanStale(cacheDir)
+        // Launch stays non-blocking. The preview store awaits the shared
+        // completion barrier on its own IO coroutine before writing anything.
+        FilePreviews.startStaleCleanup(this, appScope)
         notifications = LocalNotificationPoster(this)
         discovery = NsdDiscovery(this)
         permissions = CompanionPermissions(this)

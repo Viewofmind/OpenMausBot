@@ -1,5 +1,6 @@
 package com.openmausbot.companion.ui
 
+import com.openmausbot.companion.core.AttachedMessageContent
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.ChatSummary
@@ -476,7 +477,10 @@ object SearchHitRole {
 object MessageActions {
     /** The text worth putting on the clipboard, or null when there is none. */
     fun copyableText(message: Message): String? = when (message.kind) {
-        Message.Kind.TEXT, Message.Kind.UNKNOWN -> message.text?.takeIf { it.isNotBlank() }
+        Message.Kind.TEXT, Message.Kind.UNKNOWN -> message.text
+            ?.let { AttachedMessageContent.parse(it) }
+            ?.text
+            ?.takeIf { it.isNotBlank() }
         // An approval card is worth copying for what it is asking to do.
         Message.Kind.OPTIONS -> message.card
             ?.let { card -> listOf(card.title, card.subtitle).filter { it.isNotBlank() } }
@@ -484,6 +488,18 @@ object MessageActions {
             ?.joinToString("\n\n")
         // A tool chip is context, and a screenshot is pixels.
         Message.Kind.ACTIVITY, Message.Kind.SCREEN -> null
+    }
+
+    /**
+     * Original user text can be retried only when it has no uploaded payload.
+     * Retrying an attachment message would either leak its computer-local path
+     * or silently resend a message without the file.
+     */
+    fun editableText(message: Message): String? {
+        if (message.role != Message.Role.USER || message.kind != Message.Kind.TEXT) return null
+        val raw = message.text ?: return null
+        if (AttachedMessageContent.parse(raw).attachments.isNotEmpty()) return null
+        return raw
     }
 }
 
