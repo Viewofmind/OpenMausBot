@@ -152,6 +152,9 @@ const proxy = createProxyHandler({
     connected: connectedDevices.open,
   });
 const companion = createServer(proxy);
+// `createServer(proxy)` handles ordinary HTTP only. noVNC switches its
+// connection to WebSocket, so every server exposing this proxy must also
+// forward Node's separate `upgrade` event to the viewer relay.
 companion.on("upgrade", proxy.upgrade);
 const managedOrigin = PRIVATE_ORIGIN ? createServer(proxy) : null;
 managedOrigin?.on("upgrade", proxy.upgrade);
