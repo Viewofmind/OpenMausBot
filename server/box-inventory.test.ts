@@ -239,6 +239,9 @@ describe("OpenMaus-managed Box inventory", () => {
     const managedName = legacyNameFor(botId);
     boxes = [{ id: "bx_3456789a", name: managedName, state: "archived" }];
     const owners = [{ botId, name: "Disposable", inUse: false }];
+    const journal = await import("./box-create-idempotency.ts");
+    const attempt = journal.beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+    journal.resolveBoxCreate(journal.rememberCreatedBox(attempt.request, "bx_3456789a"));
 
     await box.findBox(cfg, botId);
     requests.length = 0;
@@ -246,12 +249,27 @@ describe("OpenMaus-managed Box inventory", () => {
       /confirmation no longer matches/,
     );
     expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+    expect(journal.boxCreateRecoverySnapshot()).toContainEqual({
+      botId,
+      boxId: "bx_3456789a",
+      resolved: true,
+    });
+
+    deleteStatus = 503;
+    await expect(box.deleteManagedBox(cfg, owners, "bx_3456789a", managedName)).rejects.toThrow(/delete refused/);
+    expect(journal.boxCreateRecoverySnapshot()).toContainEqual({
+      botId,
+      boxId: "bx_3456789a",
+      resolved: true,
+    });
+    deleteStatus = 200;
 
     requests.length = 0;
     await box.deleteManagedBox(cfg, owners, "bx_3456789a", managedName);
     const removal = requests.find((request) => request.method === "DELETE");
     expect(removal?.path).toBe("/api/box/v1/boxes/bx_3456789a");
     expect(removal?.headers["x-ascii-confirm-delete"]).toBe("bx_3456789a");
+    expect(journal.boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
 
     boxes = [];
     requests.length = 0;

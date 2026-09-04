@@ -370,6 +370,16 @@ export function boxCreateRecoverySnapshot(): BoxCreateRecoverySnapshot[] {
   })));
 }
 
+/** Retire only the durable identity for a Box the provider has confirmed was
+ * deleted. Callers must never use this for a failed or ambiguous deletion. */
+export function retireDeletedBoxCreate(boxId: string): void {
+  if (!BOX_ID.test(boxId)) throw new Error("invalid deleted cloud computer id");
+  withJournalLock((requests) => {
+    const next = requests.filter((request) => request.boxId !== boxId);
+    if (next.length !== requests.length) save(next);
+  });
+}
+
 export function discardBoxCreate(request: BoxCreateRequest): void {
   withJournalLock((requests) => {
     const next = requests.filter((candidate) => candidate.idempotencyKey !== request.idempotencyKey);

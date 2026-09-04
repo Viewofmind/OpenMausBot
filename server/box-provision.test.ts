@@ -8,6 +8,7 @@ describe("cloud computer provisioning cleanup", () => {
   let api: Server;
   let provisionBox: typeof import("./box.ts").provisionBox;
   let scenario: "rename-failure" | "existing-desktop-failure" = "rename-failure";
+  let mutateConfigAfterCreate: (() => void) | null = null;
   const requests: RequestRecord[] = [];
 
   const nameFor = (botId: string) => {
@@ -32,6 +33,7 @@ describe("cloud computer provisioning cleanup", () => {
               : [];
           res.writeHead(200).end(JSON.stringify({ ok: true, boxes }));
         } else if (url.pathname === "/api/box/v1/boxes" && req.method === "POST") {
+          mutateConfigAfterCreate?.();
           res.writeHead(201).end(JSON.stringify({ ok: true, box: { id: "bx_3456789a", state: "provisioning" } }));
         } else if (url.pathname === "/api/box/v1/boxes/bx_3456789a" && req.method === "PATCH") {
           res.writeHead(500).end(JSON.stringify({ ok: false, message: "rename rejected" }));
@@ -86,5 +88,24 @@ describe("cloud computer provisioning cleanup", () => {
     ).rejects.toThrow(/desktop link could not be created/);
 
     expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  it("keeps create, rename, and cleanup on the token captured at operation start", async () => {
+    scenario = "rename-failure";
+    requests.length = 0;
+    const config = { box: { token: "box_original" } };
+    mutateConfigAfterCreate = () => {
+      config.box.token = "box_replacement";
+    };
+    try {
+      await expect(provisionBox(config, "token-race-bot", "Token Race Bot")).rejects.toThrow(/box naming failed/);
+    } finally {
+      mutateConfigAfterCreate = null;
+    }
+
+    const providerRequests = requests.filter((request) => request.path.includes("/boxes"));
+    expect(providerRequests.some((request) => request.method === "PATCH")).toBe(true);
+    expect(providerRequests.some((request) => request.method === "DELETE")).toBe(true);
+    expect(providerRequests.every((request) => request.headers.authorization === "Bearer box_original")).toBe(true);
   });
 });

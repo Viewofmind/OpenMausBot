@@ -440,6 +440,20 @@ describe("VPS computer", () => {
     expect(fake.calls.filter(({ args }) => args[2] === "run")).toHaveLength(1);
   });
 
+  it("keeps provisioning and readiness checks on the alias captured at operation start", async () => {
+    const fake = fixture({ container: false });
+    const config: AppConfig = { vps: { sshAlias: "original-vps" } };
+    const runner: VpsCommandRunner = async (args, options) => {
+      const result = await fake.runner(args, options);
+      if (args[2] === "run") config.vps!.sshAlias = "replacement-vps";
+      return result;
+    };
+
+    expect((await vpsComputerAction("provision", config, BOT_ID, runner)).ready).toBe(true);
+    expect(fake.calls.some(({ args }) => args[2] === "run")).toBe(true);
+    expect(fake.calls.every(({ args }) => args[1] === "ssh://original-vps")).toBe(true);
+  });
+
   it("mounts the official Cua MCP server through the tiny remote exec bridge", () => {
     const connection = vpsComputerMcp(CONFIG, BOT_ID);
     expect(connection.command).toBe(process.execPath);

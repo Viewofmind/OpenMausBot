@@ -35,9 +35,13 @@ export const VPS_ENVIRONMENT_LABEL = "com.openmausbot.environment";
 export const VPS_VIEWER_LABEL = "com.openmausbot.vps-viewer";
 export const VPS_CONTAINER_PREFIX = "openmausbot-vps";
 // The same durable id is also served by the environment discovery endpoint.
-// Keeping it server-only lets us distinguish installations sharing one Docker
-// host without disclosing it through the Computers inventory response.
-const VPS_ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
+// Resolve it lazily: index must finish legacy data migration and acquire the
+// writer lease before either provider may create the new data directory.
+let vpsEnvironmentIdCache: string | null = null;
+function vpsEnvironmentId(): string {
+  if (!vpsEnvironmentIdCache) vpsEnvironmentIdCache = loadEnvironmentId(DATA_DIR);
+  return vpsEnvironmentIdCache;
+}
 // SIGTERM must give ssh + docker time to tear down the remote exec before the
 // SIGKILL escalation; 1s was routinely too short over a WAN round-trip, and an
 // orphaned remote exec keeps the driver socket busy for the next command.
@@ -53,6 +57,21 @@ const SCREENSHOT_PATH = "/tmp/openmausbot-vps-preview.png";
 const INTERNAL_VIEWER_PORT = 6901;
 const VIEWER_VERSION = "1";
 const lifecycleLocks = new Map<string, Promise<void>>();
+
+/** Pin one SSH destination for a complete provider operation. The shared app
+ * config is reloaded in place, so retaining it across awaits could otherwise
+ * inspect one host and start/remove a container on another. */
+function snapshotVpsConfig(cfg: AppConfig): AppConfig {
+  const sshAlias = vpsSshAlias(cfg);
+  return sshAlias ? { vps: { sshAlias } } : {};
+}
+
+/** Settings uses this as the reverse side of its config-transition lock: an
+ * alias cannot move while a lifecycle action that started first still owns a
+ * container lock, including ownerless inventory removals. */
+export function vpsLifecycleBusy(): boolean {
+  return lifecycleLocks.size > 0;
+}
 // A held lock means a lifecycle mutation (worst case: a 10-minute image
 // build) is running. Waiting it out would wedge Sleep and the screenshot
 // poll behind it, so acquisition fails fast instead.
@@ -496,7 +515,7 @@ async function computeVpsComputerStatus(
       // A bot-scoped status is proof that the deterministic legacy container
       // still maps to a bot present in this installation. New containers must
       // carry this installation's durable environment label.
-      (environmentLabel === undefined || environmentLabel === VPS_ENVIRONMENT_ID);
+      (environmentLabel === undefined || environmentLabel === vpsEnvironmentId());
     status.network = hasNoPublishedPorts(detail?.HostConfig, detail?.NetworkSettings?.Networks) ? "private" : "unsafe";
     status.mounts = hasNoHostMounts(detail ?? {}) ? "none" : "unsafe";
     status.security = dockerSecurityIsHardened(detail?.HostConfig, { restartPolicy: "unless-stopped" })
@@ -596,6 +615,7 @@ export async function vpsComputerStatus(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<VpsComputerStatus> {
+  cfg = snapshotVpsConfig(cfg);
   const key = vpsLockKey(cfg, botId);
   const cacheable = runner === defaultRunner && key !== null;
   if (cacheable) {
@@ -728,7 +748,7 @@ async function scanManagedVpsComputers(
       // row as inspected, but never return an identifier that could make it
       // removable. Unlabelled pre-environment containers remain manageable
       // only while their deterministic name still maps to a local bot.
-      if (environmentLabel !== VPS_ENVIRONMENT_ID && !(environmentLabel === undefined && owner)) {
+      if (environmentLabel !== vpsEnvironmentId() && !(environmentLabel === undefined && owner)) {
         continue;
       }
       containerIds.set(name, id);
@@ -762,6 +782,7 @@ export async function listManagedVpsComputers(
   owners: ManagedVpsOwner[],
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<ManagedVpsInventory> {
+  cfg = snapshotVpsConfig(cfg);
   return (await scanManagedVpsComputers(cfg, owners, runner)).inventory;
 }
 
@@ -784,7 +805,7 @@ export function vpsContainerRunArgs(
     "--label",
     `${VPS_CONTAINER_LABEL}=${containerName}`,
     "--label",
-    `${VPS_ENVIRONMENT_LABEL}=${VPS_ENVIRONMENT_ID}`,
+    `${VPS_ENVIRONMENT_LABEL}=${vpsEnvironmentId()}`,
     "--label",
     `${VPS_VIEWER_LABEL}=${VIEWER_VERSION}`,
     "--label",
@@ -953,6 +974,7 @@ export async function removeManagedVpsComputer(
   confirmName: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<{ removed: true; name: string }> {
+  cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
   if (!alias) {
     throw Object.assign(new Error("VPS is not configured — add an SSH config alias in Connections"), { status: 409 });
@@ -1008,6 +1030,7 @@ export async function vpsComputerAction(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<VpsComputerStatus> {
+  cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
   if (!alias) throw Object.assign(new Error("VPS is not configured — add an SSH config alias in App Settings → Connections"), { status: 409 });
   const key = `${alias}:${vpsContainerName(botId)}`;
@@ -1092,6 +1115,7 @@ export async function inspectVpsForAuto(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<VpsComputerStatus> {
+  cfg = snapshotVpsConfig(cfg);
   const key = vpsLockKey(cfg, botId);
   return key
     ? withVpsLifecycleLock(key, () => computeVpsComputerStatus(cfg, botId, runner))
@@ -1107,6 +1131,7 @@ export async function vpsComputerJoin(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<{ joinUrl: string; state: "running" }> {
+  cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
   if (!alias) throw Object.assign(new Error("VPS is not configured"), { status: 409 });
 
@@ -1215,6 +1240,7 @@ export async function vpsComputerScreenshot(
   botId: string,
   runner: VpsCommandRunner = defaultRunner,
 ): Promise<{ png: string; format: "png" | "jpeg" }> {
+  cfg = snapshotVpsConfig(cfg);
   const alias = vpsSshAlias(cfg);
   if (!alias) throw Object.assign(new Error("VPS is not configured"), { status: 409 });
   const key = `${alias}:${vpsContainerName(botId)}`;

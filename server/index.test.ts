@@ -6,7 +6,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer, request, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -33,10 +33,12 @@ let child: ChildProcess;
 let boxStub: Server;
 let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
+let boxSlowRequestCount = 0;
 let managedBoxRows: Array<Record<string, unknown>> = [];
 let managedBoxListStatus = 200;
 let managedBoxListDelayMs = 0;
 let managedBoxStopDelayMs = 0;
+let managedBoxRenameDelayMs = 0;
 type ManagedBoxCreateMode = "refuse" | "ambiguous" | "fail-rename" | "success";
 let managedBoxCreateMode: ManagedBoxCreateMode = "refuse";
 let managedBoxCreateId = "bx_cdefghjk";
@@ -169,6 +171,28 @@ beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "omb-api-test-"));
   staticDir = join(home, "static");
   fakeClaudeDump = join(home, "fake-claude-dump.json");
+  const fakeDockerDir = join(home, "fake-docker-bin");
+  const fakeDockerProgram = join(fakeDockerDir, "docker-empty.mjs");
+  mkdirSync(fakeDockerDir, { recursive: true });
+  writeFileSync(fakeDockerProgram, [
+    'const args = process.argv.slice(2);',
+    'if (args[0] === "-H" && args[2] === "container" && args[3] === "ls") process.exit(0);',
+    'process.stderr.write("fixture docker is unavailable for this command\\n");',
+    'process.exit(127);',
+  ].join("\n"));
+  if (process.platform === "win32") {
+    writeFileSync(
+      join(fakeDockerDir, "docker.cmd"),
+      `@echo off\r\n${JSON.stringify(process.execPath)} ${JSON.stringify(fakeDockerProgram)} %*\r\n`,
+    );
+  } else {
+    writeFileSync(
+      join(fakeDockerDir, "docker"),
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeDockerProgram)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    chmodSync(join(fakeDockerDir, "docker"), 0o755);
+  }
   // a fleet of exactly one unknown driver: no CLI probes, no network
   mkdirSync(join(home, ".openmausbot"), { recursive: true });
   mkdirSync(join(staticDir, "assets"), { recursive: true });
@@ -485,10 +509,17 @@ beforeAll(async () => {
         config: { user_id: body.user_id },
       }));
     }
-    if (req.headers.authorization === "Bearer box_slow") {
+    if (
+      req.headers.authorization === "Bearer box_slow"
+      && new URL(req.url ?? "/", "http://box.invalid").pathname === "/boxes"
+    ) {
+      boxSlowRequestCount += 1;
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    if (req.headers.authorization === "Bearer box_route") {
+    if (
+      req.headers.authorization === "Bearer box_route" ||
+      req.headers.authorization === "Bearer box_route_rotated"
+    ) {
       const method = req.method ?? "GET";
       const path = req.url ?? "/";
       const requestUrl = new URL(path, "http://box.invalid");
@@ -543,6 +574,9 @@ beforeAll(async () => {
         return res.end(JSON.stringify({ ok: true, box: exists }));
       }
       if (method === "PATCH" && boxMatch) {
+        if (managedBoxRenameDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, managedBoxRenameDelayMs));
+        }
         if (managedBoxCreateMode === "fail-rename") {
           res.statusCode = 503;
           return res.end(JSON.stringify({ ok: false, message: "rename unavailable" }));
@@ -591,8 +625,15 @@ beforeAll(async () => {
       return res.end(JSON.stringify({ ok: true }));
     }
     const ok = req.headers.authorization === "Bearer box_good" || req.headers.authorization === "Bearer box_slow";
-    res.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
-    res.end(JSON.stringify(ok ? { ok: true, boxes: [] } : { ok: false, code: "unauthorized" }));
+    const directBoxRead = /^\/boxes\/bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/.test(req.url ?? "");
+    res.writeHead(ok && directBoxRead ? 404 : ok ? 200 : 401, { "content-type": "application/json" });
+    res.end(JSON.stringify(
+      ok && directBoxRead
+        ? { ok: false, message: "not found" }
+        : ok
+          ? { ok: true, boxes: [] }
+          : { ok: false, code: "unauthorized" },
+    ));
   });
   await new Promise<void>((r) => boxStub.listen(0, "127.0.0.1", r));
   boxStubPort = (boxStub.address() as { port: number }).port;
@@ -606,6 +647,7 @@ beforeAll(async () => {
       USERPROFILE: home,
       OMB_PORT: String(PORT),
       OMB_WEBHOOK_PORT: String(WEBHOOK_PORT),
+      OMB_EXTRA_PATH: fakeDockerDir,
       OMB_BOX_API: `http://127.0.0.1:${boxStubPort}`,
       OMB_COMPOSIO_API: `http://127.0.0.1:${boxStubPort}/api/v3.1`,
       OMB_STATIC_DIR: staticDir,
@@ -3798,6 +3840,109 @@ describe("harness HTTP API", () => {
     expect(nothing.status).toBe(400);
   });
 
+  it("keeps Box resources attached while allowing a proven same-account token rotation", async () => {
+    let botId = "";
+    try {
+      managedBoxRows = [];
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      const name = managedBoxNameForFixture(bot.id);
+      managedBoxRows = [{ id: "bx_23456789", name, state: "idle" }];
+
+      const cleared = await api("PUT", "/api/config", { box: { token: "" } });
+      expect(cleared.status).toBe(409);
+      expect(cleared.body.error).toMatch(/remove.*cloud computers/i);
+      const otherAccount = await api("PUT", "/api/config", { box: { token: "box_good" } });
+      expect(otherAccount.status).toBe(409);
+      expect(otherAccount.body.error).toMatch(/remove.*cloud computers/i);
+
+      const rotated = await api("PUT", "/api/config", { box: { token: " box_route_rotated " } });
+      expect(rotated.status).toBe(200);
+      expect(rotated.body.box).toEqual({ configured: true });
+      expect(JSON.stringify(rotated.body)).not.toContain("box_route_rotated");
+
+      expect((await api("POST", "/api/computers/boxes/bx_23456789/delete", { confirmName: name })).status).toBe(202);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+    } finally {
+      managedBoxRows = [];
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
+    }
+  });
+
+  it("excludes new Box turns, lifecycle actions, and bot deletion while a token change validates", async () => {
+    let botId = "";
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", cloudBackend: "box" })).status).toBe(200);
+
+      const beforeSlow = boxSlowRequestCount;
+      const changing = api("PUT", "/api/config", { box: { token: "box_slow" } });
+      await expect.poll(() => boxSlowRequestCount).toBeGreaterThan(beforeSlow);
+      const lifecycle = await api("POST", `/api/bots/${bot.id}/computer/provision`, {});
+      expect(lifecycle.status).toBe(409);
+      expect(lifecycle.body.error).toMatch(/Box account settings are being updated/i);
+      const turn = await api("POST", `/api/bots/${bot.id}/messages`, { text: "do not cross the account change" });
+      expect(turn.status).toBe(409);
+      expect(turn.body.error).toMatch(/Box account settings are being updated/i);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(409);
+      expect((await changing).status).toBe(200);
+
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+    } finally {
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
+    }
+  });
+
+  it("rejects a Box token change while create and rename own the lifecycle lane", async () => {
+    let botId = "";
+    try {
+      managedBoxRows = [];
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", cloudBackend: "box" })).status).toBe(200);
+      managedBoxCreateMode = "success";
+      managedBoxCreateId = "bx_fghjkmnp";
+      managedBoxCreateName = managedBoxNameForFixture(bot.id);
+      managedBoxRenameDelayMs = 1_000;
+      boxRouteCalls.length = 0;
+
+      const provisioning = api("POST", `/api/bots/${bot.id}/computer/provision`, {});
+      await expect.poll(() => boxRouteCalls.some(
+        (call) => call.method === "PATCH" && call.path === `/boxes/${managedBoxCreateId}`,
+      )).toBe(true);
+      const racedChange = await api("PUT", "/api/config", { box: { token: "box_good" } });
+      expect(racedChange.status).toBe(409);
+      expect(racedChange.body.error).toMatch(/cloud computer actions/i);
+      expect((await provisioning).status).toBe(200);
+      managedBoxRenameDelayMs = 0;
+
+      expect((await api("POST", `/api/computers/boxes/${managedBoxCreateId}/delete`, {
+        confirmName: managedBoxCreateName,
+      })).status).toBe(202);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+    } finally {
+      managedBoxRenameDelayMs = 0;
+      managedBoxCreateMode = "refuse";
+      managedBoxCreateId = "bx_cdefghjk";
+      managedBoxCreateName = "";
+      managedBoxRows = [];
+      managedBoxCreatedIds.clear();
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
+      boxRouteCalls.length = 0;
+    }
+  });
+
   it("manages and probes custom MCP servers without returning secret values", async () => {
     const secret = "mcp-secret-that-must-never-render";
     const created = await api("POST", "/api/mcp/servers", {
@@ -5031,6 +5176,7 @@ describe("harness HTTP API", () => {
       })).status).toBe(200);
       expect((await api("PATCH", `/api/bots/${bot.id}`, {
         browserProfile: "late-claim",
+        computer: "off",
         modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
       })).status).toBe(200);
 

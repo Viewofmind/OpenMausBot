@@ -255,6 +255,7 @@ describe("Box create idempotency", () => {
       hasUnresolvedBoxCreate,
       rememberCreatedBox,
       resolveBoxCreate,
+      retireDeletedBoxCreate,
     } = await import("./box-create-idempotency.ts");
     const botId = "deletion-guard-bot";
     const attempt = beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
@@ -279,6 +280,9 @@ describe("Box create idempotency", () => {
       boxId: "bx_3456789a",
       resolved: true,
     });
+
+    retireDeletedBoxCreate("bx_3456789a");
+    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
   });
 
   it("serializes two processes that primed independent journal caches", async () => {

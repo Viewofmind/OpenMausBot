@@ -20,6 +20,7 @@ import {
   hasUnresolvedBoxCreate,
   rememberCreatedBox,
   resolveBoxCreate,
+  retireDeletedBoxCreate,
   type BoxCreateRequest,
 } from "./box-create-idempotency.ts";
 import {
@@ -62,11 +63,20 @@ const BOX_STATES = new Set([
 // into every new name so another OpenMausBot installation using the same Box
 // account cannot mistake this installation's computers for abandoned ones.
 // The environment UUID itself never leaves the local data directory.
-const BOX_ENVIRONMENT_SCOPE = createHash("sha256")
-  .update(loadEnvironmentId(DATA_DIR))
-  .digest("hex")
-  .slice(0, 12);
-const SCOPED_BOX_PREFIX = `ogb-${BOX_ENVIRONMENT_SCOPE}-`;
+let scopedBoxPrefixCache: string | null = null;
+
+/** Resolve only after server startup has migrated the legacy data directory
+ * and acquired its writer lease. A static-import side effect here used to
+ * create the new directory too early and suppress that migration. */
+function scopedBoxPrefix(): string {
+  if (scopedBoxPrefixCache) return scopedBoxPrefixCache;
+  const scope = createHash("sha256")
+    .update(loadEnvironmentId(DATA_DIR))
+    .digest("hex")
+    .slice(0, 12);
+  scopedBoxPrefixCache = `ogb-${scope}-`;
+  return scopedBoxPrefixCache;
+}
 
 export interface ManagedBoxOwner {
   botId: string;
@@ -91,6 +101,12 @@ export interface ManagedBoxInventory {
   instances: ManagedBoxInventoryInstance[];
 }
 
+export interface BoxIdentityInspection {
+  available: boolean;
+  identity: { boxId: string; name: string } | null;
+  problem: string | null;
+}
+
 export type BoxTurnLifecycleAction = "attach" | "provision" | "wake" | "none";
 
 /** Decide lifecycle work before a turn mounts Box. Auto may observe and
@@ -113,6 +129,14 @@ export function boxTurnLifecycleAction({
 export type ManagedBoxMutationClaim = (
   instance: ManagedBoxInventoryInstance,
 ) => (() => void) | void;
+
+/** Keep one provider account for the whole logical operation. Settings may
+ * replace the shared config object after an async request has started; every
+ * follow-up (rename, readiness, cleanup, etc.) must keep using the credential
+ * that selected or created the Box in the first place. */
+function snapshotBoxConfig(cfg: AppConfig): AppConfig {
+  return { box: cfg.box ? { token: cfg.box.token } : undefined };
+}
 
 function boxFetch(cfg: AppConfig, path: string, opts: RequestInit = {}) {
   return fetch(`${BOX_API}${path}`, {
@@ -146,7 +170,7 @@ function legacyBoxNameFor(botId: string): string {
 // collisions; the environment scope prevents cross-install ownership claims.
 export async function boxNameFor(botId: string) {
   const { prefix, hash } = boxBotNameParts(botId);
-  return `${SCOPED_BOX_PREFIX}${prefix}-${hash}`;
+  return `${scopedBoxPrefix()}${prefix}-${hash}`;
 }
 
 export async function runCommand(cfg: AppConfig, boxId: string, command: string, { timeoutMs = 120_000 } = {}) {
@@ -266,6 +290,7 @@ export async function listManagedBoxes(
   cfg: AppConfig,
   owners: ManagedBoxOwner[],
 ): Promise<ManagedBoxInventory> {
+  cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) {
     return { configured: false, available: false, problem: null, instances: [] };
   }
@@ -289,6 +314,7 @@ export async function listManagedBoxes(
   const ownerByLegacyName = new Map(namedOwners.map(({ legacyName, owner }) => [legacyName, owner] as const));
   const instances: ManagedBoxInventoryInstance[] = [];
   const seenBoxIds = new Set<string>();
+  const scopedPrefix = scopedBoxPrefix();
   for (const candidate of listed.boxes) {
     if (!candidate || typeof candidate !== "object") continue;
     const boxId = typeof candidate.id === "string" ? candidate.id : "";
@@ -298,7 +324,7 @@ export async function listManagedBoxes(
     if (SCOPED_MANAGED_BOX_NAME.test(name)) {
       // A valid OMB name for another environment is account-visible but not
       // ours to display or mutate.
-      if (!name.startsWith(SCOPED_BOX_PREFIX)) continue;
+      if (!name.startsWith(scopedPrefix)) continue;
       owner = ownerByCurrentName.get(name) ?? null;
     } else if (LEGACY_MANAGED_BOX_NAME.test(name)) {
       // Pre-scope names have no installation provenance. A live local bot is
@@ -325,6 +351,39 @@ export async function listManagedBoxes(
     return (a.ownerName ?? a.name).localeCompare(b.ownerName ?? b.name);
   });
   return { configured: true, available: true, problem: null, instances };
+}
+
+/** Direct identity proof for a Box remembered in the local create journal.
+ * Unlike account LIST, this endpoint is not eventually consistent. Only the
+ * immutable id and provider name cross this boundary. */
+export async function inspectBoxIdentity(cfg: AppConfig, boxId: string): Promise<BoxIdentityInspection> {
+  cfg = snapshotBoxConfig(cfg);
+  if (!BOX_ID.test(boxId)) {
+    return { available: false, identity: null, problem: "the remembered cloud computer id is invalid" };
+  }
+  let inspected: Awaited<ReturnType<typeof boxJson>>;
+  try {
+    inspected = await boxJson(cfg, `/boxes/${boxId}`, { signal: AbortSignal.timeout(20_000) });
+  } catch {
+    return {
+      available: false,
+      identity: null,
+      problem: "Could not reach ascii.dev to verify a remembered cloud computer",
+    };
+  }
+  if (inspected.status === 404 || inspected.status === 410) {
+    return { available: true, identity: null, problem: null };
+  }
+  if (!inspected.ok) {
+    return { available: false, identity: null, problem: boxInventoryProblem(inspected.status, inspected.body) };
+  }
+  const candidate = inspected.body?.box;
+  const returnedId = typeof candidate?.id === "string" ? candidate.id : "";
+  const name = typeof candidate?.name === "string" ? candidate.name : "";
+  if (returnedId !== boxId || name.length === 0 || name.length > 100 || /[\r\n]/.test(name)) {
+    return { available: false, identity: null, problem: "ascii.dev returned an invalid cloud computer identity" };
+  }
+  return { available: true, identity: { boxId, name }, problem: null };
 }
 
 function inventoryFailure(inventory: ManagedBoxInventory): Error & { status: number } {
@@ -379,6 +438,7 @@ export async function sleepManagedBox(
   boxId: string,
   claim?: ManagedBoxMutationClaim,
 ) {
+  cfg = snapshotBoxConfig(cfg);
   const instance = await revalidateManagedBox(cfg, owners, boxId);
   if (instance.inUse) {
     throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
@@ -406,6 +466,7 @@ export async function deleteManagedBox(
   confirmName: string,
   claim?: ManagedBoxMutationClaim,
 ) {
+  cfg = snapshotBoxConfig(cfg);
   const instance = await revalidateManagedBox(cfg, owners, boxId);
   if (instance.inUse) {
     throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
@@ -422,6 +483,7 @@ export async function deleteManagedBox(
     if (!removed.ok) {
       throw Object.assign(new Error(boxErrorMessage(removed.status, "box delete", removed.body)), { status: removed.status });
     }
+    retireDeletedBoxCreate(instance.boxId);
     forgetBoxId(instance.boxId);
     return { ok: true };
   } finally {
@@ -430,6 +492,7 @@ export async function deleteManagedBox(
 }
 
 export async function findBox(cfg: AppConfig, botId: string) {
+  cfg = snapshotBoxConfig(cfg);
   const cachedId = boxIdCache.get(botId);
   if (cachedId) {
     try {
@@ -459,6 +522,7 @@ export async function findBox(cfg: AppConfig, botId: string) {
 
 /** Ready-or-null without the LIST when we already know the box. */
 export async function readyBox(cfg: AppConfig, botId: string, budgetMs = 60_000) {
+  cfg = snapshotBoxConfig(cfg);
   const box = await findBox(cfg, botId);
   if (!box) return null;
   if (READY.has(box.state)) return box;
@@ -619,6 +683,7 @@ async function createBox(cfg: AppConfig, botId: string) {
 
 /** Box state for the Computer panel. */
 export async function boxStatus(cfg: AppConfig, botId: string) {
+  cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) return { configured: false, box: null };
   const box = await findBox(cfg, botId);
   return {
@@ -633,6 +698,7 @@ export async function boxStatus(cfg: AppConfig, botId: string) {
  * a tmux welcome), and mint a fresh desktop URL.
  */
 export async function provisionBox(cfg: AppConfig, botId: string, botName: string) {
+  cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) {
     throw new Error('box provider not enabled — add {"box":{"token":"…"}} to ~/.openmausbot/config.json');
   }
@@ -705,6 +771,7 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
 
 /** Wake the bot's box and return a FRESH desktop URL. */
 export async function joinBox(cfg: AppConfig, botId: string) {
+  cfg = snapshotBoxConfig(cfg);
   const box = await findBox(cfg, botId);
   if (!box) throw new Error("no computer yet — provision it first");
   const ready = await waitReady(cfg, box.id);
@@ -718,6 +785,7 @@ export async function joinBox(cfg: AppConfig, botId: string) {
 /** Mint a human-control URL without changing provider lifecycle or guest
  * processes. This is the only join path allowed while a bot turn is active. */
 export async function joinReadyBox(cfg: AppConfig, botId: string) {
+  cfg = snapshotBoxConfig(cfg);
   const box = await findBox(cfg, botId);
   if (!box) throw Object.assign(new Error("no computer yet — provision it first"), { status: 409 });
   if (!READY.has(box.state)) {
@@ -731,6 +799,7 @@ export async function joinReadyBox(cfg: AppConfig, botId: string) {
 
 /** Archive the bot's box now (billing pauses, disk survives). */
 export async function sleepBox(cfg: AppConfig, botId: string) {
+  cfg = snapshotBoxConfig(cfg);
   const box = await findBox(cfg, botId);
   if (!box) throw new Error("no computer for this bot");
   await stopBox(cfg, box.id);
@@ -740,6 +809,7 @@ export async function sleepBox(cfg: AppConfig, botId: string) {
 
 /** Owner-scoped shell for the Computer panel's console. */
 export async function execOnBox(cfg: AppConfig, botId: string, command: string) {
+  cfg = snapshotBoxConfig(cfg);
   if (command.length > MAX_REMOTE_COMMAND_LENGTH) {
     throw new RangeError(`command is too long (maximum ${MAX_REMOTE_COMMAND_LENGTH} characters)`);
   }
@@ -789,6 +859,7 @@ async function readFileBase64(cfg: AppConfig, boxId: string, path: string): Prom
 /** `knownBoxId` skips box resolution entirely — the screen poller holds
  * the id for the whole turn and must not re-resolve it every frame. */
 export async function screenshotBox(cfg: AppConfig, botId: string, knownBoxId?: string) {
+  cfg = snapshotBoxConfig(cfg);
   let boxId = knownBoxId;
   if (!boxId) {
     const box = await findBox(cfg, botId);
