@@ -1541,8 +1541,9 @@ describe("harness HTTP API", () => {
 
       // Reading the panel status may inspect the provider, but it is GET-only.
       boxRouteCalls.length = 0;
-      expect((await api("GET", `/api/bots/${bot.id}/computer`)).status).toBe(200);
-      expect(boxRouteCalls).toEqual([{ method: "GET", path: "/boxes" }]);
+      const passiveStatus = await api("GET", `/api/bots/${bot.id}/computer`);
+      expect(passiveStatus).toMatchObject({ status: 200, body: { backend: "box", configured: true } });
+      expect(boxRouteCalls).toEqual([{ method: "GET", path: "/boxes?limit=200" }]);
 
       // A stale renderer cannot turn that passive read into infrastructure:
       // every Box verb is rejected before any provider mutation is attempted.
