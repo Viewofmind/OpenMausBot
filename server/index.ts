@@ -66,6 +66,7 @@ import * as box from "./box.ts";
 import { cloudBackendChangeError, vpsAliasChangeError } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
+import { peerAllowed, peerRosterSystemPrompt, reachablePeers } from "./peer-roster.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
@@ -3406,12 +3407,10 @@ async function startTurn(
       // integrations.agents gate below, the prompt hint) — a bot on a driver
       // without it must not be told about tools it cannot call. Any bot can
       // still be the TARGET of ask_bot regardless of its driver.
-      const sectionPeers = store.bots.filter(
-        (candidate) =>
-          candidate.id !== bot.id &&
-          !candidate.hidden &&
-          sectionKey(candidate.section) === sectionKey(bot.section),
-      );
+      // One reachability rule for the roster, list_bots and @mention
+      // resolution: a bot is never told about — or nudged toward — a peer
+      // that ask_bot and delegate_bot would then refuse.
+      const sectionPeers = reachablePeers(store.bots, bot);
       if (
         commsDepth < MAX_COMMS_DEPTH &&
         instance.adapter.capabilities.agentsMcp === true
@@ -3435,7 +3434,11 @@ async function startTurn(
             openMausStatusSystemPrompt(),
           )
         : integrations.agents && sectionPeers.length > 0
-          ? "You can work with the other bots in your section through the agents tools. list_bots shows who's available. Use delegate_bot for assigned or independent work so you remain available; use ask_bot only for a short consultation whose reply is required in your current answer."
+          // Ordinary bots could always CALL the peer tools; until now the
+          // one generic sentence they got never named a teammate, so the
+          // first move of any collaboration was a list_bots round trip the
+          // model mostly did not think to make.
+          ? peerRosterSystemPrompt(sectionPeers)
           : "";
       const credentialPrompt = integrations.agents
         ? " If a supported API key is missing, use request_credential to create a secure credential request. The desktop app shows the entry card; the mobile app only shows a handoff to the computer and never accepts the credential. Never claim a secure field opened on mobile, and never ask the user to paste credentials into chat."
@@ -6137,15 +6140,11 @@ const server = createServer(async (req, res) => {
         const self = url.searchParams.get("self");
         const sender = self ? store.bot(self) : null;
         if (!sender) return json(res, 403, { error: "unknown sender" });
-        // title/description included so a "chief of staff"-style bot can
-        // judge the team (who does what, who has no job description yet)
-        const bots = store.bots
-          .filter(
-            (b) =>
-              b.id !== self &&
-              !b.hidden &&
-              sectionKey(b.section) === sectionKey(sender.section),
-          )
+        // title/description included so the caller can judge the team (who
+        // does what, who has no job description yet). Every bot reads this
+        // now, not just the Chief, so it answers the same reachability
+        // question the roster does — same peers, same order.
+        const bots = reachablePeers(store.bots, sender)
           .map((b) => ({
             id: b.id,
             name: b.name,
@@ -6333,6 +6332,12 @@ const server = createServer(async (req, res) => {
         if (sectionKey(from.section) !== sectionKey(target.section)) {
           return json(res, 403, { error: "that bot belongs to a different section" });
         }
+        // The sender's allow-list, when it has one. Checked here rather than
+        // trusted from the roster: the tool call carries a bot id, and an id
+        // the model held from an earlier turn must not outlive the grant.
+        if (!peerAllowed(from, target.id)) {
+          return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
+        }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
         if (!store.taskByThread(from.id, fromThreadId)) {
           return json(res, 403, { error: "source thread does not belong to sender" });
@@ -6387,6 +6392,9 @@ const server = createServer(async (req, res) => {
           if (!freshFrom || !freshTarget) return json(res, 404, { error: "no such bot" });
           if (sectionKey(freshFrom.section) !== sectionKey(freshTarget.section)) {
             return json(res, 200, { error: "that bot moved to a different section" });
+          }
+          if (!peerAllowed(freshFrom, freshTarget.id)) {
+            return json(res, 200, { error: "that bot is no longer an allowed peer" });
           }
           if (!store.taskByThread(freshFrom.id, fromThreadId)) {
             return json(res, 404, { error: "source task no longer exists" });
@@ -6502,6 +6510,9 @@ const server = createServer(async (req, res) => {
         if (!target) return json(res, 404, { error: "no such bot" });
         if (sectionKey(from.section) !== sectionKey(target.section)) {
           return json(res, 403, { error: "that bot belongs to a different section" });
+        }
+        if (!peerAllowed(from, target.id)) {
+          return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
         }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
         if (!connectorThread(from.id, fromThreadId)) {
@@ -8432,6 +8443,43 @@ const server = createServer(async (req, res) => {
           return json(res, 400, { error: "approvePeerComms must be true or false" });
         }
         patch.approvePeerComms = body.approvePeerComms;
+      }
+      // Who this bot may contact. null clears the list back to "everyone
+      // visible in my section"; an array — including an empty one — is the
+      // explicit wiring, so a bot can be given exactly one correspondent.
+      //
+      // Narrowing is free, widening is not. The bot this field constrains
+      // can reach this endpoint: resolveRequestAuth hands admin+client to
+      // any loopback caller, so a bot holding Bash is one curl from
+      // deleting its own leash — the same adversary the acknowledgeLocalAuto
+      // block above is written against, and the exact bot the allow-list
+      // exists to contain. So cutting reach needs nothing (an operator, a
+      // script, even the bot itself may only ever make it smaller), while
+      // clearing the list or adding an id needs the proof of a human the
+      // desktop dialog sends and a tool call cannot forge.
+      if (body.peers !== undefined) {
+        let nextPeers: string[] | undefined;
+        if (body.peers === null) nextPeers = undefined;
+        else if (
+          !Array.isArray(body.peers) ||
+          body.peers.some((peerId: unknown) => typeof peerId !== "string")
+        ) {
+          return json(res, 400, { error: "peers must be a list of bot ids, or null for every bot in this section" });
+        } else {
+          nextPeers = [...new Set<string>(body.peers)].slice(0, MAX_WORKSPACE_BOTS);
+        }
+        // A bot with no list is already at its widest, so the first list it
+        // is ever given can only narrow it.
+        const currentPeers = existingBot?.peers;
+        const widensReach =
+          Array.isArray(currentPeers) &&
+          (nextPeers === undefined || nextPeers.some((peerId) => !currentPeers.includes(peerId)));
+        if (widensReach && body.acknowledgePeerScope !== true) {
+          return json(res, 400, {
+            error: "Widening a bot's allowed peers requires confirming it first (acknowledgePeerScope)",
+          });
+        }
+        patch.peers = nextPeers;
       }
       if (body.alwaysAllow !== undefined) {
         if (!Array.isArray(body.alwaysAllow) || body.alwaysAllow.some((t: unknown) => typeof t !== "string")) {
