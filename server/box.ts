@@ -24,6 +24,25 @@ const READY = new Set(["idle", "ready", "running"]);
 const DEFAULT_BOX_TTL_SECONDS = 8 * 60 * 60;
 const TRIAL_BOX_TTL_SECONDS = 2 * 60 * 60;
 
+export type BoxTurnLifecycleAction = "attach" | "provision" | "wake" | "none";
+
+/** Decide lifecycle work before a turn mounts Box. Auto may observe and
+ * attach an already-ready Box, but only explicit Cloud may create or wake. */
+export function boxTurnLifecycleAction({
+  explicitCloud,
+  canMount,
+  state,
+}: {
+  explicitCloud: boolean;
+  canMount: boolean;
+  state: string | null;
+}): BoxTurnLifecycleAction {
+  if (!canMount) return "none";
+  if (state && READY.has(state)) return "attach";
+  if (!explicitCloud) return "none";
+  return state ? "wake" : "provision";
+}
+
 function boxFetch(cfg: AppConfig, path: string, opts: RequestInit = {}) {
   return fetch(`${BOX_API}${path}`, {
     ...opts,

@@ -37,13 +37,36 @@ describe("bot patch queue", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("flush waits for the PATCH and returns the server-authoritative computer selection", async () => {
+    const request = deferredBot();
+    const send = vi.fn(async () => request.promise);
+    const queue = createBotPatchQueue({
+      send,
+      reconcile: async () => bot(),
+      onAuthoritative: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    queue.enqueue("bot-1", { computer: "cloud", cloudBackend: "vps" }, bot());
+    const flushed = queue.flush("bot-1");
+    let settled = false;
+    void flushed.then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    request.resolve(bot({ computer: "cloud", cloudBackend: "vps" }));
+    await expect(flushed).resolves.toMatchObject({ computer: "cloud", cloudBackend: "vps" });
+  });
+
   it("coalesces upload then remove so an older avatar can never resurrect", async () => {
     const sent: BotUpdatePatch[] = [];
     const authoritative = vi.fn();
     const queue = createBotPatchQueue({
       send: async (_botId, patch) => {
         sent.push(patch);
-        return bot({ ...patch });
+        return bot({ ...patch, computer: patch.computer ?? undefined });
       },
       reconcile: async () => bot(),
       onAuthoritative: authoritative,
@@ -220,6 +243,28 @@ describe("bot patch queue", () => {
 
     expect(sent).toEqual([{ computer: "local", acknowledgeLocalAuto: true, title: "Ops" }]);
     for (const overlay of overlays) expect(overlay).not.toHaveProperty("acknowledgeLocalAuto");
+  });
+
+  it("sends null to select Auto but normalizes it to an absent state field", async () => {
+    const sent: BotUpdatePatch[] = [];
+    const overlays: BotUpdatePatch[] = [];
+    const queue = createBotPatchQueue({
+      send: async (_botId, patch) => {
+        sent.push(patch);
+        return bot();
+      },
+      reconcile: async () => bot(),
+      onAuthoritative: (_bot, overlay) => overlays.push(overlay),
+      onError: vi.fn(),
+    });
+
+    queue.enqueue("bot-1", { computer: null }, bot({ computer: "cloud" }));
+    expect(queue.overlayFor("bot-1")).toEqual({ computer: undefined });
+    await vi.advanceTimersByTimeAsync(400);
+    await queue.flush("bot-1");
+
+    expect(sent).toEqual([{ computer: null }]);
+    expect(overlays).toEqual([{ computer: undefined }]);
   });
 
   it("revive undoes a dispose, so StrictMode's dev probe cannot kill saving", async () => {

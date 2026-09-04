@@ -59,36 +59,94 @@ export function linuxAutoDescription(): string {
   return "Auto reuses an existing cloud box; otherwise computer use stays off.";
 }
 
-export type BoxPanelAction = "ensure-box" | "local" | "unconfigured" | "auto-unavailable";
+export type BoxPanelAction =
+  | "ensure-box"
+  | "show-ready-box"
+  | "show-sleeping-box"
+  | "show-pending-box"
+  | "local"
+  | "unconfigured"
+  | "auto-unavailable";
+
+const READY_BOX_STATES = new Set(["idle", "ready", "running"]);
+const SLEEPING_BOX_STATES = new Set(["archived", "stopped"]);
 
 /** Mirror the turn router's Box choice without letting a passive panel open
- * create infrastructure. Auto may wake an existing Box. The box-native
- * Computer engine is the sole creation exception because it cannot run
- * anywhere else; explicit Cloud is always an intentional creation request. */
+ * mutate infrastructure. Auto only reports an existing Box's current state;
+ * it never creates, wakes, bootstraps, or opens one. This is deliberately
+ * independent of the engine: even the box-native Computer engine needs an
+ * explicit Cloud choice before the panel may provision. */
 export function resolveBoxPanelAction({
   computer,
-  driverKind,
   configured,
-  hasExistingBox,
+  boxState,
   canUseCloud,
   autoLocal,
 }: {
   computer: Bot["computer"];
-  driverKind: string | undefined;
   configured: boolean;
-  hasExistingBox: boolean;
+  boxState: string | null;
   canUseCloud: boolean;
   autoLocal: boolean;
 }): BoxPanelAction {
   const explicitCloud = computer === "cloud";
-  const boxNative = driverKind === "boxAgent";
 
   if (!configured) {
-    if (explicitCloud || boxNative) return "unconfigured";
+    if (explicitCloud) return "unconfigured";
     return autoLocal ? "local" : "auto-unavailable";
   }
-  if (canUseCloud && (hasExistingBox || explicitCloud || boxNative)) return "ensure-box";
+  if (explicitCloud) return canUseCloud ? "ensure-box" : "auto-unavailable";
+  if (canUseCloud && boxState) {
+    if (READY_BOX_STATES.has(boxState)) return "show-ready-box";
+    if (SLEEPING_BOX_STATES.has(boxState)) return "show-sleeping-box";
+    return "show-pending-box";
+  }
   return autoLocal ? "local" : "auto-unavailable";
+}
+
+/** A stale ready phase can survive one render while the selected bot or its
+ * destination changes. Keep every cloud preview POST behind the durable,
+ * explicit Cloud choice as well as the resolved phase. */
+export function shouldPollCloudPreview(
+  {
+    computer,
+    cloudBackend,
+    phase,
+    botId,
+    resolvedBotId,
+    resolvedComputer,
+    resolvedCloudBackend,
+  }: {
+    computer: Bot["computer"];
+    cloudBackend: NonNullable<Bot["cloudBackend"]>;
+    phase: string;
+    botId: string;
+    resolvedBotId: string | null;
+    resolvedComputer: Bot["computer"] | null;
+    resolvedCloudBackend: Bot["cloudBackend"] | null;
+  },
+): boolean {
+  return computer === "cloud"
+    && phase === "ready"
+    && resolvedBotId === botId
+    && resolvedComputer === "cloud"
+    && resolvedCloudBackend === cloudBackend;
+}
+
+/** A computer effect may render optimistic profile state while its PATCH is
+ * still in flight. Provider work is safe only when the settled server bot
+ * confirms the same destination and backend that this render expects. */
+export function persistedComputerSelectionMatches({
+  computer,
+  cloudBackend,
+  persistedBot,
+}: {
+  computer: Bot["computer"];
+  cloudBackend: NonNullable<Bot["cloudBackend"]>;
+  persistedBot: Pick<Bot, "computer" | "cloudBackend">;
+}): boolean {
+  return persistedBot.computer === computer
+    && (persistedBot.cloudBackend ?? "box") === cloudBackend;
 }
 
 export function autoSelectsLocalComputer({

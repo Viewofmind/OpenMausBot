@@ -1236,7 +1236,12 @@ export function reducer(state: AppState, action: Action): AppState {
             ),
           }
         : animated;
-      const { acknowledgeLocalAuto: _ack, ...botPatch } = action.patch;
+      const { acknowledgeLocalAuto: _ack, computer, ...rest } = action.patch;
+      const botPatch = computer === null
+        ? { ...rest, computer: undefined }
+        : computer === undefined
+          ? rest
+          : { ...rest, computer };
       return updateBot(next, action.botId, (b) => ({ ...b, ...botPatch }));
     }
     case "threadActive": {
@@ -1507,7 +1512,7 @@ const StoreContext = createContext<{
   state: AppState;
   dispatch: React.Dispatch<Action>;
   /** Commit any debounced profile edits before an operation reads the bot. */
-  flushBotPatches: (botId: string) => Promise<void>;
+  flushBotPatches: (botId: string) => Promise<BotAnnouncement | null>;
   /** Re-fetch engine availability — after an install, without a restart. */
   refreshInstances: () => Promise<void>;
   /** Explicit provider/network model discovery. */

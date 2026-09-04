@@ -552,7 +552,6 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "title"
         | "description"
         | "notifications"
-        | "computer"
         | "cloudBackend"
         | "autoStartVps"
         | "color"
@@ -570,7 +569,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "browser"
         | "modelSelection"
       >
-    > & { acknowledgeLocalAuto?: boolean },
+    > & { computer?: Bot["computer"] | null; acknowledgeLocalAuto?: boolean },
   ) => dispatch({ type: "updateBot", botId: bot.id, patch: p });
   const activeState = stateForBot(bot);
   const mascotMotion = state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
@@ -861,6 +860,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
               {([
+                [null, "Auto"],
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
@@ -868,7 +868,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                 ["off", "Off"],
               ] as const).map(([mode, label], i) => (
                 <button
-                  key={mode}
+                  key={mode ?? "auto"}
                   disabled={(mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)}
                   title={
                     mode === "local" && !localSelectable
@@ -878,7 +878,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                         : undefined
                   }
                   onClick={() => {
-                    if (mode === bot.computer) return;
+                    if ((mode === null && bot.computer === undefined) || mode === bot.computer) return;
                     if (mode === "local" && bot.autoApprove) setLocalAutoWarning("local");
                     // a browser-only bot must actually have its browser: flip
                     // the per-bot switch on with the destination
@@ -889,7 +889,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                     "flex-1 py-1.5 text-[13px] capitalize",
                     i > 0 && "border-l border-hairline/40",
                     ((mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)) && "cursor-not-allowed opacity-40",
-                    bot.computer === mode
+                    (mode === null ? bot.computer === undefined : bot.computer === mode)
                       ? "bg-control text-ink"
                       : "text-ink-secondary hover:bg-control/60 hover:text-ink",
                   )}
@@ -900,6 +900,12 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             {(!bot.computer || bot.computer === "cloud") && (
               <>
+                {!bot.computer && (
+                  <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
+                    <span className="font-medium text-ink">Auto cloud preference.</span>{" "}
+                    This chooses what Auto may reuse during a task; viewing settings does not create or wake a computer.
+                  </div>
+                )}
                 <CloudBackendPicker
                   value={bot.cloudBackend ?? "box"}
                   vpsSupported={canUseVps}

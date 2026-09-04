@@ -32,6 +32,7 @@ let child: ChildProcess;
 /** stands in for the box provider so config saving never touches the network */
 let boxStub: Server;
 let boxStubPort = 0;
+const boxRouteCalls: Array<{ method: string; path: string }> = [];
 let home: string;
 let staticDir: string;
 let fakeClaudeDump: string;
@@ -464,6 +465,28 @@ beforeAll(async () => {
     }
     if (req.headers.authorization === "Bearer box_slow") {
       await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (req.headers.authorization === "Bearer box_route") {
+      const method = req.method ?? "GET";
+      const path = req.url ?? "/";
+      boxRouteCalls.push({ method, path });
+      res.writeHead(200, { "content-type": "application/json" });
+      if (method === "GET" && path === "/boxes") {
+        return res.end(JSON.stringify({ ok: true, boxes: [] }));
+      }
+      if (method === "POST" && path === "/boxes") {
+        return res.end(JSON.stringify({ ok: false, message: "fixture refused create" }));
+      }
+      if (method === "GET" && path === "/boxes/route-box") {
+        return res.end(JSON.stringify({ ok: true, box: { id: "route-box", state: "running" } }));
+      }
+      if (method === "POST" && path === "/boxes/route-box/commands") {
+        return res.end(JSON.stringify({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+      }
+      if (method === "POST" && path === "/boxes/route-box/desktop?vnc=1") {
+        return res.end(JSON.stringify({ ok: true, desktopUrl: "https://desktop.invalid/route-box" }));
+      }
+      return res.end(JSON.stringify({ ok: true }));
     }
     const ok = req.headers.authorization === "Bearer box_good" || req.headers.authorization === "Bearer box_slow";
     res.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
@@ -1455,6 +1478,52 @@ describe("harness HTTP API", () => {
     expect(deleted.status).toBe(200);
     const after = await api("GET", "/api/bots");
     expect(after.body.bots.find((b: { id: string }) => b.id === bot.id)).toBeUndefined();
+  });
+
+  it("clears an explicit computer to Auto and refuses passive Auto Box provisioning", async () => {
+    let botId: string | undefined;
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).body.bot.computer).toBe("cloud");
+
+      const auto = await api("PATCH", `/api/bots/${bot.id}`, { computer: null });
+      expect(auto.status).toBe(200);
+      expect(auto.body.bot).not.toHaveProperty("computer");
+      const malformed = await api("PATCH", `/api/bots/${bot.id}`, { computer: ["cloud"] });
+      expect(malformed.status).toBe(400);
+      expect(malformed.body.error).toMatch(/computer must be null/);
+      expect((await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      )).not.toHaveProperty("computer");
+
+      // Reading the panel status may inspect the provider, but it is GET-only.
+      boxRouteCalls.length = 0;
+      expect((await api("GET", `/api/bots/${bot.id}/computer`)).status).toBe(200);
+      expect(boxRouteCalls).toEqual([{ method: "GET", path: "/boxes" }]);
+
+      // A stale renderer cannot turn that passive read into infrastructure:
+      // every Box verb is rejected before any provider mutation is attempted.
+      const before = [...boxRouteCalls];
+      for (const action of ["provision", "join", "sleep", "exec", "screenshot", "remove"]) {
+        const blocked = await api("POST", `/api/bots/${bot.id}/computer/${action}`, {});
+        expect(blocked.status, action).toBe(409);
+        expect(blocked.body.error, action).toMatch(/Choose Cloud/);
+      }
+      expect(boxRouteCalls).toEqual(before);
+
+      // The same action is available after an explicit human Cloud choice.
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
+      const provisioned = await api("POST", `/api/bots/${bot.id}/computer/provision`, {});
+      expect(provisioned.status).toBe(500);
+      expect(provisioned.body.error).toMatch(/fixture refused create/);
+      expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes" });
+    } finally {
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      await api("PUT", "/api/config", { box: { token: "" } });
+      boxRouteCalls.length = 0;
+    }
   });
 
   it("elects one Chief of Staff per section and preserves other section Chiefs", async () => {
