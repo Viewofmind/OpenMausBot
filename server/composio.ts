@@ -4,6 +4,7 @@ import { saveConfig, type AppConfig } from "./config.ts";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
+import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 
@@ -808,7 +809,10 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
 /** Mint a browser auth link for one service. Returns { url } or throws. */
 export async function authorizeService(cfg: AppConfig, slug: string, requestedAlias?: string | null) {
   const alias = normalizeAccountAlias(requestedAlias);
-  if (brokerAccess() || !cfg.composio?.apiKey) {
+  const broker = brokerAccess();
+  const unavailable = managedConnectorUnavailableReason(broker ? "managed" : connectionMode(cfg), slug);
+  if (unavailable) throw inputError(unavailable, 409);
+  if (broker || !cfg.composio?.apiKey) {
     const request: RequestInit = { method: "POST" };
     if (alias) request.body = JSON.stringify({ alias });
     const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(slug)}/authorize`, request);

@@ -328,6 +328,19 @@ describe.sequential("Composio Sessions", () => {
     });
   });
 
+  it("does not offer Twitter through the official managed broker without an owned OAuth app", async () => {
+    setManagedBrokerAccess({
+      url: "https://broker.openmausbot.test",
+      token: "a".repeat(64),
+    });
+    try {
+      await expect(authorizeService({} as AppConfig, "twitter")).rejects.toThrow(/X Developer app/i);
+      await expect(authorizeService({} as AppConfig, "x")).rejects.toThrow(/self-hosted connected apps/i);
+    } finally {
+      setManagedBrokerAccess(null);
+    }
+  });
+
   it("validates account aliases before sending them upstream", () => {
     expect(normalizeAccountAlias("  personal gmail  ")).toBe("personal gmail");
     expect(() => normalizeAccountAlias("bad\nalias")).toThrow(/printable/i);

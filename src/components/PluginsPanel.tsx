@@ -7,6 +7,7 @@ import { Check, Loader2, RefreshCw, Search, TriangleAlert, X } from "lucide-reac
 import { api, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { readCachedInventory, writeCachedInventory } from "@/lib/connected-apps-cache";
+import { managedConnectorUnavailableReason } from "../../shared/connector-availability";
 import { McpServersPanel } from "./McpServersPanel";
 
 interface ToolkitCard {
@@ -636,6 +637,7 @@ export function PluginsPanel() {
                 || (serviceStatus?.connected === true && !accounts.length && !pending && !failed);
               const addingAccount = aliasSlug === card.slug;
               const busy = busySlug === card.slug;
+              const unavailableReason = managedConnectorUnavailableReason(mode, card.slug);
               return (
                 <div
                   key={card.slug}
@@ -645,13 +647,23 @@ export function PluginsPanel() {
                     <ServiceIcon card={card} />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[14px] font-medium text-ink">{card.label}</div>
-                      <div className="mt-0.5 truncate text-[12.5px] text-ink-secondary">
-                        {pending ? "Finish setup in your browser" : failed && !accounts.length ? "Authorization expired — try again" : card.blurb}
+                      <div
+                        className="mt-0.5 truncate text-[12.5px] text-ink-secondary"
+                        title={unavailableReason ?? undefined}
+                      >
+                        {unavailableReason ?? (
+                          pending
+                            ? "Finish setup in your browser"
+                            : failed && !accounts.length
+                              ? "Authorization expired — try again"
+                              : card.blurb
+                        )}
                       </div>
                     </div>
                     <button
                       type="button"
-                      disabled={!configured || inventoryPhase !== "ready" || busy || included}
+                      disabled={!configured || inventoryPhase !== "ready" || busy || included || Boolean(unavailableReason)}
+                      title={unavailableReason ?? undefined}
                       onClick={() => {
                         if (pending && pendingUrls[card.slug]) {
                           setError(null);
@@ -663,7 +675,9 @@ export function PluginsPanel() {
                       }}
                       className="flex min-w-[88px] items-center justify-center gap-1.5 rounded-full bg-raised px-3 py-2 text-[12.5px] text-ink transition-colors hover:bg-raised-hover disabled:opacity-40"
                     >
-                      {busy ? (
+                      {unavailableReason ? (
+                        "Self-host only"
+                      ) : busy ? (
                         <Loader2 size={13} className="mx-auto animate-spin" />
                       ) : (
                         connectorActionLabel(inventoryPhase, {
