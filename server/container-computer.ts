@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { augmentedPath } from "./env-path.ts";
+import { augmentedPath, resolveCliSpawn } from "./env-path.ts";
 import { DATA_DIR } from "./config.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 
@@ -198,7 +198,8 @@ LABEL ${MANAGED_LABEL}="1" \\
 }
 
 async function sh(cmd: string, args: string[], timeout = 8000): Promise<{ stdout: string }> {
-  const { stdout } = await run(cmd, args, {
+  const resolved = resolveCliSpawn(cmd, args);
+  const { stdout } = await run(resolved.command, resolved.args, {
     timeout,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,

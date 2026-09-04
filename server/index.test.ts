@@ -209,7 +209,7 @@ beforeAll(async () => {
   if (process.platform === "win32") {
     writeFileSync(
       join(fakeDockerDir, "docker.cmd"),
-      `@echo off\r\n${JSON.stringify(process.execPath)} ${JSON.stringify(fakeDockerProgram)} %*\r\n`,
+      '@echo off\r\nnode "%~dp0\\docker-empty.mjs" %*\r\n',
     );
   } else {
     writeFileSync(
@@ -667,6 +667,7 @@ beforeAll(async () => {
     cwd: ROOT,
     env: {
       ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+      ...(process.env.PATHEXT ? { PATHEXT: process.env.PATHEXT } : {}),
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
       HOME: home,
       USERPROFILE: home,

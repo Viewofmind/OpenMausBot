@@ -24,7 +24,7 @@ import {
   MANAGED_LABEL,
 } from "./container-computer.ts";
 import { DATA_DIR, isValidSshAlias, vpsSshAlias, type AppConfig } from "./config.ts";
-import { augmentedPath } from "./env-path.ts";
+import { augmentedPath, resolveCliSpawn } from "./env-path.ts";
 import { loadEnvironmentId } from "./environment.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 
@@ -268,7 +268,8 @@ function tailCollector() {
 
 export function defaultRunner(args: string[], options: VpsCommandOptions = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("docker", args, {
+    const command = resolveCliSpawn("docker", args);
+    const child = spawn(command.command, command.args, {
       shell: false,
       env: { ...process.env, PATH: augmentedPath() },
       stdio: ["pipe", "pipe", "pipe"],
