@@ -1465,13 +1465,25 @@ export async function api(path: string, init?: RequestInit): Promise<any> {
 /** Bot removal is intentionally non-optimistic. The server may require the
  * person to clean up a persistent computer first, so local state changes only
  * after the delete boundary accepts the request. */
+const pendingBotDeletions = new Map<string, Promise<void>>();
+
 export async function requestConfirmedBotDeletion(
   botId: string,
   requestDelete: (botId: string) => Promise<unknown>,
   onConfirmed: (botId: string) => void,
 ): Promise<void> {
-  await requestDelete(botId);
-  onConfirmed(botId);
+  const existing = pendingBotDeletions.get(botId);
+  if (existing) return existing;
+  const deletion = (async () => {
+    await requestDelete(botId);
+    onConfirmed(botId);
+  })();
+  pendingBotDeletions.set(botId, deletion);
+  try {
+    await deletion;
+  } finally {
+    if (pendingBotDeletions.get(botId) === deletion) pendingBotDeletions.delete(botId);
+  }
 }
 
 export interface PeripheralSnapshotLoad<Key extends string = string> {

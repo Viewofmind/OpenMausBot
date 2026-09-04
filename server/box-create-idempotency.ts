@@ -10,6 +10,7 @@ const KEY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const MAX_REQUESTS = 4_096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOT_ID = /^[A-Za-z0-9_-]{1,120}$/;
+const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 
 export interface BoxCreateRequest {
   botId: string;
@@ -36,8 +37,7 @@ function isRequest(value: unknown): value is BoxCreateRequest {
     && typeof request.createdAt === "number"
     && Number.isFinite(request.createdAt)
     && request.createdAt > 0
-    && (request.boxId === undefined
-      || (typeof request.boxId === "string" && request.boxId.length > 0 && request.boxId.length <= 255))
+    && (request.boxId === undefined || (typeof request.boxId === "string" && BOX_ID.test(request.boxId)))
   );
 }
 
@@ -138,7 +138,7 @@ export function beginBoxCreate(botId: string, requestBody: string): BoxCreateReq
 
 /** Persist the returned identity before the caller attempts to rename it. */
 export function rememberCreatedBox(request: BoxCreateRequest, boxId: string): BoxCreateRequest {
-  if (!boxId || boxId.length > 255) throw new Error("ascii.dev returned an invalid cloud computer id");
+  if (!BOX_ID.test(boxId)) throw new Error("ascii.dev returned an invalid cloud computer id");
   load();
   const current = requests.find((candidate) => (
     candidate.botId === request.botId

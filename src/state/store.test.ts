@@ -63,6 +63,22 @@ describe("server-authoritative bot deletion", () => {
     expect(cancel).toHaveBeenCalledWith(bot.id);
     expect(state.bots).toHaveLength(0);
   });
+
+  it("coalesces repeated delete clicks while the server request is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const requestDelete = vi.fn(async () => gate);
+    const onConfirmed = vi.fn();
+
+    const first = requestConfirmedBotDeletion(bot.id, requestDelete, onConfirmed);
+    const second = requestConfirmedBotDeletion(bot.id, requestDelete, onConfirmed);
+    expect(requestDelete).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second]);
+
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(onConfirmed).toHaveBeenCalledWith(bot.id);
+  });
 });
 
 type SnapshotFrame =

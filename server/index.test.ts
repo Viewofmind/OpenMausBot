@@ -36,6 +36,7 @@ let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
 let managedBoxRows: Array<Record<string, unknown>> = [];
 let managedBoxListStatus = 200;
+let managedBoxListDelayMs = 0;
 let managedBoxStopDelayMs = 0;
 const managedBoxDeleteConfirmations: Array<{ boxId: string; confirmation?: string }> = [];
 let home: string;
@@ -477,6 +478,9 @@ beforeAll(async () => {
       const requestUrl = new URL(path, "http://box.invalid");
       boxRouteCalls.push({ method, path });
       if (method === "GET" && requestUrl.pathname === "/boxes") {
+        if (managedBoxListDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, managedBoxListDelayMs));
+        }
         res.writeHead(managedBoxListStatus, { "content-type": "application/json" });
         return res.end(JSON.stringify(
           managedBoxListStatus === 200
@@ -1614,6 +1618,12 @@ describe("harness HTTP API", () => {
 
       const noJson = await fetch(`${BASE}/api/computers/boxes/bx_23456789/sleep`, { method: "POST" });
       expect(noJson.status).toBe(415);
+      const nullConfirmation = await fetch(`${BASE}/api/computers/boxes/bx_23456789/delete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "null",
+      });
+      expect(nullConfirmation.status).toBe(400);
       boxRouteCalls.length = 0;
       managedBoxStopDelayMs = 250;
       const sleeping = api("POST", "/api/computers/boxes/bx_23456789/sleep", {});
@@ -1623,9 +1633,28 @@ describe("harness HTTP API", () => {
       const racedTurn = await api("POST", `/api/bots/${bot.id}/messages`, { text: "do not race deletion" });
       expect(racedTurn.status).toBe(409);
       expect(racedTurn.body.error).toMatch(/cloud computer is being changed/i);
+      expect((await api("POST", `/api/bots/${bot.id}/computer/provision`, {})).status).toBe(409);
+      expect((await api("POST", `/api/bots/${bot.id}/computer/control`, { action: "take" })).status).toBe(409);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(409);
       expect((await sleeping).status).toBe(200);
       managedBoxStopDelayMs = 0;
       expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes/bx_23456789/stop" });
+
+      // The same lifecycle lane works in the other direction: an already
+      // running bot-scoped provider action excludes a Settings deletion.
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", cloudBackend: "box" })).status).toBe(200);
+      managedBoxRows = managedBoxRows.map((row) => row.id === "bx_23456789" ? { ...row, state: "idle" } : row);
+      managedBoxStopDelayMs = 250;
+      boxRouteCalls.length = 0;
+      const botScopedSleep = api("POST", `/api/bots/${bot.id}/computer/sleep`, {});
+      await expect.poll(() => boxRouteCalls.some(
+        (call) => call.method === "POST" && call.path === "/boxes/bx_23456789/stop",
+      )).toBe(true);
+      expect((await api("POST", "/api/computers/boxes/bx_23456789/delete", {
+        confirmName: managedName,
+      })).status).toBe(409);
+      expect((await botScopedSleep).status).toBe(200);
+      managedBoxStopDelayMs = 0;
 
       const removed = await api("POST", "/api/computers/boxes/bx_23456789/delete", { confirmName: managedName });
       expect(removed.status).toBe(202);
@@ -1636,6 +1665,7 @@ describe("harness HTTP API", () => {
       expect(managedBoxRows.some((row) => row.id === "bx_23456789")).toBe(false);
     } finally {
       managedBoxListStatus = 200;
+      managedBoxListDelayMs = 0;
       managedBoxStopDelayMs = 0;
       managedBoxRows = [];
       managedBoxDeleteConfirmations.length = 0;
@@ -1647,6 +1677,8 @@ describe("harness HTTP API", () => {
 
   it("keeps a bot when its hidden Box exists or the provider cannot prove it absent", async () => {
     let botId = "";
+    let guardBotId = "";
+    let roomId = "";
     try {
       expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
       const bot = (await api("POST", "/api/bots")).body.bot;
@@ -1673,12 +1705,50 @@ describe("harness HTTP API", () => {
 
       managedBoxListStatus = 200;
       managedBoxRows = [];
-      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        name: "Target",
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+        composio: false,
+        browser: false,
+      })).status).toBe(200);
+      const guardBot = (await api("POST", "/api/bots")).body.bot;
+      guardBotId = guardBot.id;
+      const room = (await api("POST", "/api/groups", {
+        name: "Deletion race",
+        memberIds: [bot.id, guardBot.id],
+      })).body.group;
+      roomId = room.id;
+      expect((await api("PATCH", `/api/groups/${room.id}/setup`, { action: "skip" })).status).toBe(200);
+      expect((await api("PATCH", `/api/groups/${room.id}`, {
+        defaultResponder: { kind: "mentions" },
+      })).status).toBe(200);
+      managedBoxListDelayMs = 2_000;
+      boxRouteCalls.length = 0;
+      const deletion = api("DELETE", `/api/bots/${bot.id}`);
+      await expect.poll(() => boxRouteCalls.some(
+        (call) => call.method === "GET" && call.path.startsWith("/boxes?limit="),
+      )).toBe(true);
+      const racedTurn = await api("POST", `/api/bots/${bot.id}/messages`, { text: "do not provision during deletion" });
+      expect(racedTurn.status).toBe(409);
+      expect(racedTurn.body.error).toMatch(/cloud computer is being changed/i);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Target do not race deletion" })).status).toBe(202);
+      await expect.poll(async () => {
+        const snapshot = (await api("GET", "/api/bots?messages=30")).body;
+        const currentRoom = snapshot.groups.find((candidate: { id: string }) => candidate.id === room.id);
+        return currentRoom?.messages.some((message: { tool?: { name?: string } }) =>
+          message.tool?.name === "Target's cloud computer is being changed — skipped this round"
+        ) ?? false;
+      }, { timeout: 1_500 }).toBe(true);
+      expect((await deletion).status).toBe(200);
+      managedBoxListDelayMs = 0;
       botId = "";
     } finally {
       managedBoxListStatus = 200;
+      managedBoxListDelayMs = 0;
       managedBoxRows = [];
+      if (roomId) await api("DELETE", `/api/groups/${roomId}`).catch(() => undefined);
       if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      if (guardBotId) await api("DELETE", `/api/bots/${guardBotId}`).catch(() => undefined);
       await api("PUT", "/api/config", { box: { token: "" } });
       boxRouteCalls.length = 0;
     }
@@ -5608,6 +5678,7 @@ describe("harness HTTP API", () => {
     expect((await api("PATCH", `/api/bots/${bot.id}`, { autoStartVps: "yes" })).status).toBe(400);
     const invalid = await api("PATCH", `/api/bots/${bot.id}`, { cloudBackend: "daytona" });
     expect(invalid.status).toBe(400);
+    expect((await api("PATCH", "/api/config", { vps: { sshAlias: "" } })).status).toBe(200);
   });
 
   it("validates a Composio project key, creates a Session, and keeps externally stored secrets off disk", async () => {

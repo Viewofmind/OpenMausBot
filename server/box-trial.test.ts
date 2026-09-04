@@ -30,13 +30,13 @@ describe("Box trial provisioning", () => {
             }));
           }
           res.writeHead(201);
-          return res.end(JSON.stringify({ ok: true, box: { id: "trial-box", state: "ready" } }));
+          return res.end(JSON.stringify({ ok: true, box: { id: "bx_23456789", state: "ready" } }));
         }
-        if (url.pathname === "/api/box/v1/boxes/trial-box" && req.method === "PATCH") {
+        if (url.pathname === "/api/box/v1/boxes/bx_23456789" && req.method === "PATCH") {
           return res.end(JSON.stringify({ ok: true }));
         }
-        if (url.pathname === "/api/box/v1/boxes/trial-box" && req.method === "GET") {
-          return res.end(JSON.stringify({ ok: true, box: { id: "trial-box", state: "ready" } }));
+        if (url.pathname === "/api/box/v1/boxes/bx_23456789" && req.method === "GET") {
+          return res.end(JSON.stringify({ ok: true, box: { id: "bx_23456789", state: "ready" } }));
         }
         if (url.pathname.endsWith("/commands")) {
           return res.end(JSON.stringify({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
@@ -64,7 +64,7 @@ describe("Box trial provisioning", () => {
     // SAFETY: AppConfig's remaining sections are optional; this test supplies
     // the only credential the Box path reads.
     const result = await provisionBox({ box: { token: "box_trial" } } as any, "trial-bot", "Trial Bot");
-    expect(result.boxId).toBe("trial-box");
+    expect(result.boxId).toBe("bx_23456789");
     expect(createBodies).toEqual([
       { ttlSeconds: 8 * 60 * 60, noEnv: true },
       { ttlSeconds: 2 * 60 * 60, noEnv: true },

@@ -224,7 +224,36 @@ describe("OpenMaus-managed Box inventory", () => {
     boxes = [];
     requests.length = 0;
     expect(await box.findBox(cfg, botId)).toBeNull();
-    expect(requests[0]).toMatchObject({ method: "GET", path: "/api/box/v1/boxes" });
+    expect(requests[0]).toMatchObject({
+      method: "GET",
+      path: "/api/box/v1/boxes",
+      search: "?limit=200",
+    });
+  });
+
+  it("finds an existing box on a later page and fails closed when listing is unavailable", async () => {
+    const secondPageBot = "existing-second-page";
+    pageResponses = new Map([
+      ["", { boxes: [], nextCursor: "next" }],
+      ["next", {
+        boxes: [{ id: "bx_npqrstuv", name: nameFor(secondPageBot), state: "ready" }],
+        nextCursor: null,
+      }],
+    ]);
+
+    await expect(box.findBox(cfg, secondPageBot)).resolves.toMatchObject({ id: "bx_npqrstuv" });
+    expect(requests.map((request) => request.search)).toEqual([
+      "?limit=200",
+      "?limit=200&cursor=next",
+    ]);
+    expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/boxes"))).toBe(false);
+
+    requests.length = 0;
+    pageResponses = null;
+    listStatus = 503;
+    listBody = { ok: false, message: "maintenance" };
+    await expect(box.provisionBox(cfg, "provider-down-bot", "Offline")).rejects.toThrow(/maintenance/);
+    expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/boxes"))).toBe(false);
   });
 
   it("does not mutate a missing or busy managed box and reports delete failures", async () => {

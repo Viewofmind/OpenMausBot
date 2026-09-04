@@ -37,6 +37,7 @@ const MAX_BOX_INVENTORY_PAGES = 10;
 const MANAGED_BOX_NAME = /^ogb-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
 const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const BOX_STATES = new Set([
+  "init",
   "idle",
   "ready",
   "running",
@@ -386,14 +387,22 @@ export async function deleteManagedBox(
 export async function findBox(cfg: AppConfig, botId: string) {
   const cachedId = boxIdCache.get(botId);
   if (cachedId) {
-    const { ok, body } = await boxJson(cfg, `/boxes/${cachedId}`);
-    const box = body?.box;
-    if (ok && box?.id && box.state !== "error") return box;
+    try {
+      const { ok, body } = await boxJson(cfg, `/boxes/${cachedId}`);
+      const box = body?.box;
+      if (ok && box?.id && box.state !== "error") return box;
+    } catch {
+      // A direct read can fail while the account listing still succeeds.
+      // Fall through to the authoritative paginated lookup before deciding.
+    }
     boxIdCache.delete(botId); // gone or broken — fall back to the listing
   }
   const name = await boxNameFor(botId);
-  const { body } = await boxJson(cfg, "/boxes");
-  const found = (body?.boxes ?? []).find((b: any) => b.name === name && b.state !== "error") ?? null;
+  const listed = await listBoxPages(cfg);
+  if (!listed.ok) {
+    throw Object.assign(new Error(listed.problem), { status: 503 });
+  }
+  const found = listed.boxes.find((candidate: any) => candidate?.name === name && candidate.state !== "error") ?? null;
   if (found?.id) boxIdCache.set(botId, found.id);
   return found;
 }

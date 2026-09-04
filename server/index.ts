@@ -1905,11 +1905,31 @@ function claimManagedBoxMutation(instance: box.ManagedBoxInventoryInstance): () 
   const ownerBotId = instance.ownerBotId;
   if (!ownerBotId) return () => {};
   const owner = managedBoxOwners().find((candidate) => candidate.botId === ownerBotId);
-  if (owner?.inUse || boxLifecycleBusyBots.has(ownerBotId)) {
+  if (owner?.inUse) {
     throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
   }
-  boxLifecycleBusyBots.add(ownerBotId);
-  return () => boxLifecycleBusyBots.delete(ownerBotId);
+  return claimBotComputerLifecycle(ownerBotId);
+}
+
+/** One synchronous lane for every Box lifecycle consumer. Both Settings and
+ * bot-scoped actions use it, so whichever operation starts first excludes the
+ * other instead of relying on a stale check made before a provider await. */
+function claimBotComputerLifecycle(botId: string): () => void {
+  if (boxLifecycleBusyBots.has(botId)) {
+    throw Object.assign(new Error("this bot's cloud computer is being changed — wait for it to finish"), { status: 409 });
+  }
+  boxLifecycleBusyBots.add(botId);
+  return () => boxLifecycleBusyBots.delete(botId);
+}
+
+function claimManagedVpsMutation(containerName: string): () => void {
+  const owner = store.bots.find((candidate) => vps.vpsContainerName(candidate.id) === containerName);
+  if (!owner) return () => {};
+  const ownerState = managedBoxOwners().find((candidate) => candidate.botId === owner.id);
+  if (ownerState?.inUse) {
+    throw Object.assign(new Error("this VPS computer is in use — stop its bot's work first"), { status: 409 });
+  }
+  return claimBotComputerLifecycle(owner.id);
 }
 
 function localVmTargetForBot(botId: string): LocalVmTarget {
@@ -4343,6 +4363,21 @@ async function runGroupMemberTurn(
   // one bot can never own two provider processes.
   const readyBot = store.bot(bot.id);
   if (!readyBot) return false;
+  if (boxLifecycleBusyBots.has(readyBot.id)) {
+    if (orchestration) {
+      orchestration.result.outcome = "busy";
+      return true;
+    }
+    const message = `${bot.name}'s cloud computer is being changed — skipped this round`;
+    store.appendMessage(threadId, {
+      role: "bot",
+      kind: "activity",
+      from: { botId: bot.id, name: bot.name, color: bot.color },
+      tool: { name: message, ok: false },
+    });
+    onDispatchError?.(message);
+    return true;
+  }
   if (readyBot.busy) {
     if (orchestration) {
       // Connected-app discovery yields. A direct turn can legitimately win
@@ -8895,82 +8930,107 @@ const server = createServer(async (req, res) => {
           error: `stop this bot's work in channel ${activeGroup.group.name} before deleting the bot`,
         });
       }
-      if (localVmMode(cfg) === "per-bot") {
-        const target = perBotLocalVmTarget(bot.id);
-        if (localVmActiveThreads.has(target.key) || localVmLifecycleBusy.has(target.key)) {
-          return json(res, 409, { error: "stop this bot's Local VM turn or setup action before deleting the bot" });
+      // A direct turn that has already claimed the bot can provision a Box in
+      // its background setup. Do not let deletion race that work while a Box
+      // account is configured; the person can stop the turn and retry.
+      if ((box.boxConfigured(cfg) || vpsSshAlias(cfg)) && (bot.busy || directTurnDispatchClaims.has(bot.id))) {
+        return json(res, 409, { error: "stop this bot's work before checking and deleting its cloud computer" });
+      }
+      const releaseComputerLifecycle = claimBotComputerLifecycle(bot.id);
+      try {
+        if (localVmMode(cfg) === "per-bot") {
+          const target = perBotLocalVmTarget(bot.id);
+          if (localVmActiveThreads.has(target.key) || localVmLifecycleBusy.has(target.key)) {
+            return json(res, 409, { error: "stop this bot's Local VM turn or setup action before deleting the bot" });
+          }
+          const vm = await containerComputerStatus(undefined, undefined, target);
+          if (!vm.daemonUp && existsSync(target.workspaceDir)) {
+            return json(res, 409, {
+              error: "start the container runtime and delete this bot's Local VM before deleting the bot",
+            });
+          }
+          if (vm.container !== "missing") {
+            return json(res, 409, { error: "delete this bot's Local VM from its Computer panel before deleting the bot" });
+          }
         }
-        const vm = await containerComputerStatus(undefined, undefined, target);
-        if (!vm.daemonUp && existsSync(target.workspaceDir)) {
-          return json(res, 409, {
-            error: "start the container runtime and delete this bot's Local VM before deleting the bot",
+        // VPS containers are also durable and may outlive a destination or
+        // backend switch. Keep the bot as the discoverable owner until the
+        // person explicitly removes that container from Settings.
+        const vpsInventory = await vps.listManagedVpsComputers(cfg, managedBoxOwners());
+        if (vpsInventory.configured && !vpsInventory.available) {
+          return json(res, 503, {
+            error: `${vpsInventory.problem ?? "VPS computer inventory is unavailable"}. Refresh Settings → Computers before deleting this bot`,
           });
         }
-        if (vm.container !== "missing") {
-          return json(res, 409, { error: "delete this bot's Local VM from its Computer panel before deleting the bot" });
+        if (vpsInventory.instances.some((instance) => instance.ownerBotId === bot.id)) {
+          return json(res, 409, {
+            error: "remove this bot's VPS computer from Settings → Computers before deleting the bot",
+          });
         }
-      }
-      // A Box survives destination/backend changes and contains browser
-      // sessions and files. Resolve ownership from a fresh provider listing;
-      // deleting the bot first would make that durable machine look orphaned.
-      const cloudInventory = await box.listManagedBoxes(cfg, managedBoxOwners());
-      if (cloudInventory.configured && !cloudInventory.available) {
-        return json(res, 503, {
-          error: `${cloudInventory.problem ?? "cloud computer inventory is unavailable"}. Refresh Settings → Computers before deleting this bot`,
-        });
-      }
-      if (cloudInventory.instances.some((instance) => instance.ownerBotId === bot.id)) {
-        return json(res, 409, {
-          error: "delete this bot's cloud computer from Settings → Computers before deleting the bot",
-        });
-      }
-      // Establish a durable cleanup intent before any teardown. A malformed
-      // or unreadable journal therefore rejects the delete with the bot and
-      // all of its live work untouched. The intent is aborted if a later
-      // pre-delete side effect fails, and committed only after Store deletion.
-      const browserCleanupRequest = utilityParentPort ? browserCleanup.prepare("bot", bot.id) : null;
-      try {
-        // a running turn dies with its bot
-        const directClaim = cancelDirectTurnDispatch(bot.id);
-        directTurnGenerationByBot.delete(bot.id);
-        await releaseBrowserCapabilitiesForBot(bot.id);
-        const directThreadId = directClaim?.threadId ?? bot.threadId;
-        await registry.get(bot.modelSelection.instanceId)?.adapter.interruptTurn(directThreadId).catch(() => {});
-        closeOpenApprovals(directThreadId);
-        // Deletion removes the thread before a late turn.completed can fold
-        // staged provider images into a message, so dispose them here.
-        purgeGeneratedImagesForThread(directThreadId);
-        stopScreenPoller(bot.id);
-        activeVpsThreads.delete(bot.id);
-        routines!.disableForBot(bot.id);
-        webhooks.disableForBot(bot.id);
-        calendarCalls!.removeBot(bot.id);
-        lastReply.delete(bot.threadId);
-        // a peer approval naming this bot can never be meaningfully answered
-        // now, and its caller would otherwise wait out the 15-minute timeout
-        cancelPeerApprovalsFor(bot.id);
-        discardDelegations(commsBus, bot.threadId);
-        computerControl.forget(bot.id);
-        computerControlRevision.delete(bot.id);
-        const target = perBotLocalVmTarget(bot.id);
-        localVmIdles.get(target.key)?.cancel();
-        localVmIdles.delete(target.key);
-        store.deleteBot(bot.id);
-      } catch (error) {
-        if (browserCleanupRequest) browserCleanup.abort(browserCleanupRequest);
-        throw error;
-      }
-      if (browserCleanupRequest) {
-        const committedCleanup = browserCleanup.commit(browserCleanupRequest);
-        const acknowledged = await browserCleanup.ensure(committedCleanup);
-        requireBrowserCleanupAcknowledged(acknowledged, `Browser data for ${bot.name}`);
-      }
-      for (const dir of [EVENTS_DIR, NATIVE_DIR]) {
+        // A Box survives destination/backend changes and contains browser
+        // sessions and files. Resolve ownership from a fresh provider listing;
+        // deleting the bot first would make that durable machine look orphaned.
+        const cloudInventory = await box.listManagedBoxes(cfg, managedBoxOwners());
+        if (cloudInventory.configured && !cloudInventory.available) {
+          return json(res, 503, {
+            error: `${cloudInventory.problem ?? "cloud computer inventory is unavailable"}. Refresh Settings → Computers before deleting this bot`,
+          });
+        }
+        if (cloudInventory.instances.some((instance) => instance.ownerBotId === bot.id)) {
+          return json(res, 409, {
+            error: "delete this bot's cloud computer from Settings → Computers before deleting the bot",
+          });
+        }
+        // Establish a durable cleanup intent before any teardown. A malformed
+        // or unreadable journal therefore rejects the delete with the bot and
+        // all of its live work untouched. The intent is aborted if a later
+        // pre-delete side effect fails, and committed only after Store deletion.
+        const browserCleanupRequest = utilityParentPort ? browserCleanup.prepare("bot", bot.id) : null;
         try {
-          unlinkSync(join(dir, `${bot.threadId}.ndjson`));
-        } catch {}
+          // a running turn dies with its bot
+          const directClaim = cancelDirectTurnDispatch(bot.id);
+          directTurnGenerationByBot.delete(bot.id);
+          await releaseBrowserCapabilitiesForBot(bot.id);
+          const directThreadId = directClaim?.threadId ?? bot.threadId;
+          await registry.get(bot.modelSelection.instanceId)?.adapter.interruptTurn(directThreadId).catch(() => {});
+          closeOpenApprovals(directThreadId);
+          // Deletion removes the thread before a late turn.completed can fold
+          // staged provider images into a message, so dispose them here.
+          purgeGeneratedImagesForThread(directThreadId);
+          stopScreenPoller(bot.id);
+          activeVpsThreads.delete(bot.id);
+          routines!.disableForBot(bot.id);
+          webhooks.disableForBot(bot.id);
+          calendarCalls!.removeBot(bot.id);
+          lastReply.delete(bot.threadId);
+          // a peer approval naming this bot can never be meaningfully answered
+          // now, and its caller would otherwise wait out the 15-minute timeout
+          cancelPeerApprovalsFor(bot.id);
+          discardDelegations(commsBus, bot.threadId);
+          computerControl.forget(bot.id);
+          computerControlRevision.delete(bot.id);
+          const target = perBotLocalVmTarget(bot.id);
+          localVmIdles.get(target.key)?.cancel();
+          localVmIdles.delete(target.key);
+          store.deleteBot(bot.id);
+        } catch (error) {
+          if (browserCleanupRequest) browserCleanup.abort(browserCleanupRequest);
+          throw error;
+        }
+        if (browserCleanupRequest) {
+          const committedCleanup = browserCleanup.commit(browserCleanupRequest);
+          const acknowledged = await browserCleanup.ensure(committedCleanup);
+          requireBrowserCleanupAcknowledged(acknowledged, `Browser data for ${bot.name}`);
+        }
+        for (const dir of [EVENTS_DIR, NATIVE_DIR]) {
+          try {
+            unlinkSync(join(dir, `${bot.threadId}.ndjson`));
+          } catch {}
+        }
+        return json(res, 200, { ok: true });
+      } finally {
+        releaseComputerLifecycle();
       }
-      return json(res, 200, { ok: true });
     }
 
     // ── bot skills: imported Agent Skills (SKILL.md) ────────────────────
@@ -9581,7 +9641,7 @@ const server = createServer(async (req, res) => {
       if (m[2] === "sleep") {
         return json(res, 200, await box.sleepManagedBox(cfg, owners, m[1], claimManagedBoxMutation));
       }
-      if (typeof body.confirmName !== "string" || body.confirmName.length > 100) {
+      if (typeof body?.confirmName !== "string" || body.confirmName.length > 100) {
         return json(res, 400, { error: "confirmName must be the cloud computer name shown in Settings" });
       }
       return json(res, 202, await box.deleteManagedBox(
@@ -9591,6 +9651,31 @@ const server = createServer(async (req, res) => {
         body.confirmName,
         claimManagedBoxMutation,
       ));
+    }
+    if (method === "GET" && path === "/api/computers/vps") {
+      res.setHeader("cache-control", "private, no-store");
+      return json(res, 200, await vps.listManagedVpsComputers(cfg, managedBoxOwners()));
+    }
+    m = path.match(/^\/api\/computers\/vps\/([\w-]+)\/remove$/);
+    if (m && method === "POST") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      const body = await readBody(req);
+      if (typeof body?.confirmName !== "string" || body.confirmName.length > 100) {
+        return json(res, 400, { error: "confirmName must be the VPS computer name shown in Settings" });
+      }
+      const releaseComputerLifecycle = claimManagedVpsMutation(m[1]);
+      try {
+        return json(res, 200, await vps.removeManagedVpsComputer(
+          cfg,
+          managedBoxOwners(),
+          m[1],
+          body.confirmName,
+        ));
+      } finally {
+        releaseComputerLifecycle();
+      }
     }
 
     // what the user's machine can host: which runtime is installed, whether
@@ -10471,6 +10556,9 @@ const server = createServer(async (req, res) => {
           return json(res, 400, { error: "controlLeaseId is invalid" });
         }
         const controlLeaseId = leaseResult?.data;
+        if (action === "take" && boxLifecycleBusyBots.has(bot.id)) {
+          return json(res, 409, { error: "this bot's cloud computer is being changed — wait before taking control" });
+        }
         if (action === "take" && controlLeaseId) {
           const result = computerControl.acquireLease(bot.id, controlLeaseId);
           return json(res, 200, {
@@ -10512,27 +10600,35 @@ const server = createServer(async (req, res) => {
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
         return json(res, 415, { error: "content-type must be application/json" });
       }
+      if (boxLifecycleBusyBots.has(botId)) {
+        return json(res, 409, { error: "this bot's cloud computer is being changed — wait for it to finish" });
+      }
       if (bot.cloudBackend === "vps") {
-        if (m[2] === "exec") {
-          return json(res, 409, { error: "the VPS console is available to the bot through its scoped computer tools" });
-        }
-        if (m[2] === "provision" && bot.computer !== "cloud" && !bot.autoStartVps) {
-          return json(res, 409, { error: "Auto may start this VPS only after Start VPS automatically is enabled" });
-        }
-        if ((m[2] === "sleep" || m[2] === "remove") && (bot.busy || activeVpsThreads.has(botId))) {
-          return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
-        }
-        if (m[2] === "join") {
-          if (req.headers["x-openmausbot-companion"] === "1") {
-            return json(res, 409, {
-              error: "VPS live desktop control is currently available in the desktop app; the SSH viewer is loopback-only",
-            });
+        const releaseComputerLifecycle = claimBotComputerLifecycle(botId);
+        try {
+          if (m[2] === "exec") {
+            return json(res, 409, { error: "the VPS console is available to the bot through its scoped computer tools" });
           }
-          return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
+          if (m[2] === "provision" && bot.computer !== "cloud" && !bot.autoStartVps) {
+            return json(res, 409, { error: "Auto may start this VPS only after Start VPS automatically is enabled" });
+          }
+          if ((m[2] === "sleep" || m[2] === "remove") && (bot.busy || activeVpsThreads.has(botId))) {
+            return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
+          }
+          if (m[2] === "join") {
+            if (req.headers["x-openmausbot-companion"] === "1") {
+              return json(res, 409, {
+                error: "VPS live desktop control is currently available in the desktop app; the SSH viewer is loopback-only",
+              });
+            }
+            return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
+          }
+          if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
+          const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
+          return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
+        } finally {
+          releaseComputerLifecycle();
         }
-        if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
-        const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
-        return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
       }
       // Input validity is independent of destination authorization. Preserve
       // the stable 400 contract for oversized commands without contacting the
@@ -10540,7 +10636,7 @@ const server = createServer(async (req, res) => {
       let boxCommand: string | undefined;
       if (m[2] === "exec") {
         const body = await readBody(req);
-        boxCommand = String(body.command ?? "");
+        boxCommand = String(body?.command ?? "");
         if (boxCommand.length > MAX_REMOTE_COMMAND_LENGTH) {
           return json(res, 400, {
             error: `command is too long (maximum ${MAX_REMOTE_COMMAND_LENGTH} characters)`,
@@ -10556,17 +10652,22 @@ const server = createServer(async (req, res) => {
         // Boxes sleep and wake; only the VPS backend has a container to remove.
         return json(res, 409, { error: "the cloud Box backend has no container to remove — use sleep instead" });
       }
-      switch (m[2]) {
-        case "provision":
-          return json(res, 200, await box.provisionBox(cfg, botId, bot.name));
-        case "join":
-          return json(res, 200, await box.joinBox(cfg, botId));
-        case "sleep":
-          return json(res, 200, await box.sleepBox(cfg, botId));
-        case "exec":
-          return json(res, 200, await box.execOnBox(cfg, botId, boxCommand ?? ""));
-        case "screenshot":
-          return json(res, 200, await box.screenshotBox(cfg, botId));
+      const releaseComputerLifecycle = claimBotComputerLifecycle(botId);
+      try {
+        switch (m[2]) {
+          case "provision":
+            return json(res, 200, await box.provisionBox(cfg, botId, bot.name));
+          case "join":
+            return json(res, 200, await box.joinBox(cfg, botId));
+          case "sleep":
+            return json(res, 200, await box.sleepBox(cfg, botId));
+          case "exec":
+            return json(res, 200, await box.execOnBox(cfg, botId, boxCommand ?? ""));
+          case "screenshot":
+            return json(res, 200, await box.screenshotBox(cfg, botId));
+        }
+      } finally {
+        releaseComputerLifecycle();
       }
     }
 

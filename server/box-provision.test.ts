@@ -28,18 +28,18 @@ describe("cloud computer provisioning cleanup", () => {
         if (url.pathname === "/api/box/v1/boxes" && req.method === "GET") {
           const boxes =
             scenario === "existing-desktop-failure"
-              ? [{ id: "existing-box", name: nameFor("existing-bot"), state: "ready" }]
+              ? [{ id: "bx_456789ab", name: nameFor("existing-bot"), state: "ready" }]
               : [];
           res.writeHead(200).end(JSON.stringify({ ok: true, boxes }));
         } else if (url.pathname === "/api/box/v1/boxes" && req.method === "POST") {
-          res.writeHead(201).end(JSON.stringify({ ok: true, box: { id: "new-box", state: "provisioning" } }));
-        } else if (url.pathname === "/api/box/v1/boxes/new-box" && req.method === "PATCH") {
+          res.writeHead(201).end(JSON.stringify({ ok: true, box: { id: "bx_3456789a", state: "provisioning" } }));
+        } else if (url.pathname === "/api/box/v1/boxes/bx_3456789a" && req.method === "PATCH") {
           res.writeHead(500).end(JSON.stringify({ ok: false, message: "rename rejected" }));
-        } else if (url.pathname === "/api/box/v1/boxes/new-box" && req.method === "DELETE") {
+        } else if (url.pathname === "/api/box/v1/boxes/bx_3456789a" && req.method === "DELETE") {
           res.writeHead(202).end(JSON.stringify({ ok: true, operationId: "delete-1" }));
-        } else if (url.pathname === "/api/box/v1/boxes/existing-box" && req.method === "GET") {
+        } else if (url.pathname === "/api/box/v1/boxes/bx_456789ab" && req.method === "GET") {
           res.writeHead(200).end(
-            JSON.stringify({ ok: true, box: { id: "existing-box", name: nameFor("existing-bot"), state: "ready" } }),
+            JSON.stringify({ ok: true, box: { id: "bx_456789ab", name: nameFor("existing-bot"), state: "ready" } }),
           );
         } else if (url.pathname.endsWith("/commands")) {
           res.writeHead(200).end(JSON.stringify({ ok: true, exitCode: 0, stdout: "bootstrapped", stderr: "" }));
@@ -73,8 +73,8 @@ describe("cloud computer provisioning cleanup", () => {
     const removal = requests.find((request) => request.method === "DELETE");
     const creation = requests.find((request) => request.method === "POST" && request.path.endsWith("/boxes"));
     expect(JSON.parse(creation?.body ?? "{}")).toMatchObject({ noEnv: true });
-    expect(removal?.path).toBe("/api/box/v1/boxes/new-box");
-    expect(removal?.headers["x-ascii-confirm-delete"]).toBe("new-box");
+    expect(removal?.path).toBe("/api/box/v1/boxes/bx_3456789a");
+    expect(removal?.headers["x-ascii-confirm-delete"]).toBe("bx_3456789a");
   });
 
   it("never deletes a pre-existing box when a later step fails", async () => {
