@@ -659,7 +659,7 @@ function BotContextMenu({
   );
 }
 
-function BotListItem({
+export function BotListItem({
   bot,
   density,
   onMenu,
@@ -770,6 +770,7 @@ function BotListItem({
         role={renaming ? undefined : "button"}
         tabIndex={renaming ? undefined : 0}
         aria-label={!renaming && iconOnly ? bot.name : undefined}
+        data-sidebar-bot-row={bot.id}
         onClick={onSelect}
         onKeyDown={(event) => {
           if (renaming) return;
@@ -786,19 +787,14 @@ function BotListItem({
       {!renaming && iconOnly && bot.unread && (
         <span className="pointer-events-none absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
       )}
-      {!renaming && !iconOnly && <button
+      {/* Disabled buttons still own their pixels in Chromium, even at zero
+          opacity. Omit the unavailable action so the entire row stays live. */}
+      {!renaming && !iconOnly && !archiveDisabled && !bot.chiefOfStaff && <button
         type="button"
-        disabled={archiveDisabled}
         onClick={() => onArchive(bot)}
         aria-label={`Archive ${bot.name}`}
-        title={
-          bot.chiefOfStaff
-            ? "Choose another Chief of Staff first"
-            : archiveDisabled
-              ? "Keep at least one active bot"
-              : `Archive ${bot.name}`
-        }
-        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 disabled:cursor-default disabled:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
+        title={`Archive ${bot.name}`}
+        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
       >
         <Archive size={14} />
       </button>}
