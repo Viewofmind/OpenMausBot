@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -25,7 +25,7 @@ import {
   readSafeLogTail,
 } from "./diagnostics.mjs";
 import { migrateWorkspaceCredentials, workspaceCredentialEnv } from "./workspace-credentials.mjs";
-import { activateExistingWindow } from "./single-instance.mjs";
+import { activateExistingWindow, releaseSingleInstanceLock } from "./single-instance.mjs";
 import { pollServerIdentity } from "./server-boot-probe.mjs";
 import { packageUrlFromCommandLine, packageUrlFromDeepLink } from "./package-link.mjs";
 import { windowChromeOptions } from "./window-chrome.mjs";
@@ -205,6 +205,17 @@ if (!app.requestSingleInstanceLock()) {
   console.log("[desktop] OpenMausBot is already running — focusing that window");
   process.exit(0);
 }
+
+// An update install can start the new build while this process is still
+// inside the deferred before-quit cleanup further down, still holding the
+// lock; the relaunched copy then loses the check above and exits, leaving a
+// dead Starting window with no server. Electron's native autoUpdater emits
+// before-quit-for-update only when an update drives the quit (the vendored
+// electron-updater re-emits it on the same object before app.quit()), so the
+// lock is released on that event — never in before-quit, where a normal quit
+// would allow a concurrent second instance.
+nativeAutoUpdater.on("before-quit-for-update", () => releaseSingleInstanceLock(app));
+
 function deliverPackageInstall(win) {
   if (!pendingPackageInstallUrl || !win || win.isDestroyed()) return;
   if (win.webContents.isLoadingMainFrame()) return;
