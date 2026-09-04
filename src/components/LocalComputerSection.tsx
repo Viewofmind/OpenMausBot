@@ -10,6 +10,7 @@ import {
   Moon,
   RefreshCw,
   RotateCcw,
+  Server,
   Square,
   Trash2,
 } from "lucide-react";
@@ -92,6 +93,23 @@ interface CloudComputerInventoryPayload {
 type CloudAction = "sleep" | "delete";
 type PendingCloudAction = { boxId: string; action: CloudAction } | null;
 
+export interface VpsComputerInventoryInstance {
+  name: string;
+  state: "created" | "restarting" | "running" | "removing" | "paused" | "exited" | "dead" | "unknown";
+  ownerBotId: string | null;
+  ownerName: string | null;
+  orphaned: boolean;
+  inUse: boolean;
+}
+
+interface VpsComputerInventoryPayload {
+  configured: boolean;
+  available: boolean;
+  sshAlias: string | null;
+  problem: string | null;
+  instances: VpsComputerInventoryInstance[];
+}
+
 const destinationLabels: Record<LocalVmInventoryInstance["destination"], string> = {
   auto: "Auto",
   cloud: "Cloud",
@@ -113,12 +131,138 @@ export function cloudComputerInventoryState(instance: CloudComputerInventoryInst
   if (["archived", "stopped"].includes(instance.state)) return "Sleeping";
   if (["archiving", "stopping"].includes(instance.state)) return "Going to sleep";
   if (["idle", "ready", "running"].includes(instance.state)) return "Running";
-  if (["provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "Starting";
+  if (["init", "provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "Starting";
   return "Needs attention";
 }
 
 function cloudComputerCanSleep(instance: CloudComputerInventoryInstance): boolean {
   return ["idle", "ready", "running"].includes(instance.state);
+}
+
+export function vpsComputerInventoryState(instance: VpsComputerInventoryInstance): string {
+  if (instance.inUse) return "In use";
+  if (instance.state === "running") return "Running";
+  if (instance.state === "restarting") return "Restarting";
+  if (instance.state === "removing") return "Removing";
+  if (["created", "exited"].includes(instance.state)) return "Stopped";
+  if (instance.state === "paused") return "Paused";
+  return "Needs attention";
+}
+
+export function VpsComputersCard({
+  instances,
+  configured,
+  sshAlias,
+  loading,
+  removingName,
+  error,
+  unavailableReason,
+  onRefresh,
+  onRemove,
+}: {
+  instances: VpsComputerInventoryInstance[];
+  configured: boolean | null;
+  sshAlias: string | null;
+  loading: boolean;
+  removingName: string | null;
+  error: string | null;
+  unavailableReason: string | null;
+  onRefresh: () => void;
+  onRemove: (instance: VpsComputerInventoryInstance) => void;
+}) {
+  return (
+    <Card
+      title="Self-hosted VPS computers"
+      subtitle="Persistent OpenMaus-managed Docker desktops on your VPS. Removing one permanently erases its files and browser sign-ins."
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[12px] text-ink-secondary">
+          {configured === true
+            ? `SSH host: ${sshAlias ?? "configured VPS"}. Old and orphaned computers stay visible here.`
+            : configured === false
+              ? "Add a VPS SSH alias in Connections to use self-hosted computers."
+              : "Refresh to check OpenMaus-managed computers on your VPS."}
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading || removingName !== null}
+          aria-label="Refresh VPS computers"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
+        >
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+        </button>
+      </div>
+
+      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+
+      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+        {loading && instances.length === 0 ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <Loader2 size={13} className="animate-spin" /> Checking VPS computers…
+          </div>
+        ) : unavailableReason ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <AlertTriangle size={14} className="shrink-0 text-warning" /> {unavailableReason}
+          </div>
+        ) : configured === false ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <Server size={14} className="shrink-0" /> VPS is not configured.
+          </div>
+        ) : instances.length === 0 ? (
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">No OpenMaus-managed VPS computers found.</div>
+        ) : instances.map((instance, index) => {
+          const state = vpsComputerInventoryState(instance);
+          const removing = removingName === instance.name;
+          return (
+            <div
+              key={instance.name}
+              className={cn(
+                "flex items-start justify-between gap-3 px-3 py-3",
+                index > 0 && "border-t border-hairline/35",
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-[13.5px] font-medium text-ink">
+                    {instance.orphaned ? "Orphaned VPS computer" : instance.ownerName}
+                  </span>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[11px]",
+                      instance.inUse || state === "Running"
+                        ? "bg-success/15 text-success"
+                        : state === "Stopped" || state === "Paused"
+                          ? "bg-control text-ink-secondary"
+                          : "bg-warning/15 text-warning",
+                    )}
+                  >
+                    {state}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11.5px] text-ink-secondary">
+                  {instance.orphaned ? "Its bot no longer exists" : "Owned by this bot"}
+                </div>
+                {instance.inUse && (
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's work before removing its VPS computer.</div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => onRemove(instance)}
+                disabled={instance.inUse || removingName !== null}
+                title="Permanently remove this VPS computer"
+                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {removing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                Remove
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
 export function CloudComputersCard({
@@ -425,6 +569,14 @@ export function LocalComputerSection() {
   const [cloudUnavailableReason, setCloudUnavailableReason] = useState<string | null>(null);
   const [cloudPending, setCloudPending] = useState<PendingCloudAction>(null);
   const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
+  const [vpsInventory, setVpsInventory] = useState<VpsComputerInventoryInstance[]>([]);
+  const [vpsConfigured, setVpsConfigured] = useState<boolean | null>(null);
+  const [vpsSshAlias, setVpsSshAlias] = useState<string | null>(null);
+  const [vpsLoading, setVpsLoading] = useState(true);
+  const [vpsError, setVpsError] = useState<string | null>(null);
+  const [vpsUnavailableReason, setVpsUnavailableReason] = useState<string | null>(null);
+  const [vpsRemovingName, setVpsRemovingName] = useState<string | null>(null);
+  const [vpsRefreshKey, setVpsRefreshKey] = useState(0);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/local-computer", { signal });
@@ -458,6 +610,22 @@ export function LocalComputerSection() {
         : (payload.problem ?? "Cloud computer inventory is unavailable"),
     );
     setCloudError(null);
+  }, []);
+
+  const refreshVpsInventory = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/computers/vps", { signal });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `VPS inventory request failed (${response.status})`);
+    const payload = body as VpsComputerInventoryPayload;
+    setVpsInventory(Array.isArray(payload.instances) ? payload.instances : []);
+    setVpsConfigured(payload.configured === true);
+    setVpsSshAlias(typeof payload.sshAlias === "string" ? payload.sshAlias : null);
+    setVpsUnavailableReason(
+      payload.available || !payload.configured
+        ? null
+        : (payload.problem ?? "VPS computer inventory is unavailable"),
+    );
+    setVpsError(null);
   }, []);
 
   useEffect(() => {
@@ -527,6 +695,23 @@ export function LocalComputerSection() {
       });
     return () => controller.abort();
   }, [cloudRefreshKey, refreshCloudInventory]);
+
+  // Docker-over-SSH inventory is also manual/mount-only. A Settings view
+  // must never become a hidden remote poller or wake a stopped container.
+  useEffect(() => {
+    const controller = new AbortController();
+    setVpsLoading(true);
+    void refreshVpsInventory(controller.signal)
+      .catch((e) => {
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          setVpsUnavailableReason(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setVpsLoading(false);
+      });
+    return () => controller.abort();
+  }, [refreshVpsInventory, vpsRefreshKey]);
 
   const post = async (action: Exclude<Action, "recreate">) => {
     const response = await fetch(`/api/local-computer/${action}`, {
@@ -632,6 +817,30 @@ export function LocalComputerSection() {
     }
   };
 
+  const removeVpsComputer = async (instance: VpsComputerInventoryInstance) => {
+    if (
+      !window.confirm(
+        `Permanently remove ${instance.orphaned ? "this orphaned VPS computer" : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
+      )
+    ) return;
+    setVpsRemovingName(instance.name);
+    setVpsError(null);
+    try {
+      const response = await fetch(`/api/computers/vps/${encodeURIComponent(instance.name)}/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirmName: instance.name }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Could not remove this VPS computer");
+      await refreshVpsInventory();
+    } catch (e) {
+      setVpsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVpsRemovingName(null);
+    }
+  };
+
   const c = status?.commands;
   const ready = status?.ready === true;
   const existing = status?.container !== "missing";
@@ -662,6 +871,18 @@ export function LocalComputerSection() {
         onRefresh={() => setCloudRefreshKey((key) => key + 1)}
         onSleep={(instance) => void actOnCloudComputer("sleep", instance)}
         onDelete={(instance) => void actOnCloudComputer("delete", instance)}
+      />
+
+      <VpsComputersCard
+        instances={vpsInventory}
+        configured={vpsConfigured}
+        sshAlias={vpsSshAlias}
+        loading={vpsLoading}
+        removingName={vpsRemovingName}
+        error={vpsError}
+        unavailableReason={vpsUnavailableReason}
+        onRefresh={() => setVpsRefreshKey((key) => key + 1)}
+        onRemove={(instance) => void removeVpsComputer(instance)}
       />
 
       <Card

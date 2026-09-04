@@ -5,10 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CloudComputersCard,
   LocalVmInventoryCard,
+  VpsComputersCard,
   cloudComputerInventoryState,
   localVmInventoryState,
+  vpsComputerInventoryState,
   type CloudComputerInventoryInstance,
   type LocalVmInventoryInstance,
+  type VpsComputerInventoryInstance,
 } from "./LocalComputerSection";
 
 const cloudVm: LocalVmInventoryInstance = {
@@ -162,5 +165,78 @@ describe("cloud computer inventory UI", () => {
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "provisioning" })).toBe("Starting");
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "unknown" })).toBe("Needs attention");
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, inUse: true })).toBe("In use");
+  });
+});
+
+describe("VPS computer inventory UI", () => {
+  const ownedVps: VpsComputerInventoryInstance = {
+    name: "openmausbot-vps-current-123456abcdef",
+    state: "running",
+    ownerBotId: "current-owner",
+    ownerName: "Research",
+    orphaned: false,
+    inUse: false,
+  };
+  const renderCard = (overrides: Partial<Parameters<typeof VpsComputersCard>[0]> = {}) =>
+    renderToStaticMarkup(createElement(VpsComputersCard, {
+      instances: [],
+      configured: true,
+      sshAlias: "production-vps",
+      loading: false,
+      removingName: null,
+      error: null,
+      unavailableReason: null,
+      onRefresh: vi.fn(),
+      onRemove: vi.fn(),
+      ...overrides,
+    }));
+
+  it("shows the configured host, owners, orphans, and status without raw container details", () => {
+    const orphanName = "openmausbot-vps-deleted-abcdef123456";
+    const markup = renderCard({
+      instances: [
+        ownedVps,
+        {
+          name: orphanName,
+          state: "exited",
+          ownerBotId: null,
+          ownerName: null,
+          orphaned: true,
+          inUse: false,
+        },
+      ],
+    });
+
+    expect(markup).toContain("SSH host: production-vps");
+    expect(markup).toContain("Research");
+    expect(markup).toContain("Owned by this bot");
+    expect(markup).toContain("Orphaned VPS computer");
+    expect(markup).toContain("Its bot no longer exists");
+    expect(markup).toContain("Running");
+    expect(markup).toContain("Stopped");
+    expect(markup).not.toMatch(new RegExp(`${ownedVps.name}|${orphanName}|containerId|VNC_PW|password`));
+  });
+
+  it("disables removal while the owner is working", () => {
+    const markup = renderCard({ instances: [{ ...ownedVps, inUse: true }] });
+
+    expect(markup).toContain("In use");
+    expect(markup).toContain("Stop this bot&#x27;s work before removing its VPS computer.");
+    expect(markup).toContain("disabled=\"\"");
+  });
+
+  it("keeps disconnected, unavailable, and empty states distinct", () => {
+    expect(renderCard({ configured: false, sshAlias: null })).toContain("VPS is not configured");
+    expect(renderCard({ unavailableReason: "SSH host cannot be reached" })).toContain("SSH host cannot be reached");
+    expect(renderCard()).toContain("No OpenMaus-managed VPS computers found");
+  });
+
+  it("uses honest status labels", () => {
+    expect(vpsComputerInventoryState(ownedVps)).toBe("Running");
+    expect(vpsComputerInventoryState({ ...ownedVps, state: "exited" })).toBe("Stopped");
+    expect(vpsComputerInventoryState({ ...ownedVps, state: "paused" })).toBe("Paused");
+    expect(vpsComputerInventoryState({ ...ownedVps, state: "restarting" })).toBe("Restarting");
+    expect(vpsComputerInventoryState({ ...ownedVps, state: "dead" })).toBe("Needs attention");
+    expect(vpsComputerInventoryState({ ...ownedVps, inUse: true })).toBe("In use");
   });
 });
