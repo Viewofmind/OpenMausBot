@@ -126,6 +126,8 @@ const dumpEnv = Object.fromEntries(
     "SystemRoot",
     "FAKE_ACP_MODE",
     "FAKE_ACP_RPC_DUMP",
+    "FAKE_ACP_IMAGE_CAPABILITY",
+    "FAKE_ACP_DUMP_PROMPT",
     "TEST_POLICY",
     "OPENCODE_API_KEY",
     "OPENAI_API_KEY",
@@ -323,14 +325,19 @@ function handle(msg: any) {
         process.exit(3);
       }
       const authMethods = mode === "no-auth" ? [] : [{ id: process.env.FAKE_ACP_AUTH_METHOD ?? "cached_token" }];
+      const agentName = process.env.FAKE_ACP_AGENT_NAME;
+      const acceptsImages = process.env.FAKE_ACP_IMAGE_CAPABILITY === "1";
       result(msg.id, {
         protocolVersion: 1,
         authMethods,
-        agentInfo: process.env.FAKE_ACP_AGENT_NAME
-          ? { name: process.env.FAKE_ACP_AGENT_NAME, version: process.env.FAKE_ACP_AGENT_VERSION ?? "test" }
+        agentInfo: agentName
+          ? { name: agentName, version: process.env.FAKE_ACP_AGENT_VERSION ?? "test" }
           : undefined,
-        agentCapabilities: process.env.FAKE_ACP_AGENT_NAME
-          ? { loadSession: true, sessionCapabilities: { resume: true }, auth: { logout: true } }
+        agentCapabilities: agentName || acceptsImages
+          ? {
+              ...(agentName ? { loadSession: true, sessionCapabilities: { resume: true }, auth: { logout: true } } : {}),
+              ...(acceptsImages ? { promptCapabilities: { image: true } } : {}),
+            }
           : undefined,
         _meta: { modelState: { currentModelId: "fake-acp-model" } },
       });
@@ -444,6 +451,9 @@ function handle(msg: any) {
       break;
     }
     case "session/prompt": {
+      if (process.env.FAKE_ACP_DUMP && process.env.FAKE_ACP_DUMP_PROMPT === "1") {
+        writeFileSync(`${process.env.FAKE_ACP_DUMP}.prompt.json`, JSON.stringify(msg.params?.prompt ?? null, null, 2));
+      }
       if (mode === "hang") {
         // never resolve the prompt — lets tests exercise interrupt
         setInterval(() => {}, 1_000);

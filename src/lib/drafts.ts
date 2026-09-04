@@ -113,7 +113,22 @@ export function getDraftAttachments(store: Store, id: string): Attachment[] {
 export function setDraftAttachments(store: Store, id: string, attachments: Attachment[]): void {
   memoryFor(store, attachmentDraftsByStore, fallbackAttachmentDrafts).set(id, [...attachments]);
   const drafts = read(store, ATTACHMENTS_KEY);
-  if (attachments.length) drafts[id] = attachments;
+  // Blob URLs exist only for this document, and an in-flight image has no
+  // durable path yet. Keep both in memory for task switching, but persist
+  // only upload-complete attachment metadata across an app restart.
+  const durable = attachments.flatMap((attachment): Attachment[] => {
+    if (attachment.kind !== "image") return [attachment];
+    if (!attachment.path || attachment.uploading) return [];
+    return [{
+      kind: "image",
+      id: attachment.id,
+      path: attachment.path,
+      name: attachment.name,
+      size: attachment.size,
+      mime: attachment.mime,
+    }];
+  });
+  if (durable.length) drafts[id] = durable;
   else delete drafts[id];
   try {
     store?.setItem(ATTACHMENTS_KEY, JSON.stringify(drafts));
@@ -256,6 +271,26 @@ export function appendDraftAttachments(id: string, additions: Attachment[]): voi
   };
   setDraftAttachments(store, id, draft.attachments);
   for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+}
+
+/** Replace an optimistic upload in the keyed draft even if the composer that
+ * started it has unmounted. A missing id means the user already removed it. */
+export function replaceDraftAttachment(
+  id: string,
+  attachmentId: string,
+  replacement: Attachment | null,
+): boolean {
+  const store = getStore();
+  const current = getDraftAttachments(store, id);
+  const index = current.findIndex((attachment) => attachment.id === attachmentId);
+  if (index === -1) return false;
+  const attachments = replacement
+    ? current.map((attachment, at) => (at === index ? replacement : attachment))
+    : current.filter((_, at) => at !== index);
+  const draft = { text: getDraft(store, id), attachments };
+  setDraftAttachments(store, id, attachments);
+  for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+  return true;
 }
 
 /** Track upload work outside the mounted composer so task navigation cannot

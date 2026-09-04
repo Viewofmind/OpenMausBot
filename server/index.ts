@@ -49,6 +49,7 @@ import {
   messageFileDownloadName,
   messageAttachmentName,
   messageFileRoots,
+  messageImageTargetAt,
   messageReferencesFile,
   openMessageFile,
 } from "./message-file.ts";
@@ -176,6 +177,7 @@ import {
 import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { buildTurnContext, engineIsFresh } from "./turn-context.ts";
+import { extractTurnImages } from "./turn-images.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import {
   ensureWorkspace,
@@ -2918,11 +2920,6 @@ async function startTurn(
   }
   const task = store.taskByThread(bot.id, threadId);
   if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
-  const commsDepth = opts?.commsDepth ?? 0;
-  // a task takes its name from the first thing you asked it to do
-  if (text.trim() && !opts?.cardContinuation) store.titleTaskFromFirstMessage(bot.id, text, threadId);
-
-  console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(text.slice(0, 70))} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
   const instance = opts?.runOn === "cloud"
     ? registry.instances().find((candidate) => candidate.driverKind === "boxAgent") ?? null
     : registry.get(bot.modelSelection.instanceId);
@@ -2936,6 +2933,21 @@ async function startTurn(
       { status: 409 },
     );
   }
+  // Resolve only transport tags from this newly submitted text. The original
+  // string remains the durable message. Native-image providers get a
+  // path-free prompt and bounded inputs instead of needing a Read tool;
+  // path-reading drivers retain the attachment tag as their compatibility route.
+  const resolvedImages = extractTurnImages(text);
+  const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
+  const providerText = usesNativeImageInput ? resolvedImages.text : text;
+  const turnImages = usesNativeImageInput ? resolvedImages.images : [];
+  const commsDepth = opts?.commsDepth ?? 0;
+  // a task takes its name from the first thing you asked it to do
+  if (resolvedImages.text.trim() && !opts?.cardContinuation) {
+    store.titleTaskFromFirstMessage(bot.id, resolvedImages.text, threadId);
+  }
+
+  console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(resolvedImages.text.slice(0, 70))} images=${turnImages.length} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
   const instanceId = instance.instanceId;
   const model = opts?.runOn === "cloud" ? instance.models.default : bot.modelSelection.model;
   // a cloud routine borrows the instance default model, so it borrows no
@@ -3004,7 +3016,11 @@ async function startTurn(
     commsDepth < MAX_COMMS_DEPTH &&
     instance.adapter.capabilities.agentsMcp === true;
   const { turnText, resume } = buildTurnContext({
-    text: promptWithReply(skillAuthoring ? expandLearnTurnText(text) : text, opts?.replyTo, cfg.profile?.name?.trim() || "User"),
+    text: promptWithReply(
+      skillAuthoring ? expandLearnTurnText(providerText) : providerText,
+      opts?.replyTo,
+      cfg.profile?.name?.trim() || "User",
+    ),
     transcript,
     rewound,
     fresh,
@@ -3040,7 +3056,7 @@ async function startTurn(
       const integrations: NonNullable<Parameters<typeof instance.adapter.sendTurn>[0]["integrations"]> = {};
       let browser: Awaited<ReturnType<typeof browserIntegration>> = null;
       const selectedSkills = selectBundledSkills(
-        text,
+        providerText,
         [
           ...(instance.adapter.capabilities.phoneMcp === true ? ["phoneMcp"] : []),
           ...(skillAuthoring ? ["skillAuthoring"] : []),
@@ -3074,7 +3090,7 @@ async function startTurn(
       const skillInstructions = renderSkillInstructions(selectedSkills, {
         includeRoot: worksInWorkspace && opts?.runOn !== "cloud",
       });
-      const packagePlaybooks = installedPlaybookInstructions(text, bot.playbooks);
+      const packagePlaybooks = installedPlaybookInstructions(providerText, bot.playbooks);
       // An explicit working folder wins for new tasks; otherwise they use
       // the private bot workspace. A legacy task with an existing provider
       // session deliberately pins to null (the old home-folder behavior),
@@ -3295,7 +3311,7 @@ async function startTurn(
       // peer tool, so the harness stays the single owner of turns/permissions.
       const tagged = integrations.agents
         ? mentionedBots(
-            text,
+            providerText,
             sectionPeers,
           )
         : [];
@@ -3364,6 +3380,7 @@ async function startTurn(
       const dispatch = await guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
         text: turnText,
+        images: turnImages,
         model,
         effort,
         // a rewound thread never resumes the abandoned branch's session
@@ -3938,13 +3955,20 @@ type GroupTurnOrchestration = {
   onTurnStarted?: (turnId: string) => void;
 };
 
-function serializeRoomContext(threadId: string, userName: string): string {
+function serializeRoomContext(
+  threadId: string,
+  userName: string,
+  textOverride?: { messageId: string; text: string },
+): string {
   const messages = store.messagesFor(threadId);
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   return messages
     .filter((m) => m.kind === "text" && m.text)
     .slice(-GROUP_CONTEXT_MESSAGES)
-    .map((m) => `${m.role === "user" ? userName : (m.from?.name ?? "Bot")}: ${transcriptText(m, messagesById, userName)}`)
+    .map((m) => {
+      const rendered = textOverride?.messageId === m.id ? { ...m, text: textOverride.text } : m;
+      return `${m.role === "user" ? userName : (m.from?.name ?? "Bot")}: ${transcriptText(rendered, messagesById, userName)}`;
+    })
     .join("\n");
 }
 
@@ -4053,10 +4077,22 @@ async function runGroupMemberTurn(
   const latestUser = [...store.activePath(threadId)].reverse().find(
     (message) => message.role === "user" && message.kind === "text" && message.text,
   );
+  const resolvedLatestImages = latestUser?.text && !cardContinuation
+    ? extractTurnImages(latestUser.text)
+    : { text: latestUser?.text ?? "", images: [] };
+  const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
+  const roomContext = serializeRoomContext(
+    threadId,
+    userName,
+    usesNativeImageInput && latestUser
+      ? { messageId: latestUser.id, text: resolvedLatestImages.text }
+      : undefined,
+  );
+  const turnImages = usesNativeImageInput ? resolvedLatestImages.images : [];
   const skills = availableSkills();
   const selectedSkills = mergeSkills(
     selectBundledSkills(
-      serializeRoomContext(threadId, userName),
+      roomContext,
       instance.adapter.capabilities.phoneMcp === true ? ["phoneMcp"] : [],
       skills,
     ),
@@ -4187,9 +4223,10 @@ async function runGroupMemberTurn(
     .filter(Boolean)
     .join("\n");
 
-  const learnTurn = skillAuthoring && latestUser?.text ? expandLearnTurnText(latestUser.text) : "";
-  const learnBlock = learnTurn && learnTurn !== latestUser?.text ? `\n\n${learnTurn}` : "";
-  const text = `${serializeRoomContext(threadId, userName)}\n\n(Reply to the conversation above as ${bot.name}.)${learnBlock}${cardContinuation ? `\n\n${cardContinuation}` : ""
+  const latestUserText = usesNativeImageInput ? resolvedLatestImages.text : latestUser?.text;
+  const learnTurn = skillAuthoring && latestUserText ? expandLearnTurnText(latestUserText) : "";
+  const learnBlock = learnTurn && learnTurn !== latestUserText ? `\n\n${learnTurn}` : "";
+  const text = `${roomContext}\n\n(Reply to the conversation above as ${bot.name}.)${learnBlock}${cardContinuation ? `\n\n${cardContinuation}` : ""
   }`;
 
   // same workspace + memory as a 1:1 turn — the room is a different
@@ -4302,6 +4339,7 @@ async function runGroupMemberTurn(
     guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
         text,
+        images: turnImages,
         system: roomSystem,
         cwd,
         integrations,
@@ -6863,8 +6901,11 @@ const server = createServer(async (req, res) => {
     // to OpenMausBot's private attachment directory. This is deliberately not
     // a general path reader.
     m = path.match(/^\/api\/threads\/([\w-]+)\/messages\/([\w-]+)\/file$/);
-    if (m && method === "POST") {
-      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+    const streamsMessageImage = Boolean(
+      m && method === "GET" && url.searchParams.get("preview") === "1",
+    );
+    if (m && (method === "POST" || streamsMessageImage)) {
+      if (method === "POST" && !String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
         return json(res, 415, { error: "content-type must be application/json" });
       }
       const threadId = m[1]!;
@@ -6874,12 +6915,18 @@ const server = createServer(async (req, res) => {
 
       const message = store.messagesFor(threadId).find((candidate) => candidate.id === m![2]);
       if (!message) return json(res, 404, { error: "no such message" });
-      const body = await readBody(req);
-      const href = typeof body.path === "string" ? body.path : "";
-      if (!href) return json(res, 400, { error: "path is required" });
       if (message.kind !== "text" || !message.text) {
         return json(res, 403, { error: "that message does not share this file" });
       }
+      const body = method === "POST" ? await readBody(req) : null;
+      const rawReference = streamsMessageImage ? url.searchParams.get("ref") : null;
+      if (streamsMessageImage && (!rawReference || !/^\d+$/.test(rawReference))) {
+        return json(res, 400, { error: "ref must identify a rendered image" });
+      }
+      const href = method === "POST"
+        ? (typeof body.path === "string" ? body.path : "")
+        : messageImageTargetAt(message.text, Number(rawReference));
+      if (!href) return json(res, 400, { error: "path is required" });
 
       let roots: string[];
       let downloadName: string | undefined;
@@ -6920,16 +6967,28 @@ const server = createServer(async (req, res) => {
       }
 
       const file = await openMessageFile(href, roots);
+      if (streamsMessageImage && !file.mime.startsWith("image/")) {
+        await file.handle.close();
+        return json(res, 415, { error: "only images can be previewed here" });
+      }
       res.writeHead(200, {
         "content-type": file.mime,
         "content-length": String(file.bytes),
-        "content-disposition": messageFileDisposition(messageFileDownloadName(downloadName, file.name)),
-        "cache-control": "private, no-store",
+        ...(streamsMessageImage
+          ? { "content-disposition": "inline" }
+          : { "content-disposition": messageFileDisposition(messageFileDownloadName(downloadName, file.name)) }),
+        "cache-control": streamsMessageImage ? "private, max-age=3600" : "private, no-store",
         "cdn-cache-control": "no-store",
         "cloudflare-cdn-cache-control": "no-store",
         pragma: "no-cache",
         vary: "Authorization",
         "x-content-type-options": "nosniff",
+        ...(streamsMessageImage
+          ? {
+              "cross-origin-resource-policy": "same-origin",
+              "referrer-policy": "no-referrer",
+            }
+          : {}),
       });
       if (file.bytes === 0) {
         await file.handle.close();
@@ -8653,7 +8712,11 @@ const server = createServer(async (req, res) => {
           if (currentAtStart.busy) {
             const instance = registry.get(currentAtStart.modelSelection.instanceId);
             let steered = false;
-            if (instance?.adapter.capabilities.queueing && instance.adapter.steer) {
+            // A live text steer has no image side channel. Keep an attachment
+            // message intact for the next ordinary turn, where central image
+            // admission can hand it to the provider natively.
+            const carriesImages = extractTurnImages(text).images.length > 0;
+            if (!carriesImages && instance?.adapter.capabilities.queueing && instance.adapter.steer) {
               steered = await instance.adapter
                 .steer(threadId, promptWithReply(text, replyTo, cfg.profile?.name?.trim() || "User"))
                 .catch(() => false);

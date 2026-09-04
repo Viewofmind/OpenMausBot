@@ -317,6 +317,8 @@ function ChatMarkdownComponent({ text, streaming = false, message }: { text: str
               return <span className="text-[12px] text-danger" role="alert">Image unavailable</span>;
             }
             const filePath = localFilePath(src) ?? undefined;
+            const sourceOffset = (props as { node?: { position?: { start?: { offset?: number } } } })
+              .node?.position?.start?.offset;
             return (
               <MarkdownImagePreview
                 src={src}
@@ -324,6 +326,7 @@ function ChatMarkdownComponent({ text, streaming = false, message }: { text: str
                 openUrl={markdownImageOpenUrl(typeof (props as Record<string, unknown>)["data-open-url"] === "string" ? String((props as Record<string, unknown>)["data-open-url"]) : src)}
                 filePath={filePath}
                 message={filePath ? message : undefined}
+                sourceOffset={sourceOffset}
               />
             );
           },

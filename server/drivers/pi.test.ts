@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureDirs } from "../config.ts";
+import { ensureDirs, NATIVE_DIR } from "../config.ts";
 import type { ProviderInstance } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { encodeInjectId, localHost } from "./local-inject.ts";
@@ -246,6 +246,36 @@ describe("PiDriver turns (fake CLI)", () => {
     const done = recorder.events.at(-1)!;
     expect(done).toMatchObject({ type: "turn.completed", ok: true, stopReason: "end_turn", usage: { input: 12, output: 3 } });
     expect(instance.adapter.hasSession("t-happy")).toBe(false);
+  });
+
+  it("sends images as native base64 prompt content without copying bytes into diagnostics", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-pi-image-"));
+    const dump = join(dir, "dump.jsonl");
+    const imagePath = join(dir, "tiny.png");
+    const bytes = Buffer.from("private-image-bytes");
+    const base64 = bytes.toString("base64");
+    writeFileSync(imagePath, bytes);
+    await create(undefined, { FAKE_PI_DUMP: dump });
+
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "t-pi-native-image",
+      text: "What is this?",
+      images: [{ path: imagePath, mime: "image/png", bytes: bytes.length }],
+    });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+
+    const rows = readFileSync(dump, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { prompt?: { message?: string; images?: unknown[] } });
+    expect(rows.find((row) => row.prompt)?.prompt).toEqual({
+      message: "What is this?",
+      images: [{ type: "image", data: base64, mimeType: "image/png" }],
+    });
+
+    const nativeLog = readFileSync(join(NATIVE_DIR, "t-pi-native-image.ndjson"), "utf8");
+    expect(nativeLog).not.toContain(base64);
+    expect(nativeLog).toContain(`[image data: ${base64.length} base64 chars]`);
   });
 
   it("resumes a prior pi session using the sessionFile resume cursor", async () => {

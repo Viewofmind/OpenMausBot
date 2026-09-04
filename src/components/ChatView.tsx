@@ -290,6 +290,8 @@ function BubbleEditor({
 function Bubble({
   bot,
   message,
+  emerging = false,
+  eagerAttachments = false,
   editing,
   isLastBotText,
   onStartEdit,
@@ -301,6 +303,8 @@ function Bubble({
 }: {
   bot: Bot;
   message: Message;
+  emerging?: boolean;
+  eagerAttachments?: boolean;
   editing: boolean;
   isLastBotText: boolean;
   onStartEdit: () => void;
@@ -386,6 +390,7 @@ function Bubble({
         <div
           className={cn(
             "w-fit max-w-[min(42rem,78%)] rounded-2xl text-[15px] leading-relaxed",
+            emerging && "turn-answer",
             user && webhookView
               ? "overflow-hidden border border-accent/25 bg-card text-ink shadow-[0_10px_30px_rgba(0,0,0,0.18)]"
               : user
@@ -423,7 +428,7 @@ function Bubble({
           ) : user ? (
             <>
               {attachments && attachments.images.length > 0 && (
-                <AttachedImageGallery paths={attachments.images} />
+                <AttachedImageGallery paths={attachments.images} eager={eagerAttachments} />
               )}
               {attachments && attachments.files.length > 0 && (
                 <AttachedFileChips files={attachments.files} message={{ threadId: bot.threadId, messageId: message.id }} className={!visibleText ? "mb-0" : undefined} />
@@ -457,6 +462,7 @@ function Bubble({
                 <AttachedImageGallery
                   paths={message.attachments.map((attachment) => attachment.path)}
                   className={text ? "justify-start" : "mb-0 justify-start"}
+                  eager={eagerAttachments}
                 />
               ) : null}
               {text ? <ChatMarkdown text={text} message={{ threadId: bot.threadId, messageId: message.id }} /> : null}
@@ -645,6 +651,8 @@ const MessagesList = memo(function MessagesList({
   // Finished tool chips become compact runs; settled assistant narration
   // becomes one reversible turn row while the terminal answer stays visible.
   const items = useMemo(() => groupTranscript(messages), [messages]);
+  const newestMessageId = messages.at(-1)?.id;
+  const newestUserMessageId = [...messages].reverse().find((message) => message.role === "user")?.id;
   // A search hit inside a folded run has to open it: the fold keeps the
   // row out of the DOM, and there is nothing for the scroll to land on.
   const focus = state.focusMessage;
@@ -715,7 +723,6 @@ const MessagesList = memo(function MessagesList({
           );
         }
         const m = item.message;
-        if (m.id === emergingId) return null;
         const row = (() => {
           switch (m.kind) {
             case "secret":
@@ -769,6 +776,8 @@ const MessagesList = memo(function MessagesList({
                 <Bubble
                   bot={bot}
                   message={m}
+                  emerging={m.id === emergingId}
+                  eagerAttachments={m.id === newestMessageId || m.id === newestUserMessageId}
                   editing={editingId === m.id}
                   isLastBotText={m.id === lastBotTextId}
                   onStartEdit={() => onStartEdit(m.id)}
@@ -940,23 +949,32 @@ export function ChatView({ bot }: { bot: Bot }) {
       showWorkingDots(bot.busy, lastMessage),
   );
   const wasWaiting = useRef(false);
-  const [popping, setPopping] = useState<{ id: string; text: string } | null>(null);
-  useEffect(() => {
+  const [popping, setPopping] = useState<string | null>(null);
+  const poppingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+  }, []);
+  useLayoutEffect(() => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    poppingTimer.current = null;
     wasWaiting.current = false;
     setPopping(null);
   }, [bot.id]);
   useEffect(() => {
     if (waiting) wasWaiting.current = true;
   }, [waiting]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (lastMessage?.role !== "bot" || lastMessage.kind !== "text" || !wasWaiting.current) return;
     wasWaiting.current = false;
-    setPopping({ id: lastMessage.id, text: lastMessage.text ?? "" });
-    const timer = setTimeout(() => setPopping(null), 520);
-    return () => clearTimeout(timer);
-  }, [lastMessage?.id, lastMessage?.role, lastMessage?.kind, lastMessage?.text]);
+    const messageId = lastMessage.id;
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    setPopping(messageId);
+    poppingTimer.current = setTimeout(() => {
+      poppingTimer.current = null;
+      setPopping((current) => current === messageId ? null : current);
+    }, 520);
+  }, [lastMessage?.id, lastMessage?.role, lastMessage?.kind]);
   const presenceVisible = waiting || popping !== null;
-  const poppingMessage = popping ? messages.find((message) => message.id === popping.id) : undefined;
   // Wall-clock anchor for the working row's elapsed readout — set when the
   // turn starts, cleared when it settles, reset on bot switch.
   const [busySince, setBusySince] = useState<number | null>(null);
@@ -1256,7 +1274,7 @@ export function ChatView({ bot }: { bot: Bot }) {
             transcript={messages}
             editingId={editingId}
             lastBotTextId={lastBotTextId}
-            emergingId={popping?.id}
+            emergingId={popping}
             canRetryLast={!bot.busy && Boolean(lastUserMessage)}
             engine={state.instances.find((i) => i.instanceId === bot.modelSelection.instanceId)}
             onStartEdit={startEdit}
@@ -1298,21 +1316,7 @@ export function ChatView({ bot }: { bot: Bot }) {
             label={activityLabel}
             answering={popping !== null}
             since={busySince}
-          >
-            {popping ? (
-              <div className="w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">
-                <MessageBoundary fallbackText={popping.text || "Generated image"}>
-                  {poppingMessage?.attachments?.length ? (
-                    <AttachedImageGallery
-                      paths={poppingMessage.attachments.map((attachment) => attachment.path)}
-                      className={popping.text ? "justify-start" : "mb-0 justify-start"}
-                    />
-                  ) : null}
-                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: bot.threadId, messageId: popping.id }} /> : null}
-                </MessageBoundary>
-              </div>
-            ) : null}
-          </TurnPresence>
+          />
         </div>
       </div>
 

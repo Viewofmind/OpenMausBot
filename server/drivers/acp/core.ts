@@ -41,6 +41,7 @@ import type {
   RuntimeEventListener,
   SendTurnInput,
   ProviderErrorCode,
+  TurnImageInput,
 } from "../../contracts.ts";
 import { newEventId, newId } from "../../contracts.ts";
 import { computerProxyEnv } from "../../container-computer.ts";
@@ -186,6 +187,14 @@ const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_0
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 const TOOL_LOG_TEXT_LIMIT = 64_000;
 
+async function readAcpImageBlocks(images: readonly TurnImageInput[]) {
+  return Promise.all(images.map(async (image) => ({
+    type: "image" as const,
+    data: (await readFile(image.path)).toString("base64"),
+    mimeType: image.mime,
+  })));
+}
+
 function sanitizeToolLogValue(value: unknown, budget: { nodes: number; text: number }, depth = 0): unknown {
   if (depth > 12 || budget.nodes-- <= 0) return undefined;
   if (typeof value === "string") {
@@ -298,22 +307,37 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       };
 
       // ACP content blocks may carry a complete raster image inline. Keep the
-      // bytes available to the normalizer, but never duplicate megabytes of
-      // base64 into the provider-native diagnostic log.
+      // bytes on the wire, but never duplicate megabytes of base64 into the
+      // provider-native diagnostic log in either direction.
       const nativeLogMessage = (msg: any): unknown => {
-        const content = msg?.params?.update?.content;
+        let redacted = msg;
+        const prompt = msg?.method === "session/prompt" ? msg?.params?.prompt : null;
+        if (Array.isArray(prompt)) {
+          redacted = {
+            ...msg,
+            params: {
+              ...msg.params,
+              prompt: prompt.map((content: any) =>
+                content?.type === "image" && typeof content.data === "string"
+                  ? { ...content, data: `[image data: ${content.data.length} base64 chars]` }
+                  : content
+              ),
+            },
+          };
+        }
+        const content = redacted?.params?.update?.content;
         if (
-          msg?.method !== "session/update" ||
-          msg?.params?.update?.sessionUpdate !== "agent_message_chunk" ||
+          redacted?.method !== "session/update" ||
+          redacted?.params?.update?.sessionUpdate !== "agent_message_chunk" ||
           content?.type !== "image" ||
           typeof content.data !== "string"
-        ) return support.sanitizeToolPayload ? sanitizeAcpToolMessage(msg) : msg;
-        const redacted = {
-          ...msg,
+        ) return support.sanitizeToolPayload ? sanitizeAcpToolMessage(redacted) : redacted;
+        redacted = {
+          ...redacted,
           params: {
-            ...msg.params,
+            ...redacted.params,
             update: {
-              ...msg.params.update,
+              ...redacted.params.update,
               content: { ...content, data: `[image data: ${content.data.length} base64 chars]` },
             },
           },
@@ -447,7 +471,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           try {
             child.stdin.write(JSON.stringify(obj) + "\n");
           } catch {}
-          appendNative(threadId, { dir: "out", source: SOURCE, msg: obj });
+          appendNative(threadId, { dir: "out", source: SOURCE, msg: nativeLogMessage(obj) });
         };
         const request = (method: string, params: unknown, timeoutMs?: number) =>
           new Promise<any>((resolve, reject) => {
@@ -811,6 +835,14 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               }
             }
 
+            const images = turn.images ?? [];
+            const runtimeAcceptsImages = init?.agentCapabilities?.promptCapabilities?.image === true;
+            if (images.length && support.images === true && !runtimeAcceptsImages) {
+              throw new Error(
+                `${support.displayName} is configured for image attachments, but this installed runtime does not advertise ACP image input. Update the ${support.displayName} CLI or send the message without an image.`,
+              );
+            }
+
             const cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
             let sessionResult: any = null;
             if (cursor) {
@@ -897,9 +929,12 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               : turn.system
                 ? `${turn.system}\n\n${turn.text}`
                 : turn.text;
+            const imageBlocks = support.images === true && runtimeAcceptsImages
+              ? await readAcpImageBlocks(images)
+              : [];
             const result = await request("session/prompt", {
               sessionId,
-              prompt: [{ type: "text", text }],
+              prompt: [{ type: "text", text }, ...imageBlocks],
             });
             // opencode 1.18.18 reports usage at the result root; grok and
             // gemini put it under _meta. Read both rather than lose the count.
@@ -983,6 +1018,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             composioMcp: true,
             browserMcp: true,
             images: support.images !== false,
+            nativeImageInput: support.images === true,
             effortLevels: support.effortLevels,
             localComputerMcp: !config.fullAuto,
           },

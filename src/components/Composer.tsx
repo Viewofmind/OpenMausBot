@@ -11,6 +11,7 @@ import {
   markDraftEdited,
   recoverFailedComposerSend,
   rememberFailedComposerSend,
+  replaceDraftAttachment,
   restoredSendId,
   useComposerDraft,
   useDraftAttachmentPending,
@@ -23,12 +24,15 @@ import { ComposerAttachments, pathForFile } from "./ComposerAttachments";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import {
   appendPastedText,
+  handoffAttachmentImagePreview,
   composeMessage,
   imageAttachmentFromFile,
   intakeFiles,
   isImageFile,
   isLongPaste,
+  optimisticImageAttachment,
   pasteAttachment,
+  releaseAttachmentImagePreview,
   type Attachment,
   type PasteAttachment,
 } from "@/lib/composer-attachments";
@@ -263,8 +267,12 @@ export function Composer({
     [draftId],
   );
   const removeAttachment = useCallback(
-    (id: string) => editAttachments((prev) => prev.filter((a) => a.id !== id)),
-    [editAttachments],
+    (id: string) => {
+      const removed = attachments.find((attachment) => attachment.id === id);
+      if (removed?.kind === "image") releaseAttachmentImagePreview(removed);
+      editAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+    },
+    [attachments, editAttachments],
   );
   const displayPasteInChatBox = useCallback(
     /** Moves one pasted attachment into the editable draft and restores focus. */
@@ -422,6 +430,31 @@ export function Composer({
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   // Auto mode belongs to one bot; a room has several, each with its own.
   const autoBot = group ? undefined : bot;
+  const uploadImage = useCallback(async (file: File): Promise<Attachment | null> => {
+    const optimistic = optimisticImageAttachment(file);
+    if (!optimistic) return null;
+    appendDraftAttachments(draftId, [optimistic]);
+    try {
+      const completed = await imageAttachmentFromFile(file, optimistic);
+      if (!completed) {
+        replaceDraftAttachment(draftId, optimistic.id, null);
+        releaseAttachmentImagePreview(optimistic);
+        return null;
+      }
+      handoffAttachmentImagePreview(completed.path, completed.previewUrl);
+      if (!replaceDraftAttachment(draftId, optimistic.id, completed)) {
+        // The user removed the chip while its upload was completing.
+        releaseAttachmentImagePreview(completed);
+      }
+      // The keyed draft already owns the completed attachment; returning it
+      // would make intakeFiles append a duplicate chip.
+      return null;
+    } catch (error) {
+      replaceDraftAttachment(draftId, optimistic.id, null);
+      releaseAttachmentImagePreview(optimistic);
+      throw error;
+    }
+  }, [draftId]);
   const pickFiles = async (picked: FileList | null) => {
     if (!picked?.length) return;
     changeDraftAttachmentPending(draftId, true);
@@ -429,7 +462,7 @@ export function Composer({
       const { attachments: added, notice } = await intakeFiles(Array.from(picked), {
         allowImages: engineSupportsImages,
         getPath: pathForFile,
-        uploadImage: imageAttachmentFromFile,
+        uploadImage,
       });
       if (added.length) addAttachments(added);
       if (notice) setAttachmentNotice(notice);
@@ -726,6 +759,7 @@ export function Composer({
           notice={attachmentNotice}
           onNotice={setAttachmentNotice}
           onPendingChange={(pending) => changeDraftAttachmentPending(draftId, pending)}
+          uploadImage={uploadImage}
         />
         <div className="relative">
           {/* App-ground from the pill midline down, full-bleed. Bubbles may
@@ -813,14 +847,12 @@ export function Composer({
               changeDraftAttachmentPending(draftId, true);
               void (async () => {
                 try {
-                  for (const file of imageFiles) {
-                    try {
-                      const attachment = await imageAttachmentFromFile(file);
-                      if (attachment) appendDraftAttachments(draftId, [attachment]);
-                    } catch (err) {
+                  const results = await Promise.allSettled(imageFiles.map(uploadImage));
+                  for (const result of results) {
+                    if (result.status === "rejected") {
                       dispatch({
                         type: "error",
-                        message: err instanceof Error ? err.message : "image upload failed",
+                        message: result.reason instanceof Error ? result.reason.message : "image upload failed",
                       });
                     }
                   }

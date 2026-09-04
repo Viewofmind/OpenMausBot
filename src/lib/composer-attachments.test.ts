@@ -10,8 +10,11 @@ import {
   documentMime,
   fileAttachment,
   fileAttachmentFromFile,
+  handoffAttachmentImagePreview,
   imageAttachmentFromFile,
   isImageFile,
+  optimisticImageAttachment,
+  releaseAttachmentImagePreview,
   splitTranscriptAttachments,
   type ImageAttachment,
 } from "./composer-attachments";
@@ -406,6 +409,53 @@ describe("private document intake", () => {
 });
 
 describe("private image intake", () => {
+  it("creates local pixels immediately and keeps their identity through upload", async () => {
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:instant-preview");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      path: "/private/attachments/11111111-1111-4111-8111-111111111111.png",
+      mime: "image/png",
+      bytes: 3,
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    try {
+      const file = new File([new Uint8Array([1, 2, 3])], "setup.png", { type: "image/png" });
+      const optimistic = optimisticImageAttachment(file)!;
+      expect(optimistic).toMatchObject({
+        kind: "image",
+        path: "",
+        previewUrl: "blob:instant-preview",
+        uploading: true,
+      });
+      const completed = await imageAttachmentFromFile(file, optimistic);
+      expect(completed).toMatchObject({
+        id: optimistic.id,
+        path: "/private/attachments/11111111-1111-4111-8111-111111111111.png",
+        previewUrl: "blob:instant-preview",
+      });
+      expect(completed).not.toHaveProperty("uploading");
+      expect(createObjectURL).toHaveBeenCalledWith(file);
+    } finally {
+      fetch.mockRestore();
+      createObjectURL.mockRestore();
+    }
+  });
+
+  it("hands local pixels to the transcript until the server preview takes over", () => {
+    const path = "/private/attachments/22222222-2222-4222-8222-222222222222.png";
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const attachment = { ...image(path), previewUrl: "blob:handoff" };
+    try {
+      handoffAttachmentImagePreview(path, attachment.previewUrl);
+      expect(attachmentImageUrl(path)).toBe("blob:handoff");
+      releaseAttachmentImagePreview(attachment);
+      expect(attachmentImageUrl(path)).toBe(
+        "/api/attachments/22222222-2222-4222-8222-222222222222.png",
+      );
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:handoff");
+    } finally {
+      revokeObjectURL.mockRestore();
+    }
+  });
+
   it("retries a lost response with one upload id and canonicalises the display extension", async () => {
     const fetch = vi.spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new TypeError("connection closed"))

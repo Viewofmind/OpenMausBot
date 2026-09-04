@@ -5,13 +5,14 @@
 //
 // The fake is a shebang script — the same constraint codex.cmd itself
 // hits on Windows. resolveCliSpawn covers both, so these run everywhere.
-import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ProviderInstance } from "../contracts.ts";
+import { NATIVE_DIR } from "../config.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { CodexDriver } from "./codex.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
@@ -127,6 +128,35 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(turnStart.params.input[0].text).toBe("You are Testy.\n\nlist files");
     const threadStart = seen.calls.find((c: { method: string }) => c.method === "thread/start");
     expect(threadStart.params).toMatchObject({ model: "gpt-5.6-sol", modelProvider: "openai" });
+  });
+
+  it("sends current-turn images as native localImage inputs without logging their private paths", async () => {
+    await create();
+    const dump = join(scratch, "images.json");
+    const imagePath = join(scratch, "private image.png");
+    process.env.FAKE_CODEX_DUMP = dump;
+    mkdirSync(NATIVE_DIR, { recursive: true });
+    writeFileSync(imagePath, "png");
+
+    await instance.adapter.sendTurn({
+      threadId: "t-native-input-image",
+      text: "describe this",
+      system: "You are Testy.",
+      images: [{ path: imagePath, mime: "image/png", bytes: 3 }],
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    const turnStart = seen.calls.find((call: { method: string }) => call.method === "turn/start");
+    expect(turnStart.params.input).toEqual([
+      { type: "text", text: "You are Testy.\n\ndescribe this" },
+      { type: "localImage", path: imagePath },
+    ]);
+
+    const nativeLog = readFileSync(join(NATIVE_DIR, "t-native-input-image.ndjson"), "utf8");
+    expect(nativeLog).toContain('"type":"localImage"');
+    expect(nativeLog).toContain("[private attachment path omitted]");
+    expect(nativeLog).not.toContain(imagePath);
   });
 
   it("normalizes native image generation bytes without exposing the provider path", async () => {
