@@ -767,7 +767,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // agentsIntegration(); pre-allowing matters doubly here, or the CLI's
       // own ListAgents look-alike shadows it and "@Bot" asks go nowhere
       if (turn.integrations?.agents) {
-        mcpServers.agents = { ...turn.integrations.agents };
+        // Coordination is foundational, not an optional deferred lookup.
+        // Claude waits for always-loaded tools before building the prompt.
+        mcpServers.agents = { ...turn.integrations.agents, alwaysLoad: true };
         allowed.push("mcp__agents");
       }
       if (turn.integrations?.phone) {
@@ -808,7 +810,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (config.permissionMode !== "bypassPermissions") {
         socketPath = permissionSocketPath(threadId);
         args.push("--permission-prompt-tool", "mcp__ogb__approve");
-        mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG } };
+        mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
         allowed.push("mcp__ogb");
       }
       // The MCP config carries credentials — a Composio consumer key in a
@@ -825,6 +827,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       }
 
       const env = claudeEnvironment(turnModel, turnEnvironment);
+      // Our approvals and browser credentials expire at the user-turn
+      // boundary. Native background workers cannot outlive that boundary;
+      // parallel bot work must use the harness's durable delegate_bot path.
+      env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
       const cwd = turn.cwd ?? homedir();
       // Everything that shapes the process, minus session/turn-specific temp
       // paths. Their contents are represented directly in the key instead.
@@ -944,7 +950,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           // the base path: the nonce is not part of the spawn contract, and a
           // retained session keeps its own broker object anyway.
           if (broker.socketPath !== socketPath && mcpConfigPath) {
-            mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, broker.socketPath], env: { ...NODE_ENV_FLAG } };
+            mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, broker.socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
           }
         }
 
@@ -1089,6 +1095,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             }
             break;
           case "result":
+            // A synthetic background completion is not the result of the
+            // submitted user turn. Settling it would revoke browser access
+            // and deny approvals while that user turn is still running.
+            if (o.origin?.kind === "task-notification") break;
             // result.usage is this invocation's total — one process per turn,
             // so it is the turn's figure. cache reads count as input: they
             // are billed (at the cache rate) and they fill the window — but
