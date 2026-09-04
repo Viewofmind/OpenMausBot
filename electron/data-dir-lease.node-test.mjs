@@ -296,7 +296,7 @@ test("a foreign-host owner fails closed and identifies the preserved lease recor
     () => acquireDataDirLease(dataDir),
     (error) => {
       assert.match(error.message, /owned by a process on another machine/i);
-      assert.ok(error.message.includes(leasePath));
+      assert.ok(error.message.includes(JSON.stringify(leasePath)));
       return true;
     },
   );
@@ -320,7 +320,7 @@ test("a foreign-host delegated child fails closed and identifies its preserved l
     () => acquireDataDirLease(dataDir),
     (error) => {
       assert.match(error.message, /delegated server on another machine/i);
-      assert.ok(error.message.includes(childLeasePath));
+      assert.ok(error.message.includes(JSON.stringify(childLeasePath)));
       return true;
     },
   );
@@ -355,7 +355,7 @@ test("a foreign-host reaper fails closed and identifies its preserved recovery r
     () => acquireDataDirLease(dataDir),
     (error) => {
       assert.match(error.message, /recovered on another machine/i);
-      assert.ok(error.message.includes(reaperPath));
+      assert.ok(error.message.includes(JSON.stringify(reaperPath)));
       return true;
     },
   );
