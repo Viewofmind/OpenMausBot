@@ -41,8 +41,10 @@ import { goalCoordinatorForComposer, groupComposerHint, roomRespondersForCompose
 import { PendingApprovalActions, PendingApprovalPanel, pendingApprovals } from "./PendingApproval";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { ReplyQuote } from "./ReplyQuote";
-import { ComposerInjectNow, composerCanInjectNow } from "./ComposerInjectNow";
-import { QueuedComposerMessages } from "./ComposerQueuedMessages";
+import {
+  QueuedComposerMessages,
+  composerCanSteerQueuedMessages,
+} from "./ComposerQueuedMessages";
 import { skillRecorderEnabled } from "@/lib/feature-flags";
 import {
   composerSlashTrigger,
@@ -420,11 +422,40 @@ export function Composer({
   // auto-send intent whenever navigation unmounted the composer.
   const pendingCount = (state.pendingQueued[threadId] ?? []).length;
   const queuedMessages = state.pendingQueued[threadId] ?? [];
-  const canInject = composerCanInjectNow(busy, locked, pendingCount);
+  const canSteerQueued = composerCanSteerQueuedMessages(
+    busy,
+    locked,
+    pendingCount,
+    Boolean(approval),
+  );
+  const [steering, setSteering] = useState(false);
   const interruptTurn = () => {
     if (group) dispatch({ type: "interruptGroup", groupId: group.id });
     else if (bot) dispatch({ type: "interrupt", botId: bot.id });
   };
+  const steerQueued = () => {
+    setSteering(true);
+    // Unlike the general Stop control, Steer belongs to this exact queue.
+    // Scoping prevents a 1:1 queue from interrupting the same bot in a room
+    // (or a routine) whose work is unrelated to the words shown here.
+    const onError = () => setSteering(false);
+    if (group) dispatch({ type: "interruptGroup", groupId: group.id, threadId, onError });
+    else if (bot) dispatch({ type: "interrupt", botId: bot.id, threadId, onError });
+  };
+  const queueHeadId = queuedMessages[0]?.queueId;
+  useEffect(() => setSteering(false), [threadId, queueHeadId]);
+  // Most engines acknowledge interruption quickly, but a lost response must
+  // not leave a control claiming to steer forever. Queue drain or turn end
+  // clears it immediately; twenty seconds is the final recovery floor.
+  useEffect(() => {
+    if (!busy || pendingCount === 0) {
+      setSteering(false);
+      return;
+    }
+    if (!steering) return;
+    const timeout = window.setTimeout(() => setSteering(false), 20_000);
+    return () => window.clearTimeout(timeout);
+  }, [busy, pendingCount, steering]);
   const fileInput = useRef<HTMLInputElement>(null);
   const [autoWarn, setAutoWarn] = useState(false);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
@@ -743,13 +774,6 @@ export function Composer({
             />
           </div>
         )}
-        <QueuedComposerMessages
-          items={queuedMessages}
-          onCancel={(queueId) => {
-            if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
-            else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, queueId });
-          }}
-        />
         <ComposerAttachments
           items={attachments}
           onAdd={addAttachments}
@@ -760,6 +784,16 @@ export function Composer({
           onNotice={setAttachmentNotice}
           onPendingChange={(pending) => changeDraftAttachmentPending(draftId, pending)}
           uploadImage={uploadImage}
+        />
+        <QueuedComposerMessages
+          items={queuedMessages}
+          onSteer={canSteerQueued ? steerQueued : undefined}
+          steerMode={group ? "next" : "all"}
+          steering={steering}
+          onCancel={(queueId) => {
+            if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
+            else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, queueId });
+          }}
         />
         <div className="relative">
           {/* App-ground from the pill midline down, full-bleed. Bubbles may
@@ -940,8 +974,6 @@ export function Composer({
               ? "Attaching files…"
               : recording
               ? "Listening…"
-              : canInject
-                ? `${busyName} is working — inject now to interrupt with the queued message`
               : busy && canSteer
                 ? `${busyName} is working — Enter sends this into the running turn`
               : busy
@@ -958,11 +990,9 @@ export function Composer({
             className="max-h-[9rem] min-h-6 min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent px-1 py-1 text-[15px] leading-6 text-ink placeholder:text-ink-secondary focus:outline-none"
           />
           <div className="flex items-center gap-1">
-          {/* Inject is stop-then-steer made visible. The square stop would
-              drain the same queue, so it yields while a send is waiting.
-              Cancelling the queued composer card brings Stop back. */}
-          {canInject && <ComposerInjectNow onInject={interruptTurn} />}
-          {busy && !locked && !canInject && (
+          {/* Stop stays a stop. Stop-then-steer is named beside the queued
+              message above, where its effect is visible before activation. */}
+          {busy && !locked && (
           <button
             onClick={interruptTurn}
             aria-label="Stop this turn"
