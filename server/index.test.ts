@@ -36,6 +36,7 @@ let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
 let managedBoxRows: Array<Record<string, unknown>> = [];
 let managedBoxListStatus = 200;
+let managedBoxStopDelayMs = 0;
 const managedBoxDeleteConfirmations: Array<{ boxId: string; confirmation?: string }> = [];
 let home: string;
 let staticDir: string;
@@ -502,6 +503,9 @@ beforeAll(async () => {
       }
       const stopMatch = requestUrl.pathname.match(/^\/boxes\/(bx_[23456789abcdefghjkmnpqrstuvwxyz]{8})\/stop$/);
       if (method === "POST" && stopMatch) {
+        if (managedBoxStopDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, managedBoxStopDelayMs));
+        }
         managedBoxRows = managedBoxRows.map((row) => row.id === stopMatch[1] ? { ...row, state: "archived" } : row);
         return res.end(JSON.stringify({ ok: true }));
       }
@@ -1611,7 +1615,16 @@ describe("harness HTTP API", () => {
       const noJson = await fetch(`${BASE}/api/computers/boxes/bx_23456789/sleep`, { method: "POST" });
       expect(noJson.status).toBe(415);
       boxRouteCalls.length = 0;
-      expect((await api("POST", "/api/computers/boxes/bx_23456789/sleep", {})).status).toBe(200);
+      managedBoxStopDelayMs = 250;
+      const sleeping = api("POST", "/api/computers/boxes/bx_23456789/sleep", {});
+      await expect.poll(() => boxRouteCalls.some(
+        (call) => call.method === "POST" && call.path === "/boxes/bx_23456789/stop",
+      )).toBe(true);
+      const racedTurn = await api("POST", `/api/bots/${bot.id}/messages`, { text: "do not race deletion" });
+      expect(racedTurn.status).toBe(409);
+      expect(racedTurn.body.error).toMatch(/cloud computer is being changed/i);
+      expect((await sleeping).status).toBe(200);
+      managedBoxStopDelayMs = 0;
       expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes/bx_23456789/stop" });
 
       const removed = await api("POST", "/api/computers/boxes/bx_23456789/delete", { confirmName: managedName });
@@ -1623,6 +1636,7 @@ describe("harness HTTP API", () => {
       expect(managedBoxRows.some((row) => row.id === "bx_23456789")).toBe(false);
     } finally {
       managedBoxListStatus = 200;
+      managedBoxStopDelayMs = 0;
       managedBoxRows = [];
       managedBoxDeleteConfirmations.length = 0;
       if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);

@@ -1844,7 +1844,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         case "deleteBot":
           void requestConfirmedBotDeletion(
             action.botId,
-            (botId) => api(`/api/bots/${botId}`, { method: "DELETE" }),
+            async (botId) => {
+              // Preserve edits when lifecycle guards refuse deletion, while
+              // preventing an older debounced PATCH from landing after a
+              // successful DELETE.
+              await botPatchQueue.flush(botId);
+              return api(`/api/bots/${botId}`, { method: "DELETE" });
+            },
             (botId) => {
               botPatchQueue.cancel(botId);
               rawDispatch({ type: "deleteBot", botId });

@@ -87,6 +87,10 @@ export function boxTurnLifecycleAction({
   return state ? "wake" : "provision";
 }
 
+export type ManagedBoxMutationClaim = (
+  instance: ManagedBoxInventoryInstance,
+) => (() => void) | void;
+
 function boxFetch(cfg: AppConfig, path: string, opts: RequestInit = {}) {
   return fetch(`${BOX_API}${path}`, {
     ...opts,
@@ -317,7 +321,12 @@ function forgetBoxId(boxId: string): void {
 
 /** Explicit Settings action. Re-listing prevents a stale row from targeting a
  * renamed or foreign provider resource. This never wakes or joins a Box. */
-export async function sleepManagedBox(cfg: AppConfig, owners: ManagedBoxOwner[], boxId: string) {
+export async function sleepManagedBox(
+  cfg: AppConfig,
+  owners: ManagedBoxOwner[],
+  boxId: string,
+  claim?: ManagedBoxMutationClaim,
+) {
   const instance = await revalidateManagedBox(cfg, owners, boxId);
   if (instance.inUse) {
     throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
@@ -325,9 +334,14 @@ export async function sleepManagedBox(cfg: AppConfig, owners: ManagedBoxOwner[],
   if (!SLEEPING.has(instance.state) && !READY.has(instance.state)) {
     throw Object.assign(new Error(`this cloud computer cannot sleep while it is ${instance.state}`), { status: 409 });
   }
-  if (!SLEEPING.has(instance.state)) await stopBox(cfg, instance.boxId);
-  forgetBoxId(instance.boxId);
-  return { ok: true };
+  const release = claim?.(instance);
+  try {
+    if (!SLEEPING.has(instance.state)) await stopBox(cfg, instance.boxId);
+    forgetBoxId(instance.boxId);
+    return { ok: true };
+  } finally {
+    release?.();
+  }
 }
 
 /** Permanent Settings action. The caller must echo the exact freshly-listed
@@ -338,6 +352,7 @@ export async function deleteManagedBox(
   owners: ManagedBoxOwner[],
   boxId: string,
   confirmName: string,
+  claim?: ManagedBoxMutationClaim,
 ) {
   const instance = await revalidateManagedBox(cfg, owners, boxId);
   if (instance.inUse) {
@@ -346,15 +361,20 @@ export async function deleteManagedBox(
   if (confirmName !== instance.name) {
     throw Object.assign(new Error("cloud computer confirmation no longer matches — refresh and try again"), { status: 409 });
   }
-  const removed = await boxJson(cfg, `/boxes/${instance.boxId}`, {
-    method: "DELETE",
-    headers: { "X-Ascii-Confirm-Delete": instance.boxId },
-  });
-  if (!removed.ok) {
-    throw Object.assign(new Error(boxErrorMessage(removed.status, "box delete", removed.body)), { status: removed.status });
+  const release = claim?.(instance);
+  try {
+    const removed = await boxJson(cfg, `/boxes/${instance.boxId}`, {
+      method: "DELETE",
+      headers: { "X-Ascii-Confirm-Delete": instance.boxId },
+    });
+    if (!removed.ok) {
+      throw Object.assign(new Error(boxErrorMessage(removed.status, "box delete", removed.body)), { status: removed.status });
+    }
+    forgetBoxId(instance.boxId);
+    return { ok: true };
+  } finally {
+    release?.();
   }
-  forgetBoxId(instance.boxId);
-  return { ok: true };
 }
 
 export async function findBox(cfg: AppConfig, botId: string) {

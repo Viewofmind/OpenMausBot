@@ -1874,6 +1874,7 @@ let localVmImageBusy = false;
 let localVmProvisionBusy = false;
 let localVmModeChangeBusy = false;
 const activeVpsThreads = new Map<string, string>();
+const boxLifecycleBusyBots = new Set<string>();
 // A restore mutates and cleans a project work tree. Claim the bot across the
 // entire async Git operation so a turn cannot start in that folder midway.
 const checkpointRestoreLeases = new Set<string>();
@@ -1895,6 +1896,20 @@ function managedBoxOwners(): box.ManagedBoxOwner[] {
       activeVpsThreads.has(bot.id) ||
       computerControl.snapshot(bot.id).held,
   }));
+}
+
+/** Claim the owning bot synchronously after Box revalidation and before the
+ * provider mutation. startTurn checks the same set before doing any work, so
+ * a new turn and an irreversible lifecycle action cannot pass each other. */
+function claimManagedBoxMutation(instance: box.ManagedBoxInventoryInstance): () => void {
+  const ownerBotId = instance.ownerBotId;
+  if (!ownerBotId) return () => {};
+  const owner = managedBoxOwners().find((candidate) => candidate.botId === ownerBotId);
+  if (owner?.inUse || boxLifecycleBusyBots.has(ownerBotId)) {
+    throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
+  }
+  boxLifecycleBusyBots.add(ownerBotId);
+  return () => boxLifecycleBusyBots.delete(ownerBotId);
 }
 
 function localVmTargetForBot(botId: string): LocalVmTarget {
@@ -3061,6 +3076,9 @@ async function startTurn(
     throw Object.assign(new Error("this bot's project files are being restored — wait for the restore to finish"), {
       status: 409,
     });
+  }
+  if (boxLifecycleBusyBots.has(botId)) {
+    throw Object.assign(new Error("this bot's cloud computer is being changed — wait for it to finish"), { status: 409 });
   }
   if (bot.busy) throw Object.assign(new Error("the bot is already working — interrupt it first"), { status: 409 });
   const threadId = opts?.threadId ?? bot.threadId;
@@ -8862,6 +8880,9 @@ const server = createServer(async (req, res) => {
     if (m && method === "DELETE") {
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
+      if (boxLifecycleBusyBots.has(bot.id)) {
+        return json(res, 409, { error: "wait for this bot's cloud computer action to finish before deleting the bot" });
+      }
       const activeRoutine = routines!.activeRunForBot(bot.id);
       if (activeRoutine) {
         return json(res, 409, {
@@ -9558,12 +9579,18 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const owners = managedBoxOwners();
       if (m[2] === "sleep") {
-        return json(res, 200, await box.sleepManagedBox(cfg, owners, m[1]));
+        return json(res, 200, await box.sleepManagedBox(cfg, owners, m[1], claimManagedBoxMutation));
       }
       if (typeof body.confirmName !== "string" || body.confirmName.length > 100) {
         return json(res, 400, { error: "confirmName must be the cloud computer name shown in Settings" });
       }
-      return json(res, 202, await box.deleteManagedBox(cfg, owners, m[1], body.confirmName));
+      return json(res, 202, await box.deleteManagedBox(
+        cfg,
+        owners,
+        m[1],
+        body.confirmName,
+        claimManagedBoxMutation,
+      ));
     }
 
     // what the user's machine can host: which runtime is installed, whether
