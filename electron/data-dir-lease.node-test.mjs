@@ -280,6 +280,89 @@ test("a crashed stale-lease reaper can be succeeded without concurrent ownership
   }
 });
 
+test("a foreign-host owner fails closed and identifies the preserved lease record", async () => {
+  const { dataDir } = temporaryDirectory();
+  const leasePath = path.join(dataDir, LEASE_NAME);
+  const owner = {
+    version: 1,
+    pid: await exitedPid(),
+    host: hostname() === "other-host.example" ? "another-host.example" : "other-host.example",
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  writeFileSync(leasePath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+
+  assert.throws(
+    () => acquireDataDirLease(dataDir),
+    (error) => {
+      assert.match(error.message, /owned by a process on another machine/i);
+      assert.ok(error.message.includes(leasePath));
+      return true;
+    },
+  );
+  assert.deepEqual(JSON.parse(readFileSync(leasePath, "utf8")), owner);
+});
+
+test("a foreign-host delegated child fails closed and identifies its preserved lease record", () => {
+  const { dataDir } = temporaryDirectory();
+  const childLeasePath = path.join(dataDir, ".openmausbot-server-child", LEASE_NAME);
+  const child = {
+    version: 1,
+    pid: process.pid,
+    host: hostname() === "other-host.example" ? "another-host.example" : "other-host.example",
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  mkdirSync(path.dirname(childLeasePath), { recursive: true });
+  writeFileSync(childLeasePath, `${JSON.stringify(child)}\n`, { mode: 0o600 });
+
+  assert.throws(
+    () => acquireDataDirLease(dataDir),
+    (error) => {
+      assert.match(error.message, /delegated server on another machine/i);
+      assert.ok(error.message.includes(childLeasePath));
+      return true;
+    },
+  );
+  assert.deepEqual(JSON.parse(readFileSync(childLeasePath, "utf8")), child);
+  assert.throws(() => readFileSync(path.join(dataDir, LEASE_NAME), "utf8"), /ENOENT/);
+});
+
+test("a foreign-host reaper fails closed and identifies its preserved recovery record", async () => {
+  const { dataDir } = temporaryDirectory();
+  const leasePath = path.join(dataDir, LEASE_NAME);
+  const ownerToken = randomUUID();
+  const owner = {
+    version: 1,
+    pid: await exitedPid(),
+    host: hostname(),
+    token: ownerToken,
+    createdAt: Date.now() - 2_000,
+  };
+  const reaperPath = `${leasePath}.reap-${ownerToken}`;
+  const reaper = {
+    version: 1,
+    pid: process.pid,
+    host: hostname() === "other-host.example" ? "another-host.example" : "other-host.example",
+    token: randomUUID(),
+    createdAt: Date.now() - 1_000,
+    targetToken: ownerToken,
+  };
+  writeFileSync(leasePath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+  writeFileSync(reaperPath, `${JSON.stringify(reaper)}\n`, { mode: 0o600 });
+
+  assert.throws(
+    () => acquireDataDirLease(dataDir),
+    (error) => {
+      assert.match(error.message, /recovered on another machine/i);
+      assert.ok(error.message.includes(reaperPath));
+      return true;
+    },
+  );
+  assert.deepEqual(JSON.parse(readFileSync(leasePath, "utf8")), owner);
+  assert.deepEqual(JSON.parse(readFileSync(reaperPath, "utf8")), reaper);
+});
+
 test("legacy data is moved before lease creation", () => {
   const root = mkdtempSync(path.join(tmpdir(), "omb-electron-legacy-"));
   roots.push(root);

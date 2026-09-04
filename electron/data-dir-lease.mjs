@@ -155,7 +155,9 @@ function claimReaperAuthority(leasePath, expected) {
     const current = readReaper(reaperPath, expected.token);
     if (!current) continue;
     if (current.host !== candidate.host) {
-      throw leaseError("A stale OpenMausBot data-directory lease is being recovered on another machine.");
+      throw leaseError(
+        `A stale OpenMausBot data-directory lease is being recovered on another machine. Recovery record: ${JSON.stringify(reaperPath)}.`,
+      );
     }
     if (processIsAlive(current.pid)) return false;
     reaperPath = successorReaperPath(leasePath, expected.token, current.token);
@@ -167,7 +169,12 @@ function retireDeadOwner(leasePath, expected) {
   if (!claimReaperAuthority(leasePath, expected)) return false;
   const current = readOwner(leasePath);
   if (!current || current.token !== expected.token) return true;
-  if (current.host !== hostname() || processIsAlive(current.pid)) return false;
+  if (current.host !== hostname()) {
+    throw leaseError(
+      `The stale OpenMausBot data-directory lease changed ownership to another machine. Lease record: ${JSON.stringify(leasePath)}.`,
+    );
+  }
+  if (processIsAlive(current.pid)) return false;
   unlinkExact(leasePath, "OpenMausBot could not retire the stale data-directory lease.");
   return true;
 }
@@ -208,7 +215,9 @@ function assertNoLiveDelegatedChild(dataDir) {
   const child = readOwner(childLeasePath);
   if (!child) return;
   if (child.host !== hostname()) {
-    throw leaseError("This OpenMausBot data directory still has a delegated server on another machine.");
+    throw leaseError(
+      `This OpenMausBot data directory still has a delegated server on another machine. Delegated server lease: ${JSON.stringify(childLeasePath)}.`,
+    );
   }
   if (processIsAlive(child.pid)) {
     throw leaseError(
@@ -312,7 +321,9 @@ function acquireDataDirLeaseInternal(dataDir, options = {}) {
       const current = readOwner(leasePath);
       if (!current) continue;
       if (current.host !== owner.host) {
-        throw leaseError("This OpenMausBot data directory is already owned by a process on another machine.");
+        throw leaseError(
+          `This OpenMausBot data directory is already owned by a process on another machine. Lease record: ${JSON.stringify(leasePath)}.`,
+        );
       }
       if (processIsAlive(current.pid)) {
         throw leaseError(
