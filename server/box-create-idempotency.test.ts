@@ -369,6 +369,108 @@ describe("Box create idempotency", () => {
     }
   });
 
+  it("recovers when an elected stale-lock reaper also exited", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-dead-reaper-"));
+    const exitedOwner = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const exitedOwnerPid = exitedOwner.pid;
+    expect(exitedOwnerPid).toBeTypeOf("number");
+    await once(exitedOwner, "exit");
+    const exitedReaper = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const exitedReaperPid = exitedReaper.pid;
+    expect(exitedReaperPid).toBeTypeOf("number");
+    await once(exitedReaper, "exit");
+
+    const lockToken = randomUUID();
+    const lockPath = join(dataDir, "box-create-requests.lock");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({
+      version: 1,
+      pid: exitedOwnerPid,
+      token: lockToken,
+      createdAt: Date.now(),
+    }));
+    // This is the marker format shipped before successor elections existed.
+    writeFileSync(`${lockPath}.reap-${lockToken}`, `${exitedReaperPid}\n`);
+
+    const source = `
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      process.stdout.write(JSON.stringify(journal.beginBoxCreate(
+        "dead-reaper-bot",
+        JSON.stringify({ ttlSeconds: 7200, noEnv: true }),
+      )) + "\\n");
+    `;
+    const worker = journalWorker(dataDir, source);
+    try {
+      const result = JSON.parse(await workerLine(worker, "dead-reaper worker"));
+      await expectCleanWorkerExit(worker, "dead-reaper worker");
+      expect(result).toMatchObject({ startedNow: true, request: { botId: "dead-reaper-bot" } });
+      expect(JSON.parse(readFileSync(join(dataDir, "box-create-requests.json"), "utf8")).requests).toHaveLength(1);
+    } finally {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never bypasses a live elected reaper when contenders race", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-live-reaper-"));
+    const exitedOwner = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const exitedOwnerPid = exitedOwner.pid;
+    expect(exitedOwnerPid).toBeTypeOf("number");
+    await once(exitedOwner, "exit");
+
+    const lockToken = randomUUID();
+    const reaperToken = randomUUID();
+    const lockPath = join(dataDir, "box-create-requests.lock");
+    const lockContents = JSON.stringify({
+      version: 1,
+      pid: exitedOwnerPid,
+      token: lockToken,
+      createdAt: Date.now(),
+    });
+    const reaperContents = JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      token: reaperToken,
+      createdAt: Date.now(),
+      targetToken: lockToken,
+    });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(lockPath, lockContents);
+    writeFileSync(`${lockPath}.reap-${lockToken}`, reaperContents);
+
+    const source = `
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      try {
+        journal.beginBoxCreate("live-reaper-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
+      } catch (error) {
+        process.stdout.write(JSON.stringify({ error: String(error?.message ?? error) }) + "\\n");
+      }
+    `;
+    const first = journalWorker(dataDir, source);
+    const second = journalWorker(dataDir, source);
+    try {
+      const [firstResult, secondResult] = await Promise.all([
+        workerLine(first, "first live-reaper contender"),
+        workerLine(second, "second live-reaper contender"),
+      ]).then((lines) => lines.map((line) => JSON.parse(line) as { error?: string }));
+      await Promise.all([
+        expectCleanWorkerExit(first, "first live-reaper contender"),
+        expectCleanWorkerExit(second, "second live-reaper contender"),
+      ]);
+
+      expect(firstResult.error).toMatch(/locked by another OpenMausBot process/i);
+      expect(secondResult.error).toMatch(/locked by another OpenMausBot process/i);
+      expect(readFileSync(lockPath, "utf8")).toBe(lockContents);
+      expect(readFileSync(`${lockPath}.reap-${lockToken}`, "utf8")).toBe(reaperContents);
+      expect(() => readFileSync(join(dataDir, "box-create-requests.json"), "utf8")).toThrow();
+    } finally {
+      if (first.child.exitCode === null) first.child.kill("SIGKILL");
+      if (second.child.exitCode === null) second.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed instead of replacing an ownerless or corrupt lock", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-corrupt-lock-"));
     writeFileSync(join(dataDir, "box-create-requests.lock"), "not-json\n");

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -11,6 +11,7 @@ const KEY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const MAX_REQUESTS = 4_096;
 const LOCK_WAIT_MS = 2_000;
 const LOCK_RETRY_MS = 20;
+const MAX_REAPER_GENERATIONS = 128;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOT_ID = /^[A-Za-z0-9_-]{1,120}$/;
 const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -45,6 +46,15 @@ interface JournalLockOwner {
   pid: number;
   token: string;
   createdAt: number;
+}
+
+interface JournalReaperOwner extends JournalLockOwner {
+  targetToken: string;
+}
+
+interface LegacyJournalReaperOwner {
+  legacy: true;
+  pid: number;
 }
 
 const lockWait = new Int32Array(new SharedArrayBuffer(4));
@@ -153,6 +163,38 @@ function readLockOwner(): JournalLockOwner | null {
   return owner;
 }
 
+function readReaperOwner(
+  path: string,
+  targetToken: string,
+): JournalReaperOwner | LegacyJournalReaperOwner | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw recoveryStateError("stale-lock recovery record is unreadable", error);
+  }
+
+  // Versions before the successor chain wrote only the elected reaper's PID.
+  // Treat that immutable record as generation zero so an interrupted upgrade
+  // remains recoverable without deleting another contender's authority.
+  if (/^[1-9][0-9]*\n?$/.test(raw)) {
+    const pid = Number(raw.trim());
+    if (Number.isInteger(pid) && pid <= 0x7fffffff) return { legacy: true, pid };
+  }
+
+  let owner: unknown;
+  try {
+    owner = JSON.parse(raw);
+  } catch (error) {
+    throw recoveryStateError("stale-lock recovery record is invalid", error);
+  }
+  if (!isLockOwner(owner) || !("targetToken" in owner) || owner.targetToken !== targetToken) {
+    throw recoveryStateError("stale-lock recovery record is invalid");
+  }
+  return owner as JournalReaperOwner;
+}
+
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -177,33 +219,69 @@ function unlinkCandidate(path: string): void {
   }
 }
 
-/** Elect exactly one stale-lock reaper for this immutable owner token. Other
- * contenders never remove the reaper marker: if the elected reaper itself
- * crashes, the state is ambiguous and callers fail closed instead of risking
- * deletion of a replacement lock. */
-function reapDeadLock(expected: JournalLockOwner): boolean {
-  const reaper = `${LOCK_FILE}.reap-${expected.token}`;
+function publishReaper(path: string, owner: JournalReaperOwner): boolean {
+  const candidate = `${path}.candidate-${owner.pid}-${owner.token}`;
   try {
-    writeFileSync(reaper, `${process.pid}\n`, { flag: "wx", mode: 0o600, flush: true });
+    writeFileSync(candidate, `${JSON.stringify(owner)}\n`, { flag: "wx", mode: 0o600, flush: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return false;
-    throw recoveryStateError("stale-lock recovery is unavailable", error);
+    throw recoveryStateError("stale-lock recovery candidate is unavailable", error);
   }
   try {
-    const current = readLockOwner();
-    if (!current || current.token !== expected.token) return true;
-    if (processIsAlive(current.pid)) return false;
     try {
-      unlinkSync(LOCK_FILE);
+      linkSync(candidate, path);
+      return true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        throw recoveryStateError("stale lock could not be retired", error);
-      }
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+      throw recoveryStateError("stale-lock recovery is unavailable", error);
     }
-    return true;
   } finally {
-    unlinkCandidate(reaper);
+    unlinkCandidate(candidate);
   }
+}
+
+function successorReaperPath(targetToken: string, reaperIdentity: string): string {
+  const digest = createHash("sha256").update(reaperIdentity).digest("hex").slice(0, 32);
+  return `${LOCK_FILE}.reap-${targetToken}-${digest}`;
+}
+
+/** Elect exactly one live process to retire this immutable lock owner. A
+ * reaper can itself crash, so each dead reaper deterministically names the
+ * next election. Election records are never removed: no contender can delete
+ * a successor's authority between checking it and publishing its own. */
+function claimReaperAuthority(expected: JournalLockOwner): boolean {
+  let reaperPath = `${LOCK_FILE}.reap-${expected.token}`;
+  for (let generation = 0; generation < MAX_REAPER_GENERATIONS; generation += 1) {
+    const candidate: JournalReaperOwner = {
+      version: 1,
+      pid: process.pid,
+      token: randomUUID(),
+      createdAt: Date.now(),
+      targetToken: expected.token,
+    };
+    if (publishReaper(reaperPath, candidate)) return true;
+
+    const current = readReaperOwner(reaperPath, expected.token);
+    if (!current) continue;
+    if (processIsAlive(current.pid)) return false;
+    const identity = "legacy" in current ? `legacy:${current.pid}` : current.token;
+    reaperPath = successorReaperPath(expected.token, identity);
+  }
+  throw recoveryStateError("stale lock could not be recovered after repeated interrupted attempts");
+}
+
+function reapDeadLock(expected: JournalLockOwner): boolean {
+  if (!claimReaperAuthority(expected)) return false;
+  const current = readLockOwner();
+  if (!current || current.token !== expected.token) return true;
+  if (processIsAlive(current.pid)) return false;
+  try {
+    unlinkSync(LOCK_FILE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      throw recoveryStateError("stale lock could not be retired", error);
+    }
+  }
+  return true;
 }
 
 function acquireJournalLock(): JournalLockOwner {
