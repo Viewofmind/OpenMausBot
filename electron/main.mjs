@@ -16,7 +16,7 @@ import {
   stopRecorder,
 } from "./skill-recorder.mjs";
 import { openBlankTerminal } from "./terminal-launch.mjs";
-import { startUpdater, registerUpdaterIpc } from "./updater.mjs";
+import { attachUpdaterWindow, startUpdater, registerUpdaterIpc } from "./updater.mjs";
 import {
   buildDiagnosticsReport,
   diagnosticsFileName,
@@ -1656,6 +1656,7 @@ function createWindow() {
     },
   });
   mainWindow = win;
+  attachUpdaterWindow(win);
   void startBrowserSurface(win);
   if (waitsForSkinSync) {
     // A broken renderer or preload must not strand the app as an invisible
@@ -2361,7 +2362,7 @@ app.whenReady().then(async () => {
     void startDesktopCompanion({ waitForHosted: false, remember: false });
   }
   environmentsState = readEnvironments();
-  const win = createWindow();
+  createWindow();
   // Reconcile incomplete setup and resume interrupted sign-out only after the
   // local app is usable. This background network work never gates LAN pairing
   // or the first window.
@@ -2390,7 +2391,7 @@ app.whenReady().then(async () => {
   }
   // in-app auto-update (packaged only) — checks GitHub releases, downloads on
   // the user's click, installs on "Restart to update"
-  startUpdater(win);
+  startUpdater();
   refreshApplicationMenu();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
