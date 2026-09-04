@@ -14,6 +14,7 @@ import {
   type TeamMapSnapshot,
 } from "@/lib/team-map";
 import { cn } from "@/lib/cn";
+import { BotInstructionsDialog } from "./BotInstructionsDialog";
 
 const statusTone = {
   success: "bg-success",
@@ -22,35 +23,56 @@ const statusTone = {
   idle: "bg-ink-secondary/35",
 } as const;
 
-function BotNode({ bot, chief = false }: { bot: Bot; chief?: boolean }) {
+function BotNode({
+  bot,
+  chief = false,
+  onViewInstructions,
+}: {
+  bot: Bot;
+  chief?: boolean;
+  onViewInstructions: (bot: Bot) => void;
+}) {
   const { dispatch } = useStore();
   const status = teamMapStatus(bot);
   return (
-    <button
-      onClick={() => dispatch({ type: "select", id: bot.id })}
-      className="group relative flex min-w-0 items-center gap-3 rounded-xl border border-hairline/50 bg-card px-3 py-3 text-left shadow-sm transition hover:border-accent/35 hover:bg-raised/50"
-    >
-      <MausAvatar
-        color={bot.color}
-        bodyId={bot.mascotBody ?? undefined}
-        state={normalizeState(bot.mascotExpression) ?? "idle"}
-        size={34}
-        motion="none"
-        motionKey={0}
-        animated={false}
-      />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5">
-          <span className="truncate text-[13.5px] font-semibold text-ink">{bot.name}</span>
-          {chief && <Crown size={12} className="shrink-0 text-warning" aria-label="Chief of Staff" />}
+    <div className="group relative flex min-w-0 items-stretch overflow-hidden rounded-xl border border-hairline/50 bg-card shadow-sm transition hover:border-accent/35 hover:bg-raised/50">
+      <button
+        type="button"
+        onClick={() => dispatch({ type: "select", id: bot.id })}
+        className="flex min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left"
+        aria-label={`Open chat with ${bot.name}`}
+      >
+        <MausAvatar
+          color={bot.color}
+          bodyId={bot.mascotBody ?? undefined}
+          state={normalizeState(bot.mascotExpression) ?? "idle"}
+          size={34}
+          motion="none"
+          motionKey={0}
+          animated={false}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span className="truncate text-[13.5px] font-semibold text-ink">{bot.name}</span>
+            {chief && <Crown size={12} className="shrink-0 text-warning" aria-label="Chief of Staff" />}
+          </span>
+          <span className="block truncate text-[11.5px] text-ink-secondary">{bot.title || bot.modelSelection.model}</span>
         </span>
-        <span className="block truncate text-[11.5px] text-ink-secondary">{bot.title || bot.modelSelection.model}</span>
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
-        <span className={cn("size-1.5 rounded-full", statusTone[status.tone], status.label === "Working" && "animate-pulse")} />
-        {status.label}
-      </span>
-    </button>
+        <span className="flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+          <span className={cn("size-1.5 rounded-full", statusTone[status.tone], status.label === "Working" && "animate-pulse")} />
+          {status.label}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={() => onViewInstructions(bot)}
+        className="flex w-10 shrink-0 items-center justify-center border-l border-hairline/40 text-ink-secondary opacity-70 transition hover:bg-control hover:text-ink group-hover:opacity-100"
+        aria-label={`View ${bot.name} instructions`}
+        title="View instructions"
+      >
+        <BookOpen size={14} />
+      </button>
+    </div>
   );
 }
 
@@ -290,6 +312,7 @@ export function TeamMapPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contextEditor, setContextEditor] = useState<{ section: string; label: string } | null>(null);
+  const [instructionsBot, setInstructionsBot] = useState<Bot | null>(null);
   const bots = useMemo(() => state.bots.filter((bot) => !bot.hidden), [state.bots]);
   const sections = useMemo(() => buildTeamMapSections(bots), [bots]);
   const edges = useMemo(() => buildTeamMapEdges(bots, snapshot), [bots, snapshot]);
@@ -359,36 +382,63 @@ export function TeamMapPage() {
 
         {error && <div className="mb-4 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
 
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(300px,1fr))] gap-4">
-          {sections.map((section) => (
-            <section key={section.key || "__general__"} className="rounded-2xl border border-hairline/50 bg-panel p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{section.name}</h2>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setContextEditor({ section: section.key, label: section.name })}
-                    className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
-                    aria-label={`Edit ${section.name} shared context`}
-                    title="Shared context"
-                  >
-                    <BookOpen size={11} /> Context
-                  </button>
-                  <span className="text-[11px] tabular-nums text-ink-secondary">{section.chiefs.length + section.members.length}</span>
-                </div>
-              </div>
-              <div className="space-y-2">
-                {section.chiefs.map((bot) => <BotNode key={bot.id} bot={bot} chief />)}
-                {section.chiefs.length > 0 && section.members.length > 0 && (
-                  <div className="ml-5 h-3 w-px bg-hairline" aria-hidden />
-                )}
-                {section.members.length > 0 && (
-                  <div className={cn("space-y-2", section.chiefs.length > 0 && "border-l border-hairline/60 pl-3")}>
-                    {section.members.map((bot) => <BotNode key={bot.id} bot={bot} />)}
+        <div className="space-y-4">
+          {sections.map((section) => {
+            const hasHierarchy = section.chiefs.length > 0 && section.members.length > 0;
+            return (
+              <section key={section.key || "__general__"} className="@container/teammap rounded-2xl border border-hairline/50 bg-panel p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{section.name}</h2>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setContextEditor({ section: section.key, label: section.name })}
+                      className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
+                      aria-label={`Edit ${section.name} shared context`}
+                      title="Shared context"
+                    >
+                      <BookOpen size={11} /> Context
+                    </button>
+                    <span className="text-[11px] tabular-nums text-ink-secondary">{section.chiefs.length + section.members.length}</span>
                   </div>
-                )}
-              </div>
-            </section>
-          ))}
+                </div>
+                <div
+                  className={cn(
+                    "grid gap-3",
+                    hasHierarchy && "@min-[700px]/teammap:grid-cols-[minmax(220px,280px)_40px_minmax(0,1fr)]",
+                  )}
+                >
+                  {section.chiefs.length > 0 && (
+                    <div className="min-w-0">
+                      <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-secondary/75">Coordinator</div>
+                      <div className="space-y-2">
+                        {section.chiefs.map((bot) => (
+                          <BotNode key={bot.id} bot={bot} chief onViewInstructions={setInstructionsBot} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {hasHierarchy && (
+                    <div className="flex h-4 items-stretch pl-5 @min-[700px]/teammap:h-auto @min-[700px]/teammap:items-center @min-[700px]/teammap:pl-0" aria-hidden>
+                      <span className="h-full w-px bg-hairline @min-[700px]/teammap:h-px @min-[700px]/teammap:w-full" />
+                      <ArrowRight size={14} className="hidden shrink-0 -translate-x-0.5 text-ink-secondary/60 @min-[700px]/teammap:block" />
+                    </div>
+                  )}
+
+                  {section.members.length > 0 && (
+                    <div className="min-w-0">
+                      <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-secondary/75">Team</div>
+                      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(220px,100%),1fr))] gap-2">
+                        {section.members.map((bot) => (
+                          <BotNode key={bot.id} bot={bot} onViewInstructions={setInstructionsBot} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+            );
+          })}
         </div>
 
         <section className="mt-6 max-w-[900px]">
@@ -415,6 +465,7 @@ export function TeamMapPage() {
           onClose={() => setContextEditor(null)}
         />
       )}
+      {instructionsBot && <BotInstructionsDialog bot={instructionsBot} onClose={() => setInstructionsBot(null)} />}
     </main>
   );
 }

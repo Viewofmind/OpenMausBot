@@ -17,6 +17,7 @@ import { VoiceSettings } from "./VoiceSettings";
 import { BOT_PROFILE_LIMITS } from "../../shared/bot-profile";
 import { Switch } from "./SettingsPrimitives";
 import { RoutineEditor } from "./RoutinesPage";
+import { BotInstructionsDialog } from "./BotInstructionsDialog";
 
 function Field({
   label,
@@ -542,7 +543,11 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
   const localSelectable = localComputerSelectable({ capabilities, providerSupportsLocal });
   const [localAutoWarning, setLocalAutoWarning] = useState<"auto" | "local" | null>(null);
   const [creatingRoutine, setCreatingRoutine] = useState(false);
-  useEffect(() => setCreatingRoutine(false), [bot.id]);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  useEffect(() => {
+    setCreatingRoutine(false);
+    setInstructionsOpen(false);
+  }, [bot.id]);
   const localDisabledReason = localComputerDisabledReason({ capabilities, providerSupportsLocal });
   const patch = (
     p: Partial<
@@ -653,15 +658,33 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               onChange={(e) => patch({ title: e.target.value })}
             />
           </Field>
-          <Field label="Description">
+          <div className="block">
+            <div className="mb-1.5 flex items-center justify-between gap-3">
+              <label htmlFor={`bot-instructions-${bot.id}`} className="text-[13px] text-ink-secondary">Instructions</label>
+              <button
+                type="button"
+                onClick={() => setInstructionsOpen(true)}
+                className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] font-medium text-accent-text hover:bg-accent/10"
+              >
+                <BookOpen size={12} /> View full
+              </button>
+            </div>
             <textarea
-              className={cn(inputCls, "min-h-[96px] resize-none")}
+              id={`bot-instructions-${bot.id}`}
+              className={cn(inputCls, "min-h-[176px] resize-y leading-relaxed")}
               maxLength={BOT_PROFILE_LIMITS.description}
-              placeholder="What this agent is for"
+              placeholder="Describe this bot’s role, priorities, working style, and boundaries"
+              aria-label="Bot instructions"
               value={bot.description}
               onChange={(e) => patch({ description: e.target.value })}
             />
-          </Field>
+            <div className="mt-1.5 flex items-start justify-between gap-3 text-[11px] text-ink-secondary">
+              <span>Included in this bot’s context on every turn.</span>
+              <span className="shrink-0 tabular-nums">
+                {bot.description.length.toLocaleString()} / {BOT_PROFILE_LIMITS.description.toLocaleString()}
+              </span>
+            </div>
+          </div>
 
           <div className="rounded-xl bg-card p-4">
             <div className="flex items-center gap-2">
@@ -1028,6 +1051,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         onClose={() => setCreatingRoutine(false)}
       />
     )}
+    {instructionsOpen && <BotInstructionsDialog bot={bot} onClose={() => setInstructionsOpen(false)} />}
     <LocalComputerAutoWarning
       open={localAutoWarning !== null}
       onCancel={() => setLocalAutoWarning(null)}
