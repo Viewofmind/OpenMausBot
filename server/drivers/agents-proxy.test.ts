@@ -17,6 +17,15 @@ let stub: Server;
 let stubPort = 0;
 let lastAuth: string | undefined;
 let lastAskBody: any = null;
+let lastRoomsQuery = "";
+let lastPostBody: any = null;
+let postCalls = 0;
+let postResponse: unknown = { ok: true, messageId: "msg-1", roomName: "Launch" };
+let roomsResponse: unknown = {
+  rooms: [
+    { id: "room-launch", name: "Launch", members: ["Asker", "Helper"] },
+  ],
+};
 /** What the stub harness returns from /api/internal/ask-bot. */
 type StubAskResponse = { botName?: string; text?: string; busy?: boolean; timeout?: boolean; waitedMs?: number; taskId?: string; toBotName?: string; error?: string };
 let askResponse: StubAskResponse = { botName: "Helper", text: "hi from helper" };
@@ -94,6 +103,22 @@ beforeAll(async () => {
           bots: [{ id: "bot-helper", name: "Helper", model: "fake-model", busy: false }],
         }),
       );
+    }
+    if (req.method === "GET" && req.url?.startsWith("/api/internal/rooms?")) {
+      lastRoomsQuery = req.url;
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(roomsResponse));
+    }
+    if (req.method === "POST" && req.url === "/api/internal/post-to-room") {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        lastPostBody = JSON.parse(data);
+        postCalls += 1;
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify(postResponse));
+      });
+      return;
     }
     if (req.method === "POST" && req.url === "/api/internal/ask-bot") {
       let data = "";
@@ -216,10 +241,12 @@ describe("agents-proxy MCP surface", () => {
     const list = await rpc("tools/list");
     expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
       "list_bots",
+      "list_rooms",
       "ask_bot",
       "delegate_bot",
       "check_delegation",
       "wait_delegation",
+      "post_to_room",
       "create_bot",
       "request_credential",
       "list_routines",
@@ -278,6 +305,74 @@ describe("agents-proxy MCP surface", () => {
     expect(text).toContain("Assign work with delegate_bot");
     expect(text).toContain("Use ask_bot only for a short answer");
     expect(lastAuth).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("list_rooms names each room, its id, and its members", async () => {
+    roomsResponse = {
+      rooms: [
+        { id: "room-launch", name: "Launch", members: ["Asker", "Helper"] },
+        { id: "room-ops", name: "Ops", members: ["Asker", "Ops Bot"] },
+      ],
+    };
+    const res = await callTool("list_rooms", {});
+    const text = res.result.content[0].text;
+    expect(text).toContain("room-launch");
+    expect(text).toContain("Launch");
+    expect(text).toContain("members: Asker, Helper");
+    expect(text).toContain("room-ops");
+    // the id is useless without the tool that consumes it
+    expect(text).toContain("post_to_room");
+    // and the model must not expect a reply it will never get
+    expect(text).toContain("does not start anyone's turn");
+    expect(lastRoomsQuery).toContain("fromBotId=bot-asker");
+    expect(lastRoomsQuery).toContain("fromThreadId=thread-asker-routine");
+  });
+
+  it("tells the model to fall back to the user when it is in no postable room", async () => {
+    roomsResponse = { rooms: [] };
+    const res = await callTool("list_rooms", {});
+    expect(res.result.content[0].text).toContain("Tell the user");
+    roomsResponse = { rooms: [{ id: "room-launch", name: "Launch", members: ["Asker", "Helper"] }] };
+  });
+
+  it("post_to_room forwards the sender's own identity and warns that no reply is coming", async () => {
+    const res = await callTool("post_to_room", { group_id: "room-launch", message: "shipping at 4" });
+    expect(res.result.isError).toBeFalsy();
+    expect(res.result.content[0].text).toContain("Posted in Launch");
+    expect(res.result.content[0].text).toContain("expect no reply");
+    // the room id is the only thing the model chooses; who is posting comes
+    // from the env the harness injected, never from the tool arguments
+    expect(lastPostBody).toEqual({
+      fromBotId: "bot-asker",
+      fromThreadId: "thread-asker-routine",
+      groupId: "room-launch",
+      message: "shipping at 4",
+    });
+  });
+
+  it("hands a harness refusal to the model verbatim", async () => {
+    // the budget's wording is the whole point of it — it must not be
+    // reworded into something that reads like "try again"
+    postResponse = { error: "This room has already taken 2 bot posts. Do not retry this call." };
+    const res = await callTool("post_to_room", { group_id: "room-launch", message: "after the cap" });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/do not retry this call/i);
+    postResponse = { ok: true, messageId: "msg-1", roomName: "Launch" };
+  });
+
+  it("stops a turn at three posts and says so without another round trip", async () => {
+    const before = postCalls;
+    // one post is already spent by the test above
+    for (let i = 0; i < 2; i++) {
+      const ok = await callTool("post_to_room", { group_id: "room-launch", message: `update ${i}` });
+      expect(ok.result.isError).toBeFalsy();
+    }
+    expect(postCalls).toBe(before + 2);
+    const capped = await callTool("post_to_room", { group_id: "room-launch", message: "one more" });
+    expect(capped.result.isError).toBe(true);
+    expect(capped.result.content[0].text).toMatch(/do not retry/i);
+    // the refusal is the proxy's own: the harness was never asked
+    expect(postCalls).toBe(before + 2);
   });
 
   it("ask_bot forwards sender + depth and returns the reply", async () => {

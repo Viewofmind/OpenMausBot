@@ -70,10 +70,24 @@ function allowKeyAllowed(from: BotRecord, allowKey: string): boolean {
   return from.alwaysAllow?.includes(allowKey) ?? false;
 }
 
+/** Who a peer action is aimed at. A bot for ask_bot and delegate_bot, a
+ * room for post_to_room — the gate only ever needs its id and its name. */
+export interface PeerApprovalTarget {
+  id: string;
+  name: string;
+}
+
+/** How the card names what is about to happen. */
+const ACTION_VERB: Record<PeerAction, string> = {
+  ask_bot: "contact",
+  delegate_bot: "delegate to",
+  post_to_room: "post in",
+};
+
 function pushApprovalCard(
   bus: ApprovalBus,
   from: BotRecord,
-  target: BotRecord,
+  target: PeerApprovalTarget,
   message: string,
   action: PeerAction,
   requestId: string,
@@ -84,7 +98,8 @@ function pushApprovalCard(
     role: "bot",
     kind: "options",
     card: {
-      title: `@${from.name} wants to ${action === "ask_bot" ? "contact" : "delegate to"} @${target.name}`,
+      // a room is named as a room; only a bot gets an @
+      title: `@${from.name} wants to ${ACTION_VERB[action]} ${action === "post_to_room" ? `“${target.name}”` : `@${target.name}`}`,
       subtitle,
       options: ["Allow", "Deny", "Always allow"],
       requestId,
@@ -102,7 +117,7 @@ function pushApprovalCard(
 export function requestPeerApproval(
   bus: ApprovalBus,
   from: BotRecord,
-  target: BotRecord,
+  target: PeerApprovalTarget,
   message: string,
   action: PeerAction,
   sourceThreadId = from.threadId,
@@ -182,24 +197,39 @@ export function cancelPeerApprovalsForThread(threadId: string): void {
   }
 }
 
+/** Every thread a peer card can be raised in. A card lands in the thread
+ * the CALLER is speaking from, and since a bot's turn can now run in a room
+ * — ask_bot and post_to_room are both callable from there — that thread is
+ * as often a room's as a bot's. A walk that knew only about bot threads
+ * would leave a room's composer blocked behind a card nothing can answer. */
+function peerCardThreads(bus: ApprovalBus): Set<string> {
+  const threadIds = new Set<string>();
+  for (const bot of bus.store.bots) {
+    threadIds.add(bot.threadId);
+    for (const task of bot.tasks ?? []) threadIds.add(task.threadId);
+  }
+  for (const group of bus.store.groups) {
+    threadIds.add(group.threadId);
+    for (const task of group.tasks ?? []) threadIds.add(task.threadId);
+  }
+  return threadIds;
+}
+
 /** Cards left on disk by a previous run can never be answered — their
  * in-memory approval died with the process. Settle them at boot so a
  * crashed run doesn't leave a thread with a permanently blocked composer. */
 export function dismissStalePeerCards(bus: ApprovalBus): number {
   let dismissed = 0;
-  for (const bot of bus.store.bots) {
-    const threadIds = new Set([bot.threadId, ...(bot.tasks ?? []).map((task) => task.threadId)]);
-    for (const threadId of threadIds) {
-      for (const message of bus.store.messagesFor(threadId)) {
-        const card = message.card;
-        if (!card?.requestId || card.answered || card.dismissed) continue;
-        if (card.tool !== "ask_bot" && card.tool !== "delegate_bot") continue;
-        if (pendingComms.has(card.requestId)) continue;
-        const patched = bus.store.patchMessage(threadId, message.id, {
-          card: { ...card, answered: "deny", dismissed: true },
-        });
-        if (patched) dismissed += 1;
-      }
+  for (const threadId of peerCardThreads(bus)) {
+    for (const message of bus.store.messagesFor(threadId)) {
+      const card = message.card;
+      if (!card?.requestId || card.answered || card.dismissed) continue;
+      if (card.tool !== "ask_bot" && card.tool !== "delegate_bot" && card.tool !== "post_to_room") continue;
+      if (pendingComms.has(card.requestId)) continue;
+      const patched = bus.store.patchMessage(threadId, message.id, {
+        card: { ...card, answered: "deny", dismissed: true },
+      });
+      if (patched) dismissed += 1;
     }
   }
   return dismissed;

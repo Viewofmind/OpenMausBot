@@ -164,6 +164,8 @@ import {
 import { EventBus } from "./harness/bus.ts";
 import { ProviderRegistry } from "./harness/registry.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
+import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
+import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
 import {
   mentionedBots,
   roomResponders,
@@ -4074,6 +4076,7 @@ function serializeRoomContext(
   threadId: string,
   userName: string,
   textOverride?: { messageId: string; text: string },
+  readerBotId?: string,
 ): string {
   const messages = store.messagesFor(threadId);
   const messagesById = new Map(messages.map((message) => [message.id, message]));
@@ -4082,7 +4085,14 @@ function serializeRoomContext(
     .slice(-GROUP_CONTEXT_MESSAGES)
     .map((m) => {
       const rendered = textOverride?.messageId === m.id ? { ...m, text: textOverride.text } : m;
-      return `${m.role === "user" ? userName : (m.from?.name ?? "Bot")}: ${transcriptText(rendered, messagesById, userName)}`;
+      const speaker = m.role === "user" ? userName : (m.from?.name ?? "Bot");
+      const line = `${speaker}: ${transcriptText(rendered, messagesById, userName)}`;
+      // A room reply is the room talking. A post_to_room message is another
+      // bot's text carried in from somewhere else, so it says so — the
+      // reader's own posts excepted, which would only be telling it about
+      // itself.
+      if (!m.peerPost || !m.from || m.from.botId === readerBotId) return line;
+      return `${peerProvenanceNote({ botName: m.from.name, delivery: "post_to_room", unattended: m.peerPost.unattended })}\n${line}`;
     })
     .join("\n");
 }
@@ -4092,6 +4102,15 @@ function serializeRoomContext(
 // they can mirror messages + chips without re-deriving SSE plumbing. Same
 // shape every comms entry point uses (ask_bot, delegate_bot).
 const commsBus: CommsBus = { store, broadcast };
+
+// What each room has already taken from its bots. Keyed by room because the
+// loop post_to_room can start is a property of the room, not of any one
+// caller — three bots posting twice each is the same runaway as one bot
+// posting six times. In memory only: a restart ends every turn that could
+// have been mid-loop, so a fresh budget is the truthful state.
+const roomPostBudgets = new Map<string, RoomPostBudget>();
+/** Long enough for a real update, short enough that a room stays readable. */
+const ROOM_POST_MAX_CHARS = 4_000;
 
 // approval bus: peer-approval.ts only needs to push cards and broadcast
 // them — its pending map lives in the module so the two respond endpoints
@@ -4202,6 +4221,7 @@ async function runGroupMemberTurn(
     usesNativeImageInput && latestUser
       ? { messageId: latestUser.id, text: resolvedLatestImages.text }
       : undefined,
+    bot.id,
   );
   const turnImages = usesNativeImageInput ? resolvedLatestImages.images : [];
   const skills = availableSkills();
@@ -5230,6 +5250,73 @@ function connectorThread(botId: string, threadId: string) {
   return null;
 }
 
+/** When a person last wrote into the room's current conversation, if one
+ * ever has. The posting budget's ceiling counts only the bot posts nobody
+ * has answered since, so this is read fresh on every attempt rather than
+ * remembered — the room's transcript is already the record of who spoke
+ * last, and a second copy of it could only ever disagree.
+ *
+ * Only a person puts a user-role message in a room: the composer, or a
+ * calendar call they scheduled. No bot has that ingress — post_to_room
+ * appends role "bot", which is the rule this whole surface turns on — so
+ * a bot cannot re-arm the ceiling it just spent. */
+function lastHumanRoomMessageAt(group: GroupRecord): number | undefined {
+  const messages = store.messagesFor(group.threadId);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role === "user" && message.kind === "text") return message.at;
+  }
+  return undefined;
+}
+
+/** Whether `bot` may write into `group` from outside a turn there, and the
+ * exact refusal when it may not.
+ *
+ * Room membership is the one place the app's section boundary does not
+ * reach: list_bots, ask_bot, delegate_bot and create_bot are all scoped to
+ * the sender's section, but a person is free to put bots from two sections
+ * in one room. A tool that pushed text into such a room would therefore be
+ * the first way one section speaks to another with nobody in the loop, so
+ * this refuses it outright rather than trying to judge when that is
+ * harmless. The cost is real — a genuinely cross-section room cannot be
+ * posted into from outside — and it is the cheaper mistake: the person can
+ * still relay, and the boundary keeps meaning exactly one thing.
+ *
+ * Membership is read from the record here and never from a tool argument;
+ * the argument only names which room to look up. */
+function roomPostEligibility(
+  bot: BotRecord,
+  group: GroupRecord,
+): { ok: true } | { ok: false; status: number; error: string } {
+  if (group.dm) {
+    return {
+      ok: false,
+      status: 400,
+      error: "that is a one-to-one bot channel, not a room — use ask_bot or delegate_bot to reach a single bot",
+    };
+  }
+  if (!group.memberIds.includes(bot.id)) {
+    return { ok: false, status: 403, error: "you are not a member of that room" };
+  }
+  const outsider = group.memberIds
+    .map((id) => store.bot(id))
+    .find((member) => member && sectionKey(member.section) !== sectionKey(bot.section));
+  if (outsider) {
+    return {
+      ok: false,
+      status: 403,
+      error: `that room includes @${outsider.name}, who is outside your section — tell the user what you wanted to post there instead`,
+    };
+  }
+  // A room whose setup the person has not finished has never been opened
+  // for business, and its first message decides whether setup still counts
+  // as pending. A bot must not be the one to settle that.
+  if (roomSetupPending(group)) {
+    return { ok: false, status: 409, error: "that room is still being set up — it cannot receive messages yet" };
+  }
+  return { ok: true };
+}
+
 function routineProposalPersistence(botId: string, threadId: string) {
   if (!store.bot(botId)) {
     return { ok: false as const, status: 403, error: "unknown sender" };
@@ -6155,6 +6242,31 @@ const server = createServer(async (req, res) => {
           }));
         return json(res, 200, { bots });
       }
+      // Nothing else ever tells a bot a room id, so this is the discovery
+      // half of post_to_room: it lists exactly the rooms that tool would
+      // accept, resolved from the sender's own membership. Listing a room a
+      // post would be refused for would only teach the model to keep trying.
+      if (method === "GET" && path === "/api/internal/rooms") {
+        const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
+        const from = store.bot(fromBotId);
+        if (!from) return json(res, 403, { error: "unknown sender" });
+        const fromThreadId = String(url.searchParams.get("fromThreadId") ?? from.threadId);
+        if (!connectorThread(from.id, fromThreadId)) {
+          return json(res, 403, { error: "source conversation does not belong to sender" });
+        }
+        const rooms = store.groups
+          .filter((group) => roomPostEligibility(from, group).ok)
+          .slice(0, 50)
+          .map((group) => ({
+            id: group.id,
+            name: group.name,
+            members: group.memberIds
+              .map((id) => store.bot(id))
+              .filter((member): member is BotRecord => Boolean(member))
+              .map((member) => member.name),
+          }));
+        return json(res, 200, { rooms });
+      }
       if (method === "GET" && path === "/api/internal/routines") {
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
         const from = store.bot(fromBotId);
@@ -6339,7 +6451,12 @@ const server = createServer(async (req, res) => {
           return json(res, 403, { error: "that bot is not on this bot's allowed peers — call list_bots for the ones you can reach" });
         }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
-        if (!store.taskByThread(from.id, fromThreadId)) {
+        // Rooms are conversations too. The task-only lookup here refused every
+        // ask made from a room turn — the bot could see its teammates and not
+        // reach them — while create_bot and the routine endpoints already
+        // accepted a group thread the sender belongs to. One ownership rule,
+        // and it is still the sender's own membership that decides.
+        if (!connectorThread(from.id, fromThreadId)) {
           return json(res, 403, { error: "source thread does not belong to sender" });
         }
         // A busy peer used to be a flat bounce ("try again later") — a
@@ -6396,8 +6513,11 @@ const server = createServer(async (req, res) => {
           if (!peerAllowed(freshFrom, freshTarget.id)) {
             return json(res, 200, { error: "that bot is no longer an allowed peer" });
           }
-          if (!store.taskByThread(freshFrom.id, fromThreadId)) {
-            return json(res, 404, { error: "source task no longer exists" });
+          // Membership can be revoked while the card is open: re-check the
+          // same way, so a bot removed from a room mid-approval cannot go on
+          // speaking through it.
+          if (!connectorThread(freshFrom.id, fromThreadId)) {
+            return json(res, 404, { error: "source conversation no longer belongs to sender" });
           }
           // The user just approved this exact ask_bot request. Preserve that
           // decision if it has to become an async handoff; asking twice makes
@@ -6408,7 +6528,11 @@ const server = createServer(async (req, res) => {
         }
         const channel = getOrCreateChannel(store, currentFrom, currentTarget);
         mirrorExchange(commsBus, currentFrom, currentTarget, message, channel, fromThreadId);
-        const prefixed = `[Message from @${currentFrom.name}, another bot in this OpenMausBot workspace. Reply to them.]\n\n${message}`;
+        const prefixed = withPeerProvenance(message, {
+          botName: currentFrom.name,
+          delivery: "ask_bot",
+          unattended: isUnattended(currentFrom.id),
+        });
         const outcome = await askBotAndWait(toBotId, prefixed, depth, fromBotId);
         if (outcome.status === "timeout" && !delegationWatch.has(currentTarget.threadId)) {
           // The peer's turn is still running — only the wait ended. Convert
@@ -6544,6 +6668,136 @@ const server = createServer(async (req, res) => {
             ? `Queued for review — @${targetName} will only pick it up if the user approves after your turn finishes.`
             : `Delegation queued — @${targetName} will pick it up after your current turn finishes.`,
         });
+      }
+      // post_to_room: a bot puts ONE message into a room it belongs to,
+      // without a turn being started for anyone. Everything about it is a
+      // deliberate non-event:
+      //
+      //   role "bot", never "user". A user-role append is what the composer
+      //   writes, and it re-enters responder selection — one tool call would
+      //   become a round of real turns, which is the notification storm this
+      //   whole surface exists to avoid.
+      //
+      //   no startGroupTurn and no queue kick. The post lands, the room is
+      //   marked unread, the person reads it when they look. A bot wanting a
+      //   reply has ask_bot and delegate_bot, both of which are accounted for.
+      //
+      //   membership from the record, never from the argument: the argument
+      //   only says which room to look up.
+      if (method === "POST" && path === "/api/internal/post-to-room") {
+        const body = await readBody(req);
+        const fromBotId = String(body.fromBotId ?? "");
+        const from = store.bot(fromBotId);
+        if (!from) return json(res, 403, { error: "unknown sender" });
+        const fromThreadId = String(body.fromThreadId ?? from.threadId);
+        const owner = connectorThread(from.id, fromThreadId);
+        if (!owner) return json(res, 403, { error: "source conversation does not belong to sender" });
+        const groupId = String(body.groupId ?? "").trim();
+        const message = String(body.message ?? "").trim();
+        if (!groupId || !message) {
+          return json(res, 400, { error: "post_to_room needs group_id (from list_rooms) and message" });
+        }
+        if (message.length > ROOM_POST_MAX_CHARS) {
+          return json(res, 400, {
+            error: `a room post is at most ${ROOM_POST_MAX_CHARS} characters — post the short version and keep the detail in your own reply`,
+          });
+        }
+        let room = store.group(groupId);
+        if (!room) return json(res, 404, { error: "no such room — call list_rooms and copy the exact id from the result" });
+        // Posting into the room you are already speaking in is not a peer
+        // message, it is your own reply arriving twice — and it feeds your
+        // words back into the context the same turn is answering from.
+        if (room.id === owner.group?.id) {
+          return json(res, 409, { error: "you are already speaking in that room — say it in your reply instead" });
+        }
+        const eligibility = roomPostEligibility(from, room);
+        if (!eligibility.ok) return json(res, eligibility.status, { error: eligibility.error });
+        // The budget is read BEFORE any approval card and CHARGED only on
+        // the path that actually appends. Reading it early is what stops a
+        // bot in a loop turning that loop into a queue of cards for a person
+        // to work through: the refusal lands on the bot, not in the inbox.
+        // Charging it early would have been a lie in the other direction —
+        // a denied card, a room deleted while the card was open, or a
+        // roster change that ends the post all leave the room with nothing
+        // in it, and a room that took no post must not be told it did. The
+        // model would then be refused its retry with "you already posted
+        // that", which is the one thing worse than a refusal: a false
+        // receipt for a message nobody can read.
+        const askBudget = (bot: BotRecord, group: GroupRecord) => {
+          const attempt: RoomPostAttempt = {
+            botId: bot.id,
+            botName: bot.name,
+            text: message,
+            now: Date.now(),
+          };
+          const spokeAt = lastHumanRoomMessageAt(group);
+          if (spokeAt !== undefined) attempt.lastHumanAt = spokeAt;
+          return decideRoomPost(roomPostBudgets.get(group.id) ?? emptyRoomPostBudget(), attempt);
+        };
+        // A refusal is stored, an allowance is not: the budget a refusal
+        // hands back never contains the attempt — it is the pruning, plus
+        // the breaker if this call is what tripped it — so keeping it costs
+        // the room nothing and losing it would let a ring re-form one call
+        // later.
+        const preflight = askBudget(from, room);
+        if (!preflight.allowed) {
+          roomPostBudgets.set(room.id, preflight.budget);
+          return json(res, 429, { error: preflight.message });
+        }
+        let poster = from;
+        if (from.approvePeerComms) {
+          // Same gate ask_bot carries, aimed at the room instead of a peer:
+          // a bot the user asked to be consulted about must be consulted here
+          // too, or the newest way to reach other bots is the one way round it.
+          const verdict = await requestPeerApproval(
+            approvalBus,
+            from,
+            { id: room.id, name: room.name },
+            message,
+            "post_to_room",
+            fromThreadId,
+          );
+          if (verdict !== "allow") return json(res, 200, { error: "denied by user" });
+          // The card may have been open for minutes. Re-read both records so a
+          // roster change, a section move, or a deletion during that window
+          // cannot be posted through on a stale decision.
+          const freshFrom = store.bot(fromBotId);
+          const freshRoom = store.group(groupId);
+          if (!freshFrom || !freshRoom) return json(res, 404, { error: "that bot or room no longer exists" });
+          const stillEligible = roomPostEligibility(freshFrom, freshRoom);
+          if (!stillEligible.ok) return json(res, stillEligible.status, { error: stillEligible.error });
+          poster = freshFrom;
+          room = freshRoom;
+        }
+        // The room's budget is charged here, against the records the append
+        // below will actually use. Between the preflight and this line the
+        // room may have taken another bot's post, so this decision — not the
+        // preflight — is the one that can refuse.
+        const decision = askBudget(poster, room);
+        roomPostBudgets.set(room.id, decision.budget);
+        if (!decision.allowed) return json(res, 429, { error: decision.message });
+        // Unattended inheritance: the mark rides the sender, and reading it
+        // here is also what keeps its window alive through a turn that only
+        // posts — an aged-out mark would hand the next hop to auto-approve.
+        const unattended = isUnattended(poster.id);
+        const posted = store.appendMessage(room.threadId, {
+          role: "bot",
+          kind: "text",
+          text: message,
+          from: { botId: poster.id, name: poster.name, color: poster.color },
+          peerPost: unattended ? { unattended: true } : {},
+        });
+        store.patchGroup(room.id, { unread: true });
+        // The same visibility contract the peer tools keep: whatever a bot
+        // does elsewhere shows up in the conversation it is actually in.
+        const chip: Omit<Message, "id" | "at"> = {
+          role: "bot",
+          kind: "activity",
+          tool: { name: `Posted in ${room.name}` },
+        };
+        if (owner.group) chip.from = { botId: poster.id, name: poster.name, color: poster.color };
+        store.appendMessage(fromThreadId, chip);
+        return json(res, 201, { ok: true, messageId: posted.id, roomName: room.name });
       }
       if (method === "POST" && path === "/api/internal/create-bot") {
         const body = await readBody(req);
