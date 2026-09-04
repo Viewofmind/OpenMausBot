@@ -73,6 +73,7 @@ import {
   type SectionDropPlace,
 } from "@/lib/sidebar-layout";
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
+import { botListItemPointerIntent } from "@/lib/sidebar-selection";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
 import { SidebarMoreMenu } from "./SidebarMoreMenu";
 import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
@@ -752,25 +753,26 @@ function BotListItem({
     event.preventDefault();
     onMenu({ botId: bot.id, x: event.clientX, y: event.clientY });
   };
-
-  // Keep the rename <input> out of role="button" — a button's descendants
-  // are presentational, which hides the field from assistive tech.
-  if (renaming) {
-    return (
-      <div className={rowClass} onContextMenu={onContextMenu}>
-        {body}
-      </div>
-    );
-  }
+  const onSelect = (event: React.MouseEvent) => {
+    const insideRenameInput = event.target instanceof HTMLInputElement;
+    if (botListItemPointerIntent(event.type, insideRenameInput) === "select") {
+      dispatch({ type: "select", id: bot.id });
+    }
+  };
 
   return (
     <div className="group relative" title={iconOnly ? bot.name : undefined}>
+      {/* Keep this wrapper mounted while RenameTitle swaps its label for an
+          input. Replacing the wrapper tree remounts RenameTitle, loses its
+          editing state, and leaves the row stuck in rename mode. Omitting
+          role=button also keeps the input visible to assistive technology. */}
       <div
-        role="button"
-        tabIndex={0}
-        aria-label={iconOnly ? bot.name : undefined}
-        onClick={() => dispatch({ type: "select", id: bot.id })}
+        role={renaming ? undefined : "button"}
+        tabIndex={renaming ? undefined : 0}
+        aria-label={!renaming && iconOnly ? bot.name : undefined}
+        onClick={onSelect}
         onKeyDown={(event) => {
+          if (renaming) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             dispatch({ type: "select", id: bot.id });
@@ -781,10 +783,10 @@ function BotListItem({
       >
         {body}
       </div>
-      {iconOnly && bot.unread && (
+      {!renaming && iconOnly && bot.unread && (
         <span className="pointer-events-none absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
       )}
-      {!iconOnly && <button
+      {!renaming && !iconOnly && <button
         type="button"
         disabled={archiveDisabled}
         onClick={() => onArchive(bot)}
