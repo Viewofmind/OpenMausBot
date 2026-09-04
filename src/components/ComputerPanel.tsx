@@ -451,7 +451,7 @@ export function ComputerPanel({
               status.container === "missing" &&
               status.image &&
               status.create_supported;
-            setError(canCreateHere ? null : `${status.problem ?? "The Local VM is not ready"}. Open App Settings → Local VM.`);
+            setError(canCreateHere ? null : `${status.problem ?? "The Local VM is not ready"}. Open App Settings → Computers.`);
             setPhase("vm-unavailable");
           }
         })
@@ -1400,7 +1400,7 @@ export function ComputerPanel({
                     : "Auto uses a cloud box when one exists, otherwise this computer. ")}
               Pick where this bot works. <b className="text-ink">Local VM</b> is a Cua-controlled Linux desktop
               in a container on this machine — free and separate from your own desktop. Set it up in App
-              Settings → Local VM. <b className="text-ink">Browser</b> is the built-in browser tab only; no desktop.
+              Settings → Computers. <b className="text-ink">Browser</b> is the built-in browser tab only; no desktop.
           </div>
           <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
             {(

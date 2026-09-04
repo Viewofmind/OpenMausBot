@@ -90,6 +90,11 @@ describe("scopes", () => {
     expect(requiredScope("POST", "/api/mcp/servers")).toBe("admin");
     expect(requiredScope("POST", "/api/mcp/servers/github/test")).toBe("admin");
     expect(requiredScope("GET", "/api/mcp/servers")).toBe("client");
+    expect(requiredScope("GET", "/api/computers/boxes")).toBe("client");
+    expect(requiredScope("POST", "/api/computers/boxes/bx_23456789/sleep")).toBe("admin");
+    expect(requiredScope("POST", "/api/computers/boxes/bx_23456789/delete")).toBe("admin");
+    expect(requiredScope("GET", "/api/computers/vps")).toBe("client");
+    expect(requiredScope("POST", "/api/computers/vps/openmausbot-vps-one/remove")).toBe("admin");
     expect(requiredScope("POST", "/api/bots/x/messages")).toBe("client");
     expect(requiredScope("POST", "/api/auth/pair")).toBe("client");
     expect(requiredScope("POST", "/api/auth/stream-ticket")).toBe("client");

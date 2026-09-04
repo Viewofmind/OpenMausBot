@@ -8,7 +8,7 @@ vi.mock("./DesktopCapabilities", () => ({
   useDesktopCapabilities: () => ({}),
 }));
 
-import { BotListItem } from "./Sidebar";
+import { BotDeleteMenuItem, BotListItem } from "./Sidebar";
 
 const bot = (overrides: Partial<Bot> = {}): Bot => ({
   id: "atlas",
@@ -49,5 +49,28 @@ describe("BotListItem", () => {
   it("renders the inline Archive action only when it is available", () => {
     expect(renderRow(bot(), true)).not.toContain('aria-label="Archive Atlas"');
     expect(renderRow(bot(), false)).toContain('aria-label="Archive Atlas"');
+  });
+});
+
+describe("bot deletion feedback", () => {
+  it("disables the destructive action while persistent computers are checked", () => {
+    const markup = renderToStaticMarkup(createElement(BotDeleteMenuItem, {
+      deleting: true,
+      onClick: vi.fn(),
+    }));
+
+    expect(markup).toContain("Checking computers…");
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('aria-busy="true"');
+  });
+
+  it("offers Delete again after the check settles", () => {
+    const markup = renderToStaticMarkup(createElement(BotDeleteMenuItem, {
+      deleting: false,
+      onClick: vi.fn(),
+    }));
+
+    expect(markup).toContain(">Delete</button>");
+    expect(markup).not.toContain('disabled=""');
   });
 });
