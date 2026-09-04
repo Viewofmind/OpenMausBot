@@ -34,6 +34,12 @@ export interface BoxCreateAttempt {
   startedNow: boolean;
 }
 
+export interface BoxCreateRecoverySnapshot {
+  botId: string;
+  boxId?: string;
+  resolved: boolean;
+}
+
 interface JournalLockOwner {
   version: 1;
   pid: number;
@@ -350,6 +356,18 @@ export function hasUnresolvedBoxCreate(botId: string): boolean {
   return withJournalLock((requests) => (
     requests.some((request) => request.botId === botId && request.resolved !== true)
   ));
+}
+
+/** Sanitized local recovery authority for configuration guards. The fresh,
+ * lock-protected read can prove a remembered provider id even while the
+ * account-wide LIST endpoint is eventually consistent. Provider request
+ * bodies and idempotency keys never cross this boundary. */
+export function boxCreateRecoverySnapshot(): BoxCreateRecoverySnapshot[] {
+  return withJournalLock((requests) => requests.map((request) => ({
+    botId: request.botId,
+    ...(request.boxId ? { boxId: request.boxId } : {}),
+    resolved: request.resolved === true,
+  })));
 }
 
 export function discardBoxCreate(request: BoxCreateRequest): void {

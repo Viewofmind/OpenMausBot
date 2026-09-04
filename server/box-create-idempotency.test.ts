@@ -251,6 +251,7 @@ describe("Box create idempotency", () => {
     vi.resetModules();
     const {
       beginBoxCreate,
+      boxCreateRecoverySnapshot,
       hasUnresolvedBoxCreate,
       rememberCreatedBox,
       resolveBoxCreate,
@@ -259,11 +260,25 @@ describe("Box create idempotency", () => {
     const attempt = beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
 
     expect(hasUnresolvedBoxCreate(botId)).toBe(true);
+    const pending = boxCreateRecoverySnapshot().find((record) => record.botId === botId);
+    expect(pending).toEqual({ botId, resolved: false });
+    expect(JSON.stringify(pending)).not.toContain(attempt.request.idempotencyKey);
+    expect(JSON.stringify(pending)).not.toContain(attempt.request.requestBody);
     const remembered = rememberCreatedBox(attempt.request, "bx_3456789a");
     expect(hasUnresolvedBoxCreate(botId)).toBe(true);
+    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
+      botId,
+      boxId: "bx_3456789a",
+      resolved: false,
+    });
 
     resolveBoxCreate(remembered);
     expect(hasUnresolvedBoxCreate(botId)).toBe(false);
+    expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toEqual({
+      botId,
+      boxId: "bx_3456789a",
+      resolved: true,
+    });
   });
 
   it("serializes two processes that primed independent journal caches", async () => {
