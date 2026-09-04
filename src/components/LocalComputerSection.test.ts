@@ -27,6 +27,7 @@ const cloudVm: LocalVmInventoryInstance = {
   destination: "cloud",
   container: "running",
   ready: true,
+  managed: true,
   problem: null,
   inUse: false,
 };
@@ -137,6 +138,7 @@ describe("Local VM inventory UI", () => {
           destination: "off",
           container: "stopped",
           ready: false,
+          managed: true,
           problem: "This desktop image cannot safely resume; recreate the Local VM",
           inUse: true,
         },
@@ -197,6 +199,30 @@ describe("Local VM inventory UI", () => {
 
     // Refresh and Delete cannot race one another.
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it("shows unmanaged containers without offering an unsafe delete action", () => {
+    const markup = renderToStaticMarkup(createElement(LocalVmInventoryCard, {
+      instances: [{
+        ...cloudVm,
+        managed: false,
+        ready: false,
+        problem: "Container labels do not match",
+      }],
+      maxInstances: 4,
+      loading: false,
+      deletingBotId: null,
+      error: null,
+      unavailableReason: null,
+      onRefresh: vi.fn(),
+      onDelete: vi.fn(),
+    }));
+
+    expect(markup).toContain("Not managed");
+    expect(markup).toContain("not managed by OpenMausBot");
+    expect(markup).toContain("remove it directly in Docker or Podman");
+    expect(markup).not.toContain(">Delete</button>");
+    expect(markup).not.toContain("Container labels do not match");
   });
 });
 

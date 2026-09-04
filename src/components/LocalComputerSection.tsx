@@ -62,6 +62,7 @@ export interface LocalVmInventoryInstance {
   destination: "auto" | "cloud" | "vm" | "local" | "browser" | "off";
   container: "running" | "stopped";
   ready: boolean;
+  managed: boolean;
   problem: string | null;
   inUse: boolean;
 }
@@ -122,6 +123,7 @@ const destinationLabels: Record<LocalVmInventoryInstance["destination"], string>
 };
 
 export function localVmInventoryState(instance: LocalVmInventoryInstance): string {
+  if (!instance.managed) return "Not managed";
   if (instance.inUse) return "In use";
   if (instance.container === "stopped") return "Stopped";
   if (instance.ready) return "Running";
@@ -558,7 +560,7 @@ export function LocalVmInventoryCard({
     >
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px] text-ink-secondary">
-          Delete desktops you no longer need to free a slot. Durable workspace files remain.
+          Delete OpenMaus-managed desktops you no longer need to free a slot. Durable workspace files remain.
         </div>
         <button
           type="button"
@@ -598,6 +600,7 @@ export function LocalVmInventoryCard({
         ) : instances.map((instance, index) => {
           const state = localVmInventoryState(instance);
           const deleting = deletingBotId === instance.botId;
+          const managed = instance.managed === true;
           return (
             <div
               key={instance.botId}
@@ -612,11 +615,13 @@ export function LocalVmInventoryCard({
                   <span
                     className={cn(
                       "rounded-full px-2 py-0.5 text-[11px]",
-                      instance.inUse || instance.ready
-                        ? "bg-success/15 text-success"
-                        : instance.container === "stopped"
-                          ? "bg-control text-ink-secondary"
-                          : "bg-warning/15 text-warning",
+                      !managed
+                        ? "bg-warning/15 text-warning"
+                        : instance.inUse || instance.ready
+                          ? "bg-success/15 text-success"
+                          : instance.container === "stopped"
+                            ? "bg-control text-ink-secondary"
+                            : "bg-warning/15 text-warning",
                     )}
                   >
                     {state}
@@ -625,14 +630,19 @@ export function LocalVmInventoryCard({
                 <div className="mt-1 text-[11.5px] text-ink-secondary">
                   Current destination: {destinationLabels[instance.destination]}
                 </div>
-                {instance.problem && !instance.inUse && (
+                {!managed && (
+                  <div className="mt-1 text-[11.5px] text-warning">
+                    This container is not managed by OpenMausBot. Review and remove it directly in Docker or Podman.
+                  </div>
+                )}
+                {managed && instance.problem && !instance.inUse && (
                   <div className="mt-1 text-[11.5px] text-warning">{instance.problem}</div>
                 )}
-                {instance.inUse && (
+                {managed && instance.inUse && (
                   <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's turn before deleting its desktop.</div>
                 )}
               </div>
-              <button
+              {managed && <button
                 type="button"
                 onClick={() => onDelete(instance)}
                 disabled={loading || instance.inUse || deletingBotId !== null}
@@ -642,7 +652,7 @@ export function LocalVmInventoryCard({
               >
                 {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                 Delete
-              </button>
+              </button>}
             </div>
           );
         })}
@@ -934,6 +944,10 @@ export function LocalComputerSection() {
   };
 
   const deletePerBotVm = async (instance: LocalVmInventoryInstance) => {
+    if (!instance.managed) {
+      setInventoryError("This container is not managed by OpenMausBot and cannot be removed here.");
+      return;
+    }
     const request = confirmComputerAction(
       perBotLocalVmDeletePlan(instance),
       (message) => window.confirm(message),
