@@ -256,6 +256,12 @@ export async function boxNameFor(botId: string) {
   return `${scopedBoxPrefix()}${prefix}-${hash}`;
 }
 
+/** Credential restoration must accept both current installation-scoped names
+ * and durable pre-scope names that the ownership journal may have adopted. */
+export async function boxNameMatchesBot(botId: string, name: string): Promise<boolean> {
+  return name === await boxNameFor(botId) || name === legacyBoxNameFor(botId);
+}
+
 export async function runCommand(cfg: AppConfig, boxId: string, command: string, { timeoutMs = 120_000 } = {}) {
   const res = await boxFetch(cfg, `/boxes/${boxId}/commands`, {
     method: "POST",

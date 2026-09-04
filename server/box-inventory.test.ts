@@ -205,6 +205,13 @@ describe("OpenMaus-managed Box inventory", () => {
     expect(journal.boxCreateRecoverySnapshot().some((record) => record.botId === botId)).toBe(false);
   });
 
+  it("recognizes adopted legacy names when restoring their account credential", async () => {
+    const botId = "legacy-credential";
+    expect(await box.boxNameMatchesBot(botId, await box.boxNameFor(botId))).toBe(true);
+    expect(await box.boxNameMatchesBot(botId, legacyNameFor(botId))).toBe(true);
+    expect(await box.boxNameMatchesBot(botId, "provider-owned-box")).toBe(false);
+  });
+
   it("fails closed for malformed or conflicting identities that name this installation", async () => {
     const botId = "invalid-owned";
     const currentName = await box.boxNameFor(botId);

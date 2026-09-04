@@ -10440,13 +10440,12 @@ const server = createServer(async (req, res) => {
             return json(res, 409, { error: "finish reconciling pending cloud computer creation before changing the Box account" });
           }
           const inspected = await box.inspectBoxIdentity({ box: { token: nextBoxToken } }, recovery.boxId);
-          const expectedName = await box.boxNameFor(recovery.botId);
           if (!inspected.available) {
             return json(res, 503, {
               error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Retry with the Box account that created it`,
             });
           }
-          if (!inspected.identity || inspected.identity.name !== expectedName) {
+          if (!inspected.identity || !(await box.boxNameMatchesBot(recovery.botId, inspected.identity.name))) {
             return json(res, 409, { error: "that Box token cannot access the remembered cloud computers from this installation" });
           }
         }
