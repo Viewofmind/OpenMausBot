@@ -379,10 +379,6 @@ body {
   transform-origin: 18px 100%;
   animation: turn-answer-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-/* last line of text → mascot ≈ 5mm (bubble py-2.5 already contributes 10px) */
-.turn-mascot-tight {
-  margin-top: max(0px, calc(5mm - 10px));
-}
 /* "Thinking…" label sheen while the model reasons */
 @keyframes shimmer {
   from { background-position: 200% 50%; }

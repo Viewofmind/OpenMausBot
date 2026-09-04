@@ -1759,6 +1759,65 @@ describe("harness HTTP API", () => {
     expect(malformedId.status).toBe(400);
   });
 
+  it("keeps a channel image in its transcript while sending native pixels to the responder", async () => {
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const bot = created.body.bot;
+    let room: any;
+    try {
+      room = (await api("POST", "/api/groups", {
+        name: "Native image room",
+        memberIds: [bot.id],
+        setup: {
+          bulletin: "",
+          defaultResponder: { kind: "member", botId: bot.id },
+        },
+      })).body.group;
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const uploaded = await fetch(`${BASE}/api/attachments`, {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: new Uint8Array(png),
+      });
+      expect(uploaded.status).toBe(201);
+      const { path: imagePath } = await uploaded.json() as { path: string };
+      const text = `Describe this image\n\n<attached-image path="${imagePath}" name="tiny.png" />`;
+
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/groups/${room.id}/messages`, { text })).status).toBe(202);
+      const dump = await readJsonFileWhenReady<{
+        prompt: { message: { content: Array<{ type: string; text?: string; source?: { data?: string } }> } };
+      }>(fakeClaudeDump);
+      expect(dump.prompt.message.content[0]).toMatchObject({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: png.toString("base64") },
+      });
+      expect(dump.prompt.message.content.at(-1)).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("Describe this image"),
+      });
+      expect(JSON.stringify(dump.prompt)).not.toContain("attached-image");
+      expect(JSON.stringify(dump.prompt)).not.toContain(imagePath);
+
+      const current = (await api("GET", "/api/bots?messages=20")).body.groups.find(
+        (candidate: { id: string }) => candidate.id === room.id,
+      );
+      expect(current.messages.find((message: { role: string }) => message.role === "user")?.text)
+        .toBe(text);
+    } finally {
+      if (room) await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
+      if (room) await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {}).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
+    }
+  });
+
   it("streams shared documents safely into the local attachments directory", async () => {
     const contents = Buffer.from("name,score\nAda,10\n");
     const saved = await fetch(`${BASE}/api/files?name=${encodeURIComponent("scores.exe")}`, {
@@ -5795,6 +5854,27 @@ describe("message pages", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("png preview bytes");
     expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
+  it("streams an authorized message image directly into the preview", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const response = await fetch(
+      `${BASE}/api/threads/${threadId}/messages/linked-image-message/file?preview=1&ref=0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("content-disposition")).toBe("inline");
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(await response.text()).toBe("png preview bytes");
+
+    expect((await fetch(
+      `${BASE}/api/threads/${threadId}/messages/linked-file-message/file?preview=1&ref=0`,
+    )).status).toBe(400);
+    expect((await fetch(
+      `${BASE}/api/threads/${threadId}/messages/prose-file-message/file?preview=1&ref=0`,
+    )).status).toBe(400);
   });
 
   it("downloads an exact user attachment only from the private attachment store", async () => {

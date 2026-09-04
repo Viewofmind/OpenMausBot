@@ -335,6 +335,116 @@ describe("onboarding quiz", () => {
   });
 });
 
+describe("optimistic sent messages", () => {
+  const root: Message = { id: "root", role: "bot", kind: "text", text: "Ready", at: 1 };
+  const bot: Bot = {
+    id: "preview-bot",
+    threadId: "preview-thread",
+    name: "Preview",
+    title: "",
+    description: "",
+    notifications: true,
+    color: "purple",
+    unread: false,
+    modelSelection: { instanceId: "claude", model: "default" },
+    messages: [root],
+    activeLeafId: root.id,
+  };
+
+  it("shows a direct send immediately and replaces it with the canonical server message", () => {
+    const sent = reducer(
+      { ...initialState, bots: [bot] },
+      {
+        type: "send",
+        botId: bot.id,
+        threadId: bot.threadId,
+        sendId: "send-preview",
+        text: "look\n\n<attached-image path=\"/private/photo.png\" />",
+      },
+    );
+    expect(sent.bots[0]?.messages.at(-1)).toMatchObject({
+      id: "optimistic-send-preview",
+      role: "user",
+      sendId: "send-preview",
+    });
+    expect(sent.bots[0]?.activeLeafId).toBe("optimistic-send-preview");
+
+    const canonical: Message = {
+      id: "server-message",
+      role: "user",
+      kind: "text",
+      text: "look\n\n<attached-image path=\"/private/photo.png\" />",
+      at: 2,
+      parentId: root.id,
+      sendId: "send-preview",
+    };
+    const reconciled = reducer(sent, {
+      type: "messageAdded",
+      threadId: bot.threadId,
+      message: canonical,
+    });
+    expect(reconciled.bots[0]?.messages).toEqual([root, canonical]);
+    expect(reconciled.bots[0]?.activeLeafId).toBe(canonical.id);
+  });
+
+  it("removes only the optimistic row when a send queues or fails", () => {
+    const sent = reducer(
+      { ...initialState, bots: [bot] },
+      { type: "send", botId: bot.id, sendId: "send-failed", text: "later" },
+    );
+    const removed = reducer(sent, {
+      type: "optimisticMessageRemoved",
+      threadId: bot.threadId,
+      sendId: "send-failed",
+    });
+    expect(removed.bots[0]?.messages).toEqual([root]);
+    expect(removed.bots[0]?.activeLeafId).toBe(root.id);
+  });
+
+  it("uses the same immediate reconciliation for a channel", () => {
+    const group: Group = {
+      id: "preview-room",
+      threadId: "preview-room-thread",
+      name: "Preview room",
+      memberIds: [bot.id],
+      defaultResponder: { kind: "member", botId: bot.id },
+      bulletin: "",
+      unread: false,
+      createdAt: 1,
+      messages: [],
+    };
+    const sent = reducer(
+      { ...initialState, groups: [group] },
+      {
+        type: "sendGroup",
+        groupId: group.id,
+        threadId: group.threadId,
+        sendId: "room-preview",
+        text: "show this",
+        mode: "chat",
+      },
+    );
+    expect(sent.groups[0]?.messages).toEqual([
+      expect.objectContaining({ id: "optimistic-room-preview", sendId: "room-preview" }),
+    ]);
+
+    const canonical: Message = {
+      id: "server-room-message",
+      role: "user",
+      kind: "text",
+      text: "show this",
+      at: 2,
+      sendId: "room-preview",
+    };
+    const reconciled = reducer(sent, {
+      type: "messageAdded",
+      threadId: group.threadId,
+      message: canonical,
+    });
+    expect(reconciled.groups[0]?.messages).toEqual([canonical]);
+  });
+});
+
 describe("cross-client bot creation", () => {
   it("adds an announced bot before its greeting frames arrive", () => {
     const announced = {

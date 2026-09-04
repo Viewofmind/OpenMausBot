@@ -636,6 +636,7 @@ export type Action =
   | { type: "botPatched"; bot: BotAnnouncement }
   | { type: "messageAdded"; threadId: string; message: Message }
   | { type: "messagePatched"; threadId: string; message: Message }
+  | { type: "optimisticMessageRemoved"; threadId: string; sendId: string }
   | { type: "screenFrame"; botId: string; png: string; mime: string }
   | { type: "provisioning"; botId: string; on: boolean }
   | { type: "computerControl"; botId: string; held: boolean; helpReason: string | null }
@@ -749,6 +750,28 @@ function dismissOnboardingCard(state: AppState, botId: string): AppState {
   const bot = state.bots.find((candidate) => candidate.id === botId);
   const quiz = bot ? openOnboardingCard(bot) : undefined;
   return quiz ? patchCard(state, botId, quiz.id, { dismissed: true }) : state;
+}
+
+const optimisticMessageId = (sendId: string): string => `optimistic-${sendId}`;
+
+function optimisticUserMessage(
+  text: string,
+  sendId: string,
+  replyToId?: string,
+  parentId?: string | null,
+  channelMode?: "chat" | "goal",
+): Message {
+  return {
+    id: optimisticMessageId(sendId),
+    role: "user",
+    kind: "text",
+    text,
+    at: Date.now(),
+    parentId: parentId ?? null,
+    replyToId,
+    sendId,
+    channelMode,
+  };
 }
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -975,10 +998,24 @@ export function reducer(state: AppState, action: Action): AppState {
         const group = state.groups.find((g) => g.threadId === action.threadId);
         if (!group) return state;
         if (group.messages.some((m) => m.id === action.message.id)) return state;
+        const optimisticIndex = action.message.sendId
+          ? group.messages.findIndex(
+              (message) => message.id === optimisticMessageId(action.message.sendId!),
+            )
+          : -1;
         return {
           ...state,
           groups: state.groups.map((g) =>
-            g.id === group.id ? { ...g, messages: [...g.messages, action.message] } : g,
+            g.id === group.id
+              ? {
+                  ...g,
+                  messages: optimisticIndex >= 0
+                    ? g.messages.map((message, index) =>
+                        index === optimisticIndex ? action.message : message
+                      )
+                    : [...g.messages, action.message],
+                }
+              : g,
           ),
         };
       }
@@ -986,6 +1023,23 @@ export function reducer(state: AppState, action: Action): AppState {
       // order. A repeated message is already folded; moving the active leaf
       // back to it can hide a newer assistant reply that won the race.
       if (bot.messages.some((message) => message.id === action.message.id)) return state;
+      const optimisticId = action.message.sendId
+        ? optimisticMessageId(action.message.sendId)
+        : null;
+      const optimisticIndex = optimisticId
+        ? bot.messages.findIndex((message) => message.id === optimisticId)
+        : -1;
+      if (optimisticIndex >= 0) {
+        return updateBot(state, bot.id, (current) => ({
+          ...current,
+          messages: current.messages.map((message, index) =>
+            index === optimisticIndex ? action.message : message
+          ),
+          activeLeafId: current.activeLeafId === optimisticId
+            ? action.message.id
+            : current.activeLeafId,
+        }));
+      }
       // every server-side append chains onto (and becomes) the active leaf
       const next = updateBot(state, bot.id, (b) => {
         // A message chains onto the leaf → it becomes the leaf (the normal
@@ -1023,6 +1077,29 @@ export function reducer(state: AppState, action: Action): AppState {
               : null;
       const animated = motion ? withMascotMotion(next, bot.id, motion) : next;
       return animated;
+    }
+    case "optimisticMessageRemoved": {
+      const id = optimisticMessageId(action.sendId);
+      const bot = state.bots.find((candidate) => candidate.threadId === action.threadId);
+      if (bot) {
+        const optimistic = bot.messages.find((message) => message.id === id);
+        if (!optimistic) return state;
+        return updateBot(state, bot.id, (current) => ({
+          ...current,
+          messages: current.messages.filter((message) => message.id !== id),
+          activeLeafId: current.activeLeafId === id
+            ? (optimistic.parentId ?? null)
+            : current.activeLeafId,
+        }));
+      }
+      const group = state.groups.find((candidate) => candidate.threadId === action.threadId);
+      if (!group || !group.messages.some((message) => message.id === id)) return state;
+      return {
+        ...state,
+        groups: state.groups.map((candidate) => candidate.id === group.id
+          ? { ...candidate, messages: candidate.messages.filter((message) => message.id !== id) }
+          : candidate),
+      };
     }
     case "messagePatched": {
       const bot = state.bots.find((b) => b.threadId === action.threadId);
@@ -1240,8 +1317,29 @@ export function reducer(state: AppState, action: Action): AppState {
       else delete pendingQueued[action.threadId];
       return { ...state, pendingQueued };
     }
-    case "send":
-      return withMascotMotion(dismissOnboardingCard(state, action.botId), action.botId, "working");
+    case "send": {
+      const animated = withMascotMotion(
+        dismissOnboardingCard(state, action.botId),
+        action.botId,
+        "working",
+      );
+      if (!action.sendId) return animated;
+      const bot = animated.bots.find((candidate) => candidate.id === action.botId);
+      const threadId = action.threadId ?? bot?.threadId;
+      if (!bot || threadId !== bot.threadId) return animated;
+      if (bot.messages.some((message) => message.sendId === action.sendId)) return animated;
+      const message = optimisticUserMessage(
+        action.text,
+        action.sendId,
+        action.replyToId,
+        bot.activeLeafId,
+      );
+      return updateBot(animated, bot.id, (current) => ({
+        ...current,
+        messages: [...current.messages, message],
+        activeLeafId: message.id,
+      }));
+    }
     case "editMessage":
       return withMascotMotion(state, action.botId, "working");
     case "newTask":
@@ -1284,7 +1382,6 @@ export function reducer(state: AppState, action: Action): AppState {
     case "duplicateBot":
     case "interrupt":
     case "createGroup":
-    case "sendGroup":
     case "deleteGroup":
     case "interruptGroup":
     case "createRoutine":
@@ -1294,6 +1391,26 @@ export function reducer(state: AppState, action: Action): AppState {
     case "cancelRoutineRun":
     case "markRoutineRunSeen":
       return state;
+    case "sendGroup": {
+      if (!action.sendId) return state;
+      const group = state.groups.find((candidate) => candidate.id === action.groupId);
+      const threadId = action.threadId ?? group?.threadId;
+      if (!group || threadId !== group.threadId) return state;
+      if (group.messages.some((message) => message.sendId === action.sendId)) return state;
+      const message = optimisticUserMessage(
+        action.text,
+        action.sendId,
+        action.replyToId,
+        null,
+        action.mode ?? "chat",
+      );
+      return {
+        ...state,
+        groups: state.groups.map((candidate) => candidate.id === group.id
+          ? { ...candidate, messages: [...candidate.messages, message] }
+          : candidate),
+      };
+    }
   }
 }
 
@@ -1491,6 +1608,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     };
 
     const wrapped: React.Dispatch<Action> = (action) => {
+      // One identity drives the optimistic row, HTTP retry protection, and
+      // canonical SSE reconciliation. Callers may omit it; the store may not.
+      if ((action.type === "send" || action.type === "sendGroup") && !action.sendId) {
+        action = { ...action, sendId: crypto.randomUUID() };
+      }
       const botBeforeUpdate =
         action.type === "updateBot"
           ? stateRef.current.bots.find((candidate) => candidate.id === action.botId)
@@ -1557,6 +1679,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 typeof body.queueId === "string"
               ) {
                 rawDispatch({
+                  type: "optimisticMessageRemoved",
+                  threadId: body.threadId,
+                  sendId,
+                });
+                rawDispatch({
                   type: "pendingQueued",
                   threadId: body.threadId,
                   queueId: body.queueId,
@@ -1565,6 +1692,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               }
             })
             .catch((error) => {
+              if (threadId) {
+                rawDispatch({ type: "optimisticMessageRemoved", threadId, sendId });
+              }
               showError(error);
               action.onError?.();
             });
@@ -1742,6 +1872,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 typeof body.queueId === "string"
               ) {
                 rawDispatch({
+                  type: "optimisticMessageRemoved",
+                  threadId: body.threadId,
+                  sendId,
+                });
+                rawDispatch({
                   type: "pendingQueued",
                   threadId: body.threadId,
                   queueId: body.queueId,
@@ -1750,6 +1885,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               }
             })
             .catch((error) => {
+              if (threadId) {
+                rawDispatch({ type: "optimisticMessageRemoved", threadId, sendId });
+              }
               showError(error);
               action.onError?.();
             });

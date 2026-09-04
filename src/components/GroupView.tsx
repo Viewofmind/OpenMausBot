@@ -146,6 +146,8 @@ const Transcript = memo(function Transcript({
   // Several bots working at once turn a room into a wall of chips; fold the
   // finished ones the same way a 1:1 chat does.
   const items = useMemo(() => groupActivityRuns(messages), [messages]);
+  const newestMessageId = messages.at(-1)?.id;
+  const newestUserMessageId = [...messages].reverse().find((message) => message.role === "user")?.id;
   const focus = state.focusMessage;
   const focusedId = focus && !focus.consumed && focus.threadId === group.threadId ? focus.messageId : null;
   return (
@@ -179,7 +181,6 @@ const Transcript = memo(function Transcript({
           );
         }
         const m = item.message;
-        if (m.id === emergingId) return null;
         const user = m.role === "user";
         const attachments = user && m.text ? splitTranscriptAttachments(m.text) : null;
         const newCluster = !prev || prev.role !== m.role || prev.from?.botId !== m.from?.botId || newDay;
@@ -239,6 +240,7 @@ const Transcript = memo(function Transcript({
                 <div
                   className={cn(
                     "w-fit max-w-[min(42rem,78%)] rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed",
+                    !user && m.id === emergingId && "turn-answer",
                     user ? "whitespace-pre-wrap bg-bubble-user text-ink" : "bg-card text-ink",
                   )}
                   title={new Date(m.at).toLocaleString()}
@@ -261,7 +263,10 @@ const Transcript = memo(function Transcript({
                   {user ? (
                     <>
                       {attachments && attachments.images.length > 0 && (
-                        <AttachedImageGallery paths={attachments.images} />
+                        <AttachedImageGallery
+                          paths={attachments.images}
+                          eager={m.id === newestMessageId || m.id === newestUserMessageId}
+                        />
                       )}
                       {attachments && attachments.files.length > 0 && (
                         <AttachedFileChips
@@ -278,6 +283,7 @@ const Transcript = memo(function Transcript({
                         <AttachedImageGallery
                           paths={m.attachments.map((attachment) => attachment.path)}
                           className={m.text ? "justify-start" : "mb-0 justify-start"}
+                          eager={m.id === newestMessageId || m.id === newestUserMessageId}
                         />
                       ) : null}
                       {m.text ? <ChatMarkdown text={m.text} message={{ threadId: group.threadId, messageId: m.id }} /> : null}
@@ -892,33 +898,40 @@ export function GroupView({ group }: { group: Group }) {
   const waiting =
     Boolean(speaker && showWorkingDots(true, group.messages.at(-1), speaker.id)) || awaited !== undefined;
   const wasWaiting = useRef(false);
-  const [popping, setPopping] = useState<{ id: string; text: string; botId?: string } | null>(null);
-  useEffect(() => {
+  const [popping, setPopping] = useState<{ id: string; botId?: string } | null>(null);
+  const poppingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+  }, []);
+  useLayoutEffect(() => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    poppingTimer.current = null;
     wasWaiting.current = false;
     setPopping(null);
   }, [group.id, group.threadId]);
   useEffect(() => {
     if (waiting) wasWaiting.current = true;
   }, [waiting]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (lastGroupMessage?.role !== "bot" || lastGroupMessage.kind !== "text" || !wasWaiting.current) return;
     wasWaiting.current = false;
     setPopping({
       id: lastGroupMessage.id,
-      text: lastGroupMessage.text ?? "",
       botId: lastGroupMessage.from?.botId,
     });
-    const timer = setTimeout(() => setPopping(null), 520);
-    return () => clearTimeout(timer);
+    const messageId = lastGroupMessage.id;
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    poppingTimer.current = setTimeout(() => {
+      poppingTimer.current = null;
+      setPopping((current) => current?.id === messageId ? null : current);
+    }, 520);
   }, [
     lastGroupMessage?.id,
     lastGroupMessage?.role,
     lastGroupMessage?.kind,
-    lastGroupMessage?.text,
     lastGroupMessage?.from?.botId,
   ]);
   const presenceVisible = waiting || popping !== null;
-  const poppingMessage = popping ? group.messages.find((message) => message.id === popping.id) : undefined;
   const presenceSpeaker =
     speaker ?? awaited ?? members.find((member) => member.id === popping?.botId) ?? members[0];
 
@@ -1279,19 +1292,7 @@ export function GroupView({ group }: { group: Group }) {
               visible={presenceVisible}
               label={activityLabel}
               answering={popping !== null}
-            >
-              {popping ? (
-                <div className="w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">
-                  {poppingMessage?.attachments?.length ? (
-                    <AttachedImageGallery
-                      paths={poppingMessage.attachments.map((attachment) => attachment.path)}
-                      className={popping.text ? "justify-start" : "mb-0 justify-start"}
-                    />
-                  ) : null}
-                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: group.threadId, messageId: popping.id }} /> : null}
-                </div>
-              ) : null}
-            </TurnPresence>
+            />
           )}
         </div>
         )}

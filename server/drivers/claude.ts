@@ -509,6 +509,58 @@ function firstText(content: unknown): string {
   return "";
 }
 
+type ClaudeImage = NonNullable<SendTurnInput["images"]>[number];
+type ClaudeUserContent =
+  | { type: "image"; source: { type: "base64"; media_type: ClaudeImage["mime"]; data: string } }
+  | { type: "text"; text: string };
+type ClaudeUserMessage = {
+  type: "user";
+  message: { role: "user"; content: string | ClaudeUserContent[] };
+};
+
+/** Claude's stream-json input accepts the same image source blocks as the
+ * Anthropic Messages API. Keep the old string form for text-only turns so a
+ * CLI update cannot disturb the overwhelmingly common path. */
+function claudeUserMessage(
+  text: string,
+  images: readonly ClaudeImage[] | undefined,
+): ClaudeUserMessage {
+  if (!images?.length) return { type: "user", message: { role: "user", content: text } };
+  const content: ClaudeUserContent[] = images.map((image) => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: image.mime,
+      data: readFileSync(image.path).toString("base64"),
+    },
+  }));
+  if (text) content.push({ type: "text", text });
+  return { type: "user", message: { role: "user", content } };
+}
+
+/** Native traces are routinely attached to bug reports. Preserve the image
+ * block's shape and size for debugging, but never persist its base64 bytes. */
+function diagnosticClaudeUserMessage(message: ClaudeUserMessage): ClaudeUserMessage {
+  if (!Array.isArray(message.message.content)) return message;
+  return {
+    ...message,
+    message: {
+      ...message.message,
+      content: message.message.content.map((block) =>
+        block.type === "image"
+          ? {
+              ...block,
+              source: {
+                ...block.source,
+                data: `[image data: ${block.source.data.length} base64 chars]`,
+              },
+            }
+          : block,
+      ),
+    },
+  };
+}
+
 export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
   driverKind: DRIVER_KIND,
   metadata: { displayName: "Claude", supportsMultipleInstances: true },
@@ -603,14 +655,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       s.idleTimer = setTimeout(() => closeSession(threadId, "idle"), SESSION_IDLE_MS);
       s.idleTimer.unref?.();
     };
-    const writeUser = (s: Session, threadId: string, text: string): Promise<boolean> => {
-      const promptMsg = { type: "user", message: { role: "user", content: text } };
+    const writeUser = (s: Session, threadId: string, promptMsg: ClaudeUserMessage): Promise<boolean> => {
       if (!s.child.stdin.writable || s.child.stdin.destroyed) return Promise.resolve(false);
       return new Promise((resolve) => {
         try {
           s.child.stdin.write(JSON.stringify(promptMsg) + "\n", (error) => {
             if (error) return resolve(false);
-            appendNative(threadId, { dir: "out", source: "claude.sdk.message", msg: promptMsg });
+            appendNative(threadId, {
+              dir: "out",
+              source: "claude.sdk.message",
+              msg: diagnosticClaudeUserMessage(promptMsg),
+            });
             resolve(true);
           });
         } catch {
@@ -640,6 +695,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (controlsHost && config.permissionMode === "bypassPermissions") {
         throw new Error("local computer control requires the interactive approval broker");
       }
+      // Materialize before creating a broker or process. A missing/corrupt
+      // attachment must fail this call without leaving a live session behind.
+      const promptMsg = claudeUserMessage(turn.text, turn.images);
       const turnId = newId();
       const retryAbort = new AbortController();
       const retry = retryState.get(threadId) ?? { attempt: 0, cancelled: false };
@@ -790,7 +848,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         live.turn = { turnId, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => killCliTree(live.child), turnId, broker: live.broker });
         emit({ ...base(threadId, turnId), type: "turn.started" });
-        const written = await writeUser(live, threadId, turn.text);
+        const written = await writeUser(live, threadId, promptMsg);
         if (!written) {
           active.delete(threadId);
           live.turn = null;
@@ -1192,7 +1250,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // prompt over stdin as a stream-json message — never argv (ARG_MAX).
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
-      if (!(await writeUser(session, threadId, turn.text))) {
+      if (!(await writeUser(session, threadId, promptMsg))) {
         settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
@@ -1205,7 +1263,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const steer = async (threadId: string, text: string): Promise<boolean> => {
       const s = sessions.get(threadId);
       if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return false;
-      return writeUser(s, threadId, text);
+      return writeUser(s, threadId, claudeUserMessage(text, undefined));
     };
 
     const snapshot = async (): Promise<ProviderSnapshot> => {
@@ -1302,6 +1360,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           phoneMcp: true,
           browserMcp: true,
           images: true,
+          nativeImageInput: true,
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
           queueing: true,
           localComputerMcp: config.permissionMode !== "bypassPermissions",

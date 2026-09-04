@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureDirs } from "../../config.ts";
+import { ensureDirs, NATIVE_DIR } from "../../config.ts";
 import type { ProviderInstance } from "../../contracts.ts";
 import { recordEvents, type EventRecorder } from "../../testing/events.ts";
 import { createAcpDriver, skipSubscriptionAuthForLocalInject, type AcpSupport } from "./core.ts";
@@ -42,6 +42,15 @@ const SELECT_MODEL_SUPPORT: AcpSupport = {
   isAuthenticated: () => true,
 };
 const SelectModelDriver = createAcpDriver(SELECT_MODEL_SUPPORT);
+
+/** Image input is an explicit per-harness opt-in. Keep these transport tests
+ * independent from production harnesses whose native image support has not
+ * been verified. */
+const NativeImageDriver = createAcpDriver({
+  ...SELECT_MODEL_SUPPORT,
+  driverKind: "nativeImageTest",
+  images: true,
+});
 
 /** Proves transformEnv can vary with the instance config, which is how the
  *  opencode driver picks its permission policy from `fullAuto`. */
@@ -220,6 +229,8 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_MODEL_STICKS;
     delete process.env.FAKE_ACP_USAGE_ROOT;
     delete process.env.FAKE_ACP_LOAD_NULL;
+    delete process.env.FAKE_ACP_IMAGE_CAPABILITY;
+    delete process.env.FAKE_ACP_DUMP_PROMPT;
     recorder?.stop();
     await instance?.dispose();
     await removeTempDir(scratch);
@@ -272,6 +283,69 @@ describe("ACP turns (fake CLI)", () => {
     const done = recorder.events.at(-1)!;
     expect(done).toMatchObject({ type: "turn.completed", ok: true });
     expect(instance.adapter.hasSession("t-happy")).toBe(false);
+  });
+
+  it("sends images as negotiated ACP content blocks without copying bytes into diagnostics", async () => {
+    const dump = join(scratch, "image-prompt.json");
+    const imagePath = join(scratch, "tiny.webp");
+    const bytes = Buffer.from("private-acp-image-bytes");
+    const base64 = bytes.toString("base64");
+    writeFileSync(imagePath, bytes);
+    process.env.FAKE_ACP_DUMP = dump;
+    process.env.FAKE_ACP_DUMP_PROMPT = "1";
+    process.env.FAKE_ACP_IMAGE_CAPABILITY = "1";
+    await create(NativeImageDriver);
+
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "t-acp-native-image",
+      text: "What is this?",
+      images: [{ path: imagePath, mime: "image/webp", bytes: bytes.length }],
+    });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+
+    expect(JSON.parse(readFileSync(`${dump}.prompt.json`, "utf8"))).toEqual([
+      { type: "text", text: "What is this?" },
+      { type: "image", data: base64, mimeType: "image/webp" },
+    ]);
+    const nativeLog = readFileSync(join(NATIVE_DIR, "t-acp-native-image.ndjson"), "utf8");
+    expect(nativeLog).not.toContain(base64);
+    expect(nativeLog).toContain(`[image data: ${base64.length} base64 chars]`);
+  });
+
+  it("fails clearly when an image-capable adapter meets an older ACP runtime", async () => {
+    const imagePath = join(scratch, "tiny.png");
+    writeFileSync(imagePath, "not-read-before-capability-check");
+    await create(NativeImageDriver);
+
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "t-acp-image-unsupported",
+      text: "Inspect this",
+      images: [{ path: imagePath, mime: "image/png", bytes: 32 }],
+    });
+    const done = await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+
+    expect(done).toMatchObject({ ok: false, stopReason: "rpc_error" });
+    expect(recorder.events.find((event) => event.type === "runtime.error")?.message).toMatch(
+      /does not advertise ACP image input/,
+    );
+  });
+
+  it("keeps text-path fallback for adapters that do not advertise image input", async () => {
+    const dump = join(scratch, "text-fallback.json");
+    process.env.FAKE_ACP_DUMP = dump;
+    process.env.FAKE_ACP_DUMP_PROMPT = "1";
+    await create(GrokAgentDriver);
+
+    const text = '<attached-image path="/private/image.png" name="image.png" />';
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "t-acp-image-fallback",
+      text,
+      // A missing path proves the driver did not attempt native ingestion.
+      images: [{ path: join(scratch, "missing.png"), mime: "image/png", bytes: 12 }],
+    });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+
+    expect(JSON.parse(readFileSync(`${dump}.prompt.json`, "utf8"))).toEqual([{ type: "text", text }]);
   });
 
   it("emits each assistant text block before the tool that follows it", async () => {

@@ -55,6 +55,32 @@ const DENY_TIMEOUT_NOTE =
 
 type StdioMcpServer = { command: string; args: string[]; env: Record<string, string> };
 
+/** Keep private host paths out of diagnostics while preserving enough of the
+ * app-server input shape to debug image delivery. The unmodified request is
+ * still written to the provider immediately after this log copy is made. */
+function codexNativeLogMessage(message: unknown): unknown {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+  const record = message as Record<string, unknown>;
+  if (record.method !== "turn/start") return message;
+  const params = record.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return message;
+  const input = (params as Record<string, unknown>).input;
+  if (!Array.isArray(input)) return message;
+  return {
+    ...record,
+    params: {
+      ...params,
+      input: input.map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+        const entry = item as Record<string, unknown>;
+        return entry.type === "localImage"
+          ? { ...entry, path: "[private attachment path omitted]" }
+          : item;
+      }),
+    },
+  };
+}
+
 function mountMcpServer(
   appServerArgs: string[],
   env: Record<string, string | undefined>,
@@ -224,7 +250,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         try {
           child.stdin.write(JSON.stringify(obj) + "\n");
         } catch {}
-        appendNative(threadId, { dir: "out", source: "codex.app-server", msg: obj });
+        appendNative(threadId, {
+          dir: "out",
+          source: "codex.app-server",
+          msg: codexNativeLogMessage(obj),
+        });
       };
       const request = (method: string, params: unknown, timeoutMs = 60_000) =>
         new Promise<any>((resolve, reject) => {
@@ -575,9 +605,14 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           startedModel = started?.model ?? null;
         }
         emit({ ...base(threadId, turnId), type: "session.started", sessionId: codexThreadId, model: startedModel ?? turn.model ?? null });
+        const promptText = turn.system ? `${turn.system}\n\n${turn.text}` : turn.text;
+        const turnInput = [
+          ...(promptText ? [{ type: "text" as const, text: promptText }] : []),
+          ...(turn.images ?? []).map((image) => ({ type: "localImage" as const, path: image.path })),
+        ];
         await request("turn/start", {
           threadId: codexThreadId,
-          input: [{ type: "text", text: turn.system ? `${turn.system}\n\n${turn.text}` : turn.text }],
+          input: turnInput,
           // Spread, not `effort: turn.effort ?? null`. Probed against
           // codex-cli 0.146.0: null is indistinguishable from an absent key
           // — both leave the thread's current effort alone, emitting no
@@ -674,6 +709,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         phoneMcp: true,
         browserMcp: true,
         images: true,
+        nativeImageInput: true,
         effortLevels: ["low", "medium", "high", "xhigh", "max"],
       },
       sendTurn,

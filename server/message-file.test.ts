@@ -10,6 +10,7 @@ import {
   messageFileDownloadName,
   messageAttachmentName,
   messageFileRoots,
+  messageImageTargetAt,
   messageReferencesAttachment,
   messageReferencesFile,
   openMessageFile,
@@ -29,6 +30,23 @@ beforeEach(() => {
 afterAll(() => rmSync(suite, { recursive: true, force: true }));
 
 describe("message-linked files", () => {
+  it("resolves a Markdown image from an opaque source offset", () => {
+    const markdown = [
+      "See this:",
+      "",
+      "![Direct](./direct.png)",
+      "",
+      "![Referenced][preview]",
+      "",
+      "[preview]: ./referenced.png",
+    ].join("\n");
+
+    expect(messageImageTargetAt(markdown, markdown.indexOf("![Direct]"))).toBe("./direct.png");
+    expect(messageImageTargetAt(markdown, markdown.indexOf("![Referenced]"))).toBe("./referenced.png");
+    expect(messageImageTargetAt(markdown, 1)).toBeNull();
+    expect(messageImageTargetAt(markdown, -1)).toBeNull();
+  });
+
   it("never widens an explicitly null pinned cwd to the configured folder", () => {
     expect(messageFileRoots({
       senderWorkspace: "/app/workspace",

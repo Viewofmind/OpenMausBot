@@ -191,6 +191,16 @@ export function isExternalImageSource(src: string): boolean {
   return networkSpelling.startsWith("//") || /^https?:/i.test(networkSpelling);
 }
 
+/** A message-scoped image URL is safe for an <img>: the server still proves
+ * that this exact message rendered an image at this Markdown source offset
+ * before streaming it. The host path never enters the browser URL. */
+export function messageImagePreviewUrl(
+  message: MessageAttachmentContext,
+  sourceOffset: number,
+): string {
+  return `/api/threads/${encodeURIComponent(message.threadId)}/messages/${encodeURIComponent(message.messageId)}/file?preview=1&ref=${sourceOffset}`;
+}
+
 function revokeObjectUrlLater(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
@@ -498,15 +508,18 @@ function Thumbnail({
   image,
   onPreview,
   className,
+  eager = false,
 }: {
   image: PreviewImage;
   onPreview: () => void;
   className?: string;
+  eager?: boolean;
 }) {
+  // Every caller keys this component by src. Resetting in an effect races a
+  // cached/blob image's onLoad: it can become ready before the effect runs,
+  // then be put back into a permanent loading state.
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => setState("loading"), [image.src]);
 
   return (
     <span className={cn("group/image relative block aspect-[4/3] min-w-0 overflow-hidden rounded-xl border border-hairline/40 bg-inset", className)}>
@@ -566,7 +579,8 @@ function Thumbnail({
             key={`${image.src}:${attempt}`}
             src={image.src}
             alt={image.name}
-            loading="lazy"
+            loading={eager ? "eager" : "lazy"}
+            fetchPriority={eager ? "high" : undefined}
             onLoad={() => setState("ready")}
             onError={() => setState("failed")}
             className={cn(
@@ -586,9 +600,11 @@ function Thumbnail({
 export function AttachedImageGallery({
   paths,
   className,
+  eager = false,
 }: {
   paths: Array<string | TranscriptImageAttachment>;
   className?: string;
+  eager?: boolean;
 }) {
   const images = useMemo(() => paths.flatMap((reference) => {
     if (typeof reference !== "string" && !reference.private) return [];
@@ -603,7 +619,7 @@ export function AttachedImageGallery({
     <>
       <div className={cn("mb-2 grid max-w-full gap-2", imageGalleryLayout(images.length), className)}>
         {images.map((image, index) => (
-          <Thumbnail key={`${image.src}:${index}`} image={image} onPreview={() => setSelectedIndex(index)} />
+          <Thumbnail key={`${image.src}:${index}`} image={image} onPreview={() => setSelectedIndex(index)} eager={eager} />
         ))}
       </div>
       {selectedIndex !== null && images[selectedIndex] && (
@@ -626,24 +642,27 @@ export function MarkdownImagePreview({
   openUrl,
   message,
   filePath,
+  sourceOffset,
 }: {
   src: string;
   name: string;
   openUrl?: string;
   message?: MessageAttachmentContext;
   filePath?: string;
+  sourceOffset?: number;
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLSpanElement>(null);
   const threadId = message?.threadId;
   const messageId = message?.messageId;
-  const localMessageImage = Boolean(filePath && threadId && messageId);
-  const localImageKey = localMessageImage ? `${threadId}\u0000${messageId}\u0000${filePath}` : null;
+  const localSourceOffset = typeof sourceOffset === "number" && Number.isSafeInteger(sourceOffset) && sourceOffset >= 0
+    ? sourceOffset
+    : null;
+  const localMessageImage = Boolean(
+    filePath && threadId && messageId && localSourceOffset !== null,
+  );
+  const localImageKey = localMessageImage ? `${threadId}\u0000${messageId}\u0000${localSourceOffset}` : null;
   const [visibleLocalImageKey, setVisibleLocalImageKey] = useState<string | null>(null);
-  const [localSource, setLocalSource] = useState<string | null>(localMessageImage ? null : src);
-  const [localDownloadName, setLocalDownloadName] = useState<string | null>(null);
-  const [localError, setLocalError] = useState("");
-  const [localAttempt, setLocalAttempt] = useState(0);
   const external = !filePath && isExternalImageSource(src);
   const [approvedExternalSource, setApprovedExternalSource] = useState<string | null>(null);
 
@@ -656,79 +675,31 @@ export function MarkdownImagePreview({
     }
     setVisibleLocalImageKey(null);
     const observer = new IntersectionObserver(([entry]) => {
-      setVisibleLocalImageKey(entry?.isIntersecting ? localImageKey : null);
+      if (!entry?.isIntersecting) return;
+      setVisibleLocalImageKey(localImageKey);
+      observer.disconnect();
     }, { rootMargin: "320px 0px" });
     observer.observe(element);
     return () => observer.disconnect();
   }, [localImageKey]);
 
   const shouldLoadLocalImage = localMessageImage && (visibleLocalImageKey === localImageKey || open);
-  useEffect(() => {
-    if (!filePath) {
-      setLocalSource(src);
-      setLocalDownloadName(null);
-      setLocalError("");
-      return;
-    }
-    if (!threadId || !messageId) {
-      setLocalSource(null);
-      setLocalDownloadName(null);
-      setLocalError("This older image reference is no longer available");
-      return;
-    }
-    if (!shouldLoadLocalImage) {
-      setLocalSource(null);
-      setLocalDownloadName(null);
-      setLocalError("");
-      return;
-    }
-    const controller = new AbortController();
-    let objectUrl: string | null = null;
-    let disposed = false;
-    setLocalSource(null);
-    setLocalDownloadName(null);
-    setLocalError("");
-    void fetch(`/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/file`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: filePath }),
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error("This image is unavailable");
-      const blob = await response.blob();
-      if (disposed || controller.signal.aborted) return;
-      objectUrl = URL.createObjectURL(blob);
-      if (disposed || controller.signal.aborted) {
-        URL.revokeObjectURL(objectUrl);
-        objectUrl = null;
-        return;
-      }
-      setLocalDownloadName(canonicalDownloadFilename({
-        contentDisposition: response.headers.get("content-disposition"),
-        fallback: name,
-        source: filePath,
-        mime: blob.type || response.headers.get("content-type"),
-      }));
-      setLocalSource(objectUrl);
-    }).catch((error) => {
-      if (!disposed && !controller.signal.aborted) {
-        setLocalError(error instanceof Error ? error.message : "This image is unavailable");
-      }
-    });
-    return () => {
-      disposed = true;
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [filePath, localAttempt, messageId, name, shouldLoadLocalImage, src, threadId]);
   const externalAllowed = !external || approvedExternalSource === src;
-  const visibleSource = externalAllowed ? localSource : null;
+  const visibleSource = externalAllowed
+    ? localMessageImage
+      ? shouldLoadLocalImage && filePath && threadId && messageId && localSourceOffset !== null
+        ? messageImagePreviewUrl({ threadId, messageId }, localSourceOffset)
+        : null
+      : src
+    : null;
   const image: PreviewImage = {
     src: visibleSource ?? "",
     name,
     openUrl,
     downloadUrl: localMessageImage ? visibleSource ?? undefined : undefined,
-    downloadName: localDownloadName ?? undefined,
+    downloadName: localMessageImage
+      ? canonicalDownloadFilename({ fallback: name, source: filePath })
+      : undefined,
   };
   return (
     <>
@@ -739,13 +710,12 @@ export function MarkdownImagePreview({
             <span>External image hidden for privacy</span>
             <button type="button" className="rounded-md border border-hairline/50 bg-panel px-2.5 py-1 text-ink hover:bg-raised" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setApprovedExternalSource(src); }}>Load image</button>
           </span>
-        ) : localError ? (
+        ) : filePath && (!threadId || !messageId || localSourceOffset === null) ? (
           <span className="flex aspect-[4/3] max-h-96 items-center justify-center gap-2 rounded-xl border border-hairline/40 bg-inset text-[12px] text-ink-secondary" role="alert">
-            <ImageOff size={17} /> {localError}
-            <span role="button" tabIndex={0} className="cursor-pointer text-accent hover:underline" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setLocalAttempt((value) => value + 1); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setLocalAttempt((value) => value + 1); } }}>Retry</span>
+            <ImageOff size={17} /> This older image reference is no longer available
           </span>
         ) : visibleSource ? (
-          <Thumbnail image={image} onPreview={() => setOpen(true)} className="max-h-96" />
+          <Thumbnail key={image.src} image={image} onPreview={() => setOpen(true)} className="max-h-96" eager />
         ) : (
           <span className="flex aspect-[4/3] max-h-96 animate-pulse items-center justify-center rounded-xl border border-hairline/40 bg-inset" role="status">
             <LoaderCircle size={17} className="animate-spin text-ink-secondary/65" />

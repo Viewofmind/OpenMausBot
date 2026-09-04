@@ -6,6 +6,7 @@ import {
   getDraft,
   getDraftAttachments,
   isDraftAttachmentPending,
+  replaceDraftAttachment,
   setDraft,
   setDraftAttachments,
 } from "./drafts";
@@ -27,6 +28,75 @@ afterEach(() => {
 });
 
 describe("durable attachment completion", () => {
+  it("keeps blob previews in memory but never writes them into durable storage", () => {
+    const store = memoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "bot:preview:thread-preview";
+    setDraftAttachments(store, draftId, [
+      {
+        kind: "image",
+        id: "uploading",
+        path: "",
+        name: "uploading.png",
+        size: 3,
+        mime: "image/png",
+        previewUrl: "blob:uploading",
+        uploading: true,
+      },
+      {
+        kind: "image",
+        id: "ready",
+        path: "/private/attachments/ready.png",
+        name: "ready.png",
+        size: 4,
+        mime: "image/png",
+        previewUrl: "blob:ready",
+      },
+    ]);
+
+    expect(getDraftAttachments(store, draftId)).toHaveLength(2);
+    expect(JSON.parse(store.getItem("omb-draft-attachments") ?? "{}")[draftId]).toEqual([
+      {
+        kind: "image",
+        id: "ready",
+        path: "/private/attachments/ready.png",
+        name: "ready.png",
+        size: 4,
+        mime: "image/png",
+      },
+    ]);
+  });
+
+  it("replaces a pending image after navigation without appending a duplicate", () => {
+    const store = memoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "bot:replace:thread-replace";
+    setDraftAttachments(store, draftId, [{
+      kind: "image",
+      id: "same-image",
+      path: "",
+      name: "photo.png",
+      size: 3,
+      mime: "image/png",
+      previewUrl: "blob:photo",
+      uploading: true,
+    }]);
+
+    expect(replaceDraftAttachment(draftId, "same-image", {
+      kind: "image",
+      id: "same-image",
+      path: "/private/attachments/photo.png",
+      name: "photo.png",
+      size: 3,
+      mime: "image/png",
+      previewUrl: "blob:photo",
+    })).toBe(true);
+    expect(getDraftAttachments(store, draftId)).toEqual([
+      expect.objectContaining({ id: "same-image", path: "/private/attachments/photo.png" }),
+    ]);
+    expect(replaceDraftAttachment(draftId, "missing", null)).toBe(false);
+  });
+
   it("appends to the keyed draft without a mounted React state updater", () => {
     const store = memoryStorage();
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });

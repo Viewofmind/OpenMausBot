@@ -49,6 +49,15 @@ export interface ModelSelection {
   effort?: EffortLevel;
 }
 
+/** An image already admitted to OpenMausBot's private attachment store.
+ * Drivers receive this structured value instead of learning a host path from
+ * prompt text. The harness validates the path and size before constructing it. */
+export interface TurnImageInput {
+  path: string;
+  mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  bytes: number;
+}
+
 // ── instance configuration envelope ────────────────────────────────────
 // `driver` is any slug — NOT validated against known drivers; unknown
 // drivers round-trip and surface as unavailable shadow snapshots so a
@@ -155,6 +164,10 @@ export type RequestOutcome = "allowed-once" | "rejected" | "answered" | "unavail
 export interface SendTurnInput {
   threadId: ThreadId;
   text: string;
+  /** Images attached to this user turn only. They are deliberately kept out
+   * of replay transcripts: the provider's native session owns earlier image
+   * context, while a fresh replay retains the visible attachment marker. */
+  images?: TurnImageInput[];
   model?: string;
   effort?: EffortLevel;
   resumeCursor?: unknown;
@@ -242,6 +255,10 @@ export interface ProviderAdapter {
      * attachment an engine cannot open (a bot told it has an image it
      * cannot read burns the turn). */
     images?: boolean;
+    /** True only when sendTurn consumes `images` as structured provider
+     * input. Image-capable legacy drivers may instead read the attachment
+     * path kept in `text`; central dispatch strips that tag only here. */
+    nativeImageInput?: boolean;
     /** Effort levels this driver can pass to its CLI, ascending. Absent =
      * the driver cannot set effort, so the app never offers the control —
      * same rule as computerMcp: never show a knob the driver cannot turn. */
