@@ -8327,7 +8327,10 @@ const server = createServer(async (req, res) => {
           // concrete clear value, so clients send null at the PATCH boundary.
           requestedComputer = undefined;
           patch.computer = undefined;
-        } else if (["cloud", "vm", "local", "browser", "off"].includes(String(body.computer))) {
+        } else if (
+          typeof body.computer === "string" &&
+          ["cloud", "vm", "local", "browser", "off"].includes(body.computer)
+        ) {
           requestedComputer = body.computer;
           patch.computer = body.computer;
         } else {

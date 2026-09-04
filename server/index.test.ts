@@ -1491,6 +1491,12 @@ describe("harness HTTP API", () => {
       const auto = await api("PATCH", `/api/bots/${bot.id}`, { computer: null });
       expect(auto.status).toBe(200);
       expect(auto.body.bot).not.toHaveProperty("computer");
+      const malformed = await api("PATCH", `/api/bots/${bot.id}`, { computer: ["cloud"] });
+      expect(malformed.status).toBe(400);
+      expect(malformed.body.error).toMatch(/computer must be null/);
+      expect((await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      )).not.toHaveProperty("computer");
 
       // Reading the panel status may inspect the provider, but it is GET-only.
       boxRouteCalls.length = 0;
