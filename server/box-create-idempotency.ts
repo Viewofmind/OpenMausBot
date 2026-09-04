@@ -20,6 +20,14 @@ export interface BoxCreateRequest {
   boxId?: string;
 }
 
+export interface BoxCreateAttempt {
+  request: BoxCreateRequest;
+  /** True only when this call wrote a brand-new provider key. This is
+   * deliberately process-local provenance: a resumed key may resolve a Box
+   * created by an earlier app run and must never authorize automatic cleanup. */
+  startedNow: boolean;
+}
+
 let loaded = false;
 let requests: BoxCreateRequest[] = [];
 
@@ -103,37 +111,40 @@ function save(next: BoxCreateRequest[]): void {
 /** Record the exact provider request before it leaves the process. A known
  * Box wins over a changed body: once a provider resource exists, recovering
  * and naming it is safer than issuing any second create request. */
-export function beginBoxCreate(botId: string, requestBody: string): BoxCreateRequest {
+export function beginBoxCreate(botId: string, requestBody: string): BoxCreateAttempt {
   if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer creation");
   if (!requestBody || requestBody.length > 1_024) throw new Error("invalid cloud computer create request");
   load();
 
   const known = requests.find((request) => request.botId === botId && request.boxId);
-  if (known) return { ...known };
+  if (known) return { request: { ...known }, startedNow: false };
 
   const now = Date.now();
-  const exact = requests.find((request) => request.botId === botId && request.requestBody === requestBody);
-  if (exact && now - exact.createdAt < KEY_RETENTION_MS) return { ...exact };
+  const pending = requests.find((request) => request.botId === botId);
+  if (pending) {
+    if (pending.requestBody !== requestBody) {
+      throw recoveryStateError("waiting for an earlier cloud computer request to be reconciled");
+    }
+    if (now - pending.createdAt >= KEY_RETENTION_MS) {
+      // Once the provider forgets the idempotency key, retrying it (or using a
+      // new key) may create a second billable Box. Absence cannot be inferred
+      // from a lost response, so stop until the person checks the provider.
+      throw recoveryStateError("older than ascii.dev's 24-hour retry window");
+    }
+    return { request: { ...pending }, startedNow: false };
+  }
 
-  // ascii.dev retains keys for 24 hours. Past that boundary a fresh key is
-  // the only meaningful retry; entries with a returned Box ID never expire.
-  const next = requests.filter((request) => (
-    request.boxId !== undefined || now - request.createdAt < KEY_RETENTION_MS
-  ));
   const request: BoxCreateRequest = {
     botId,
     requestBody,
     idempotencyKey: randomUUID(),
     createdAt: now,
   };
-  const withoutExact = next.filter((candidate) => (
-    candidate.botId !== botId || candidate.requestBody !== requestBody
-  ));
-  if (withoutExact.length >= MAX_REQUESTS) {
+  if (requests.length >= MAX_REQUESTS) {
     throw recoveryStateError("full");
   }
-  save([...withoutExact, request]);
-  return { ...request };
+  save([...requests, request]);
+  return { request: { ...request }, startedNow: true };
 }
 
 /** Persist the returned identity before the caller attempts to rename it. */

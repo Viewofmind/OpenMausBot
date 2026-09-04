@@ -30,6 +30,7 @@ const READY = new Set(["idle", "ready", "running"]);
 const SLEEPING = new Set(["archived", "archiving", "stopped", "stopping"]);
 const DEFAULT_BOX_TTL_SECONDS = 8 * 60 * 60;
 const TRIAL_BOX_TTL_SECONDS = 2 * 60 * 60;
+const BOX_CREATE_IN_PROGRESS_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
 const BOX_INVENTORY_PAGE_SIZE = 200;
 // Current self-serve accounts top out below 2,000 boxes. Keep the walk
 // bounded anyway: a broken or adversarial cursor must not hold Settings open.
@@ -479,11 +480,16 @@ function trialBoxTtlSeconds(body: any): number | null {
   return TRIAL_BOX_TTL_SECONDS;
 }
 
-type BoxCreateResult = Awaited<ReturnType<typeof boxJson>> & { request: BoxCreateRequest };
+type BoxCreateResult = Awaited<ReturnType<typeof boxJson>> & {
+  request: BoxCreateRequest;
+  /** Automatic deletion is safe only for a Box first created by this exact
+   * provisioning call. A journal recovery may point at durable user data. */
+  createdThisAttempt: boolean;
+};
 
-function createStillInProgress(result: Awaited<ReturnType<typeof boxJson>>): boolean {
+function idempotentCreateInProgress(result: Awaited<ReturnType<typeof boxJson>>): boolean {
   const code = result.body?.error?.code ?? result.body?.code;
-  return result.status >= 500 || (result.status === 409 && code === "idempotency_in_progress");
+  return result.status === 409 && code === "idempotency_in_progress";
 }
 
 async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: number): Promise<BoxCreateResult> {
@@ -492,7 +498,9 @@ async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: numbe
   // silently appear inside the guest. The exact serialized body is also the
   // idempotency identity: a trial-TTL retry must receive a different key.
   const body = JSON.stringify({ ttlSeconds, noEnv: true });
-  let request = beginBoxCreate(botId, body);
+  let attempt = beginBoxCreate(botId, body);
+  let request = attempt.request;
+  let createdThisAttempt = attempt.startedNow;
 
   // A previous process received the Box but died before naming it. Resolve
   // the durable identity directly; never issue a second create first.
@@ -501,17 +509,21 @@ async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: numbe
       signal: AbortSignal.timeout(20_000),
     });
     if (recovered.ok && recovered.body?.box?.id === request.boxId) {
-      return { ...recovered, request };
+      return { ...recovered, request, createdThisAttempt: false };
     }
     if (recovered.status !== 404 && recovered.status !== 410) {
-      return { ...recovered, request };
+      return { ...recovered, request, createdThisAttempt: false };
     }
     discardBoxCreate(request);
-    request = beginBoxCreate(botId, body);
+    attempt = beginBoxCreate(botId, body);
+    request = attempt.request;
+    createdThisAttempt = attempt.startedNow;
   }
 
   let last: Awaited<ReturnType<typeof boxJson>> | null = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  let ambiguousRetries = 0;
+  let inProgressRetries = 0;
+  for (;;) {
     try {
       last = await boxJson(cfg, "/boxes", {
         method: "POST",
@@ -522,21 +534,29 @@ async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: numbe
     } catch (error) {
       // A dropped response is ambiguous: ascii.dev may already have created
       // the Box. One retry with the same key recovers it safely.
-      if (attempt === 0) continue;
+      if (ambiguousRetries++ === 0) continue;
       throw error;
     }
     const boxId = last.body?.box?.id;
     if (last.ok && typeof boxId === "string" && boxId) {
       request = rememberCreatedBox(request, boxId);
-      return { ...last, request };
+      return { ...last, request, createdThisAttempt };
     }
-    if ((createStillInProgress(last) || last.ok) && attempt === 0) continue;
-    if (!createStillInProgress(last) && !last.ok) discardBoxCreate(request);
-    return { ...last, request };
+    if (idempotentCreateInProgress(last)) {
+      const delay = BOX_CREATE_IN_PROGRESS_RETRY_DELAYS_MS[inProgressRetries++];
+      if (delay !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      return { ...last, request, createdThisAttempt };
+    }
+    if ((last.status >= 500 || last.ok) && ambiguousRetries++ === 0) continue;
+    // A 5xx or any idempotency conflict can follow a provider-side create;
+    // keep its key for recovery. Only a definitive client rejection proves
+    // this request did not create a Box and may be replaced safely.
+    if (last.status < 500 && last.status !== 409 && !last.ok) discardBoxCreate(request);
+    return { ...last, request, createdThisAttempt };
   }
-  // The loop returns or throws on every attempt; this is only a type-system
-  // guard if that bound changes later.
-  return { ...(last ?? { ok: false, status: 503, body: null }), request };
 }
 
 async function createBox(cfg: AppConfig, botId: string) {
@@ -580,7 +600,7 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
       }
       box = createRes.body.box;
       createRequest = createRes.request;
-      created = true;
+      created = createRes.createdThisAttempt;
       const rename = await boxJson(cfg, `/boxes/${box.id}`, {
         method: "PATCH",
         body: JSON.stringify({ name: vmName }),
