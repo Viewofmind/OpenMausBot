@@ -23,15 +23,21 @@ import {
   IMAGE_LAYER_VERSION,
   MANAGED_LABEL,
 } from "./container-computer.ts";
-import { isValidSshAlias, vpsSshAlias, type AppConfig } from "./config.ts";
+import { DATA_DIR, isValidSshAlias, vpsSshAlias, type AppConfig } from "./config.ts";
 import { augmentedPath } from "./env-path.ts";
+import { loadEnvironmentId } from "./environment.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 
 export const VPS_IMAGE = CUA_IMAGE;
 export const VPS_MANAGED_LABEL = "com.openmausbot.vps";
 export const VPS_CONTAINER_LABEL = "com.openmausbot.container";
+export const VPS_ENVIRONMENT_LABEL = "com.openmausbot.environment";
 export const VPS_VIEWER_LABEL = "com.openmausbot.vps-viewer";
 export const VPS_CONTAINER_PREFIX = "openmausbot-vps";
+// The same durable id is also served by the environment discovery endpoint.
+// Keeping it server-only lets us distinguish installations sharing one Docker
+// host without disclosing it through the Computers inventory response.
+const VPS_ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
 // SIGTERM must give ssh + docker time to tear down the remote exec before the
 // SIGKILL escalation; 1s was routinely too short over a WAN round-trip, and an
 // orphaned remote exec keeps the driver socket busy for the next command.
@@ -483,8 +489,14 @@ async function computeVpsComputerStatus(
       detail?.Image === inspectedImageId &&
       imageLabelsMatch(labels) &&
       labels?.[VPS_VIEWER_LABEL] === VIEWER_VERSION;
+    const environmentLabel = labels?.[VPS_ENVIRONMENT_LABEL];
     status.managed =
-      labels?.[VPS_MANAGED_LABEL] === "1" && labels?.[VPS_CONTAINER_LABEL] === status.container_name;
+      labels?.[VPS_MANAGED_LABEL] === "1" &&
+      labels?.[VPS_CONTAINER_LABEL] === status.container_name &&
+      // A bot-scoped status is proof that the deterministic legacy container
+      // still maps to a bot present in this installation. New containers must
+      // carry this installation's durable environment label.
+      (environmentLabel === undefined || environmentLabel === VPS_ENVIRONMENT_ID);
     status.network = hasNoPublishedPorts(detail?.HostConfig, detail?.NetworkSettings?.Networks) ? "private" : "unsafe";
     status.mounts = hasNoHostMounts(detail ?? {}) ? "none" : "unsafe";
     status.security = dockerSecurityIsHardened(detail?.HostConfig, { restartPolicy: "unless-stopped" })
@@ -707,10 +719,19 @@ async function scanManagedVpsComputers(
       ) {
         throw new Error("the VPS returned a managed container whose identity could not be verified");
       }
+      const owner = ownerByName.get(name);
+      const environmentLabel = (labels as Record<string, unknown>)[VPS_ENVIRONMENT_LABEL];
       seenIds.add(listedId);
       seenNames.add(name);
+      // A foreign installation can legitimately share this Docker daemon and
+      // therefore appears in the label-filtered provider response. Count the
+      // row as inspected, but never return an identifier that could make it
+      // removable. Unlabelled pre-environment containers remain manageable
+      // only while their deterministic name still maps to a local bot.
+      if (environmentLabel !== VPS_ENVIRONMENT_ID && !(environmentLabel === undefined && owner)) {
+        continue;
+      }
       containerIds.set(name, id);
-      const owner = ownerByName.get(name);
       instances.push({
         name,
         state: managedVpsState(detail.State?.Status, detail.State?.Running),
@@ -762,6 +783,8 @@ export function vpsContainerRunArgs(
     `${VPS_MANAGED_LABEL}=1`,
     "--label",
     `${VPS_CONTAINER_LABEL}=${containerName}`,
+    "--label",
+    `${VPS_ENVIRONMENT_LABEL}=${VPS_ENVIRONMENT_ID}`,
     "--label",
     `${VPS_VIEWER_LABEL}=${VIEWER_VERSION}`,
     "--label",

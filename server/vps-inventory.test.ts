@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { AppConfig } from "./config.ts";
+import { DATA_DIR, type AppConfig } from "./config.ts";
+import { loadEnvironmentId } from "./environment.ts";
 import {
   VPS_CONTAINER_LABEL,
+  VPS_ENVIRONMENT_LABEL,
   VPS_MANAGED_LABEL,
   listManagedVpsComputers,
   removeManagedVpsComputer,
@@ -13,6 +15,15 @@ import {
 
 const CONFIG: AppConfig = { vps: { sshAlias: "production-vps" } };
 const OWNER: ManagedVpsOwner = { botId: "bot-current", name: "Research", inUse: false };
+const LOCAL_ENVIRONMENT_ID = loadEnvironmentId(DATA_DIR);
+
+function labels(name: string, environmentId: string | null = LOCAL_ENVIRONMENT_ID): Record<string, string> {
+  return {
+    [VPS_MANAGED_LABEL]: "1",
+    [VPS_CONTAINER_LABEL]: name,
+    ...(environmentId ? { [VPS_ENVIRONMENT_LABEL]: environmentId } : {}),
+  };
+}
 
 interface ContainerFixture {
   id: string;
@@ -42,10 +53,7 @@ function inventoryRunner(initial: ContainerFixture[]) {
             Name: `/${container.name}`,
             Config: {
               Env: ["VNC_PW=must-not-leak"],
-              Labels: container.labels ?? {
-                [VPS_MANAGED_LABEL]: "1",
-                [VPS_CONTAINER_LABEL]: container.name,
-              },
+              Labels: container.labels ?? labels(container.name),
             },
             State: { Status: container.state ?? "running", Running: container.running ?? true },
             NetworkSettings: { Networks: { bridge: { IPAddress: "172.17.0.9" } } },
@@ -124,6 +132,40 @@ describe("managed VPS inventory", () => {
     ]);
     expect(fake.calls.some((call) => ["run", "start", "stop", "exec"].includes(call[0]!))).toBe(false);
     expect(JSON.stringify(inventory)).not.toMatch(/\b[ab]{64}\b|VNC_PW|172\.17\.0\.9/);
+  });
+
+  it("keeps local legacy owners but excludes foreign and ownerless legacy rows", async () => {
+    const legacyOwner: ManagedVpsOwner = { botId: "legacy-current", name: "Legacy", inUse: false };
+    const foreignOwner: ManagedVpsOwner = { botId: "foreign-current", name: "Foreign", inUse: false };
+    const legacyName = vpsContainerName(legacyOwner.botId);
+    const legacyOrphanName = vpsContainerName("legacy-deleted");
+    const foreignName = vpsContainerName(foreignOwner.botId);
+    const foreignOrphanName = vpsContainerName("foreign-deleted");
+    const foreignEnvironmentId = "11111111-2222-4333-8444-555555555555";
+    const fake = inventoryRunner([
+      { id: "1".repeat(64), name: legacyName, labels: labels(legacyName, null) },
+      { id: "2".repeat(64), name: legacyOrphanName, labels: labels(legacyOrphanName, null) },
+      { id: "3".repeat(64), name: foreignName, labels: labels(foreignName, foreignEnvironmentId) },
+      { id: "4".repeat(64), name: foreignOrphanName, labels: labels(foreignOrphanName, foreignEnvironmentId) },
+    ]);
+
+    const inventory = await listManagedVpsComputers(CONFIG, [legacyOwner, foreignOwner], fake.runner);
+
+    expect(inventory.available).toBe(true);
+    expect(inventory.instances).toEqual([{
+      name: legacyName,
+      state: "running",
+      ownerBotId: legacyOwner.botId,
+      ownerName: legacyOwner.name,
+      orphaned: false,
+      inUse: false,
+    }]);
+
+    await expect(removeManagedVpsComputer(CONFIG, [legacyOwner, foreignOwner], foreignName, foreignName, fake.runner))
+      .rejects.toMatchObject({ status: 404 });
+    await expect(removeManagedVpsComputer(CONFIG, [legacyOwner, foreignOwner], legacyOrphanName, legacyOrphanName, fake.runner))
+      .rejects.toMatchObject({ status: 404 });
+    expect(fake.calls.some((call) => call[0] === "rm")).toBe(false);
   });
 
   it("fails closed for transport errors or unverifiable managed identities", async () => {
