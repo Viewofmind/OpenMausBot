@@ -244,6 +244,8 @@ export function EngineSetup({
       : "Finish the account sign-in in Terminal. Reopen this menu afterward and we’ll check again."
     : intent === "inject"
       ? "Install the agent once, then you can run it with local models—no cloud sign-in required."
+      : install?.managed
+        ? "OpenMausBot installs its own verified Antigravity runtime. It is separate from the Antigravity app and agy CLI; install it here, sign in with Google, and this model list will refresh from your account."
       : `Install the command-line app once. Models will appear here as soon as it’s ready${signInCommand ? "; sign-in may follow" : ""}.`;
 
   // Some engines are configured elsewhere (for example, a cloud computer

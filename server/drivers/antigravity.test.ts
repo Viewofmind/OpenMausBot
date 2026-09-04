@@ -17,7 +17,11 @@ import {
   probeAntigravityModels,
   validateAntigravityCallbackUrl,
 } from "./antigravity-acp.ts";
-import { resolveAntigravityReleaseAsset, type AntigravityReleaseAsset } from "./antigravity-release.ts";
+import {
+  ANTIGRAVITY_RELEASE_VERSION,
+  resolveAntigravityReleaseAsset,
+  type AntigravityReleaseAsset,
+} from "./antigravity-release.ts";
 import { installAntigravityRuntime, resolveAntigravityRuntime } from "./antigravity-runtime.ts";
 import {
   AntigravityDriver,
@@ -95,6 +99,8 @@ describe("official Antigravity runtime", () => {
   it("pins Google's release metadata for this supported host", () => {
     const asset = resolveAntigravityReleaseAsset();
     if (!asset) return;
+    expect(ANTIGRAVITY_RELEASE_VERSION).toBe("agy_acp_server_1.1.1");
+    expect(asset.version).toBe(ANTIGRAVITY_RELEASE_VERSION);
     expect(asset.url).toMatch(/^https:\/\/dl\.google\.com\/agy-extensions\/releases\//u);
     expect(asset.sha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(asset.archiveBytes).toBeGreaterThan(100_000_000);
