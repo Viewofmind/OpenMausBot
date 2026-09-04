@@ -215,6 +215,10 @@ import { fetchSkillFromSource } from "./skill-fetch.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
 import { readCuaConnection } from "./local-computer.ts";
+import {
+  discoverExistingPerBotLocalVms,
+  localVmInventoryEntry,
+} from "./local-vm-inventory.ts";
 import { LocalVmIdleTimer } from "./local-vm-idle.ts";
 import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
 import { RepeatDetector, callKey } from "./repeat-detector.ts";
@@ -1890,16 +1894,53 @@ function releaseLocalVmThread(threadId: string): void {
 }
 
 // A running VM may have survived an app/server restart. Start its idle
-// backstop even if nobody opens Settings or begins a turn this session.
+// backstop even if nobody opens Settings or begins a turn this session. The
+// bot's current destination is intentionally ignored: moving a bot to Cloud,
+// Browser, This computer, Auto, or Off does not delete its old Local VM.
 void (async () => {
-  const targets = localVmMode(cfg) === "per-bot"
-    ? store.bots.filter((bot) => bot.computer === "vm").map((bot) => perBotLocalVmTarget(bot.id))
-    : [SHARED_LOCAL_VM_TARGET];
-  for (const target of targets) {
-    const status = await containerComputerStatus(undefined, undefined, target).catch(() => null);
-    if (status?.container === "running") localVmIdleFor(target).touch();
+  if (localVmMode(cfg) !== "per-bot") {
+    const status = await containerComputerStatus(undefined, undefined, SHARED_LOCAL_VM_TARGET).catch(() => null);
+    if (status?.container === "running") localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
+    return;
   }
-})();
+  const runtime = await containerRuntimeStatus().catch(() => null);
+  if (!runtime?.runtime || !runtime.daemonUp) return;
+  const existing = await discoverExistingPerBotLocalVms(store.bots, runtime.runtime).catch(() => []);
+  const statuses = await Promise.all(existing.map(({ target }) =>
+    containerComputerStatus(undefined, undefined, target).catch(() => null),
+  ));
+  existing.forEach(({ target }, index) => {
+    if (statuses[index]?.container === "running") localVmIdleFor(target).touch();
+  });
+})().catch(() => {
+  // Startup inspection is a backstop, not a reason to keep the app offline.
+  // The Settings inventory remains available for a later explicit retry.
+});
+
+async function localVmInventoryPayload() {
+  const runtime = await containerRuntimeStatus();
+  if (!runtime.runtime || !runtime.daemonUp) {
+    return {
+      instances: [],
+      maxInstances: localVmMaxInstances(cfg),
+      available: false,
+      problem: runtime.runtime ? `Start ${runtime.runtime} first` : "Install a supported container runtime first",
+    };
+  }
+  const existing = await discoverExistingPerBotLocalVms(store.bots, runtime.runtime);
+  const statuses = await Promise.all(existing.map(({ target }) =>
+    containerComputerStatus(undefined, undefined, target),
+  ));
+  const instances = existing.flatMap(({ bot, target }, index) => {
+    const status = statuses[index];
+    if (!status) return [];
+    const inUse = localVmActiveThreads.has(target.key) ||
+      localVmLeaseFor(target).current(localVmOwnerBusy) !== null;
+    const entry = localVmInventoryEntry(bot, status, inUse);
+    return entry ? [entry] : [];
+  });
+  return { instances, maxInstances: localVmMaxInstances(cfg), available: true, problem: null };
+}
 
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
@@ -5689,12 +5730,7 @@ async function localVmPayload(target: LocalVmTarget) {
 }
 
 async function existingPerBotLocalVmCount(runtime: Runtime) {
-  const targets = [...new Map(store.bots.map((bot) => {
-    const target = perBotLocalVmTarget(bot.id);
-    return [target.key, target] as const;
-  })).values()];
-  const existing = await Promise.all(targets.map((target) => containerComputerExists(runtime, target)));
-  return existing.filter(Boolean).length;
+  return (await discoverExistingPerBotLocalVms(store.bots, runtime)).length;
 }
 
 async function perBotLocalVmCountForModeChange(): Promise<number | null> {
@@ -8986,6 +9022,10 @@ const server = createServer(async (req, res) => {
     // its daemon is up, and whether the desktop image and container exist
     if (method === "GET" && path === "/api/local-computer") {
       return json(res, 200, await localVmPayload(SHARED_LOCAL_VM_TARGET));
+    }
+    if (method === "GET" && path === "/api/local-computer/instances") {
+      res.setHeader("cache-control", "private, no-store");
+      return json(res, 200, await localVmInventoryPayload());
     }
     m = path.match(/^\/api\/local-computer\/(pull|run|start|stop|remove)$/);
     if (m && method === "POST") {
