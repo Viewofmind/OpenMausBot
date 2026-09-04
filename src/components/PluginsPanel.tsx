@@ -656,10 +656,10 @@ export function PluginsPanel() {
                         if (pending && pendingUrls[card.slug]) {
                           setError(null);
                           void openConnectUrl(pendingUrls[card.slug]).catch((e) => setError(e.message));
-                        } else if (accounts.length) {
+                        } else {
                           setAliasSlug((current) => current === card.slug ? null : card.slug);
                           setAliasDraft("");
-                        } else void connect(card.slug);
+                        }
                       }}
                       className="flex min-w-[88px] items-center justify-center gap-1.5 rounded-full bg-raised px-3 py-2 text-[12.5px] text-ink transition-colors hover:bg-raised-hover disabled:opacity-40"
                     >
@@ -727,7 +727,7 @@ export function PluginsPanel() {
                         maxLength={64}
                         onChange={(event) => setAliasDraft(event.target.value)}
                         placeholder="Account label (work, personal…)"
-                        aria-label={`Label for another ${card.label} account`}
+                        aria-label={accounts.length > 0 ? `Label for another ${card.label} account` : `Label for the new ${card.label} account`}
                         className="min-w-0 flex-1 rounded-lg bg-raised px-3 py-2 text-[12px] text-ink placeholder:text-ink-secondary focus:outline-none focus:ring-1 focus:ring-accent"
                       />
                       <button
