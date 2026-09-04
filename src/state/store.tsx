@@ -1462,6 +1462,18 @@ export async function api(path: string, init?: RequestInit): Promise<any> {
   return body;
 }
 
+/** Bot removal is intentionally non-optimistic. The server may require the
+ * person to clean up a persistent computer first, so local state changes only
+ * after the delete boundary accepts the request. */
+export async function requestConfirmedBotDeletion(
+  botId: string,
+  requestDelete: (botId: string) => Promise<unknown>,
+  onConfirmed: (botId: string) => void,
+): Promise<void> {
+  await requestDelete(botId);
+  onConfirmed(botId);
+}
+
 export interface PeripheralSnapshotLoad<Key extends string = string> {
   key: Key;
   load: () => Promise<void>;
@@ -1627,10 +1639,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const bot = stateRef.current.bots.find((candidate) => candidate.id === action.botId);
         return bot ? openOnboardingCard(bot) : undefined;
       })();
-      if (action.type === "deleteBot") botPatchQueue.cancel(action.botId);
       // A queued message is still real until the server confirms deletion.
-      // All other actions keep their existing optimistic behavior.
-      if (action.type !== "cancelQueued" && action.type !== "cancelGroupQueued") rawDispatch(action);
+      // Bot deletion is also server-authoritative: lifecycle guards may reject
+      // it, and hiding the row first strands the computer the person must
+      // remove. All other actions keep their existing optimistic behavior.
+      if (
+        action.type !== "cancelQueued" &&
+        action.type !== "cancelGroupQueued" &&
+        action.type !== "deleteBot"
+      ) rawDispatch(action);
       switch (action.type) {
         case "createRoutine":
           api("/api/routines", { method: "POST", body: JSON.stringify(action.input) }).catch(showError);
@@ -1825,7 +1842,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         }
         case "deleteBot":
-          api(`/api/bots/${action.botId}`, { method: "DELETE" }).catch(showError);
+          void requestConfirmedBotDeletion(
+            action.botId,
+            (botId) => api(`/api/bots/${botId}`, { method: "DELETE" }),
+            (botId) => {
+              botPatchQueue.cancel(botId);
+              rawDispatch({ type: "deleteBot", botId });
+            },
+          )
+            .catch(showError);
           break;
         case "markUnread":
           api(`/api/bots/${action.botId}`, { method: "PATCH", body: JSON.stringify({ unread: true }) }).catch(

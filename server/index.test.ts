@@ -18,6 +18,7 @@ import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { openSse } from "./testing/sse.ts";
 import { FILE_MAX_BYTES, IMAGE_MAX_BYTES } from "./attachments.ts";
+import { boxNameFor } from "./box.ts";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SERVER_DIR, "..");
@@ -33,6 +34,9 @@ let child: ChildProcess;
 let boxStub: Server;
 let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
+let managedBoxRows: Array<Record<string, unknown>> = [];
+let managedBoxListStatus = 200;
+const managedBoxDeleteConfirmations: Array<{ boxId: string; confirmation?: string }> = [];
 let home: string;
 let staticDir: string;
 let fakeClaudeDump: string;
@@ -469,11 +473,17 @@ beforeAll(async () => {
     if (req.headers.authorization === "Bearer box_route") {
       const method = req.method ?? "GET";
       const path = req.url ?? "/";
+      const requestUrl = new URL(path, "http://box.invalid");
       boxRouteCalls.push({ method, path });
-      res.writeHead(200, { "content-type": "application/json" });
-      if (method === "GET" && path === "/boxes") {
-        return res.end(JSON.stringify({ ok: true, boxes: [] }));
+      if (method === "GET" && requestUrl.pathname === "/boxes") {
+        res.writeHead(managedBoxListStatus, { "content-type": "application/json" });
+        return res.end(JSON.stringify(
+          managedBoxListStatus === 200
+            ? { ok: true, boxes: managedBoxRows, pageInfo: { nextCursor: null } }
+            : { ok: false, message: "fixture list unavailable" },
+        ));
       }
+      res.writeHead(200, { "content-type": "application/json" });
       if (method === "POST" && path === "/boxes") {
         return res.end(JSON.stringify({ ok: false, message: "fixture refused create" }));
       }
@@ -485,6 +495,29 @@ beforeAll(async () => {
       }
       if (method === "POST" && path === "/boxes/route-box/desktop?vnc=1") {
         return res.end(JSON.stringify({ ok: true, desktopUrl: "https://desktop.invalid/route-box" }));
+      }
+      const commandMatch = requestUrl.pathname.match(/^\/boxes\/(bx_[23456789abcdefghjkmnpqrstuvwxyz]{8})\/commands$/);
+      if (method === "POST" && commandMatch) {
+        return res.end(JSON.stringify({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
+      }
+      const stopMatch = requestUrl.pathname.match(/^\/boxes\/(bx_[23456789abcdefghjkmnpqrstuvwxyz]{8})\/stop$/);
+      if (method === "POST" && stopMatch) {
+        managedBoxRows = managedBoxRows.map((row) => row.id === stopMatch[1] ? { ...row, state: "archived" } : row);
+        return res.end(JSON.stringify({ ok: true }));
+      }
+      const deleteMatch = requestUrl.pathname.match(/^\/boxes\/(bx_[23456789abcdefghjkmnpqrstuvwxyz]{8})$/);
+      if (method === "DELETE" && deleteMatch) {
+        const confirmation = Array.isArray(req.headers["x-ascii-confirm-delete"])
+          ? req.headers["x-ascii-confirm-delete"][0]
+          : req.headers["x-ascii-confirm-delete"];
+        managedBoxDeleteConfirmations.push({ boxId: deleteMatch[1], confirmation });
+        if (confirmation !== deleteMatch[1]) {
+          res.statusCode = 409;
+          return res.end(JSON.stringify({ ok: false, message: "confirmation mismatch" }));
+        }
+        managedBoxRows = managedBoxRows.filter((row) => row.id !== deleteMatch[1]);
+        res.statusCode = 202;
+        return res.end(JSON.stringify({ ok: true, type: "deletion.operation" }));
       }
       return res.end(JSON.stringify({ ok: true }));
     }
@@ -1521,6 +1554,117 @@ describe("harness HTTP API", () => {
       expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes" });
     } finally {
       if (botId) await api("DELETE", `/api/bots/${botId}`);
+      await api("PUT", "/api/config", { box: { token: "" } });
+      boxRouteCalls.length = 0;
+    }
+  });
+
+  it("lists sanitized cloud computers and requires explicit safe lifecycle actions", async () => {
+    let botId = "";
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      const managedName = await boxNameFor(bot.id);
+      managedBoxRows = [
+        {
+          id: "bx_23456789",
+          name: managedName,
+          state: "idle",
+          desktopUrl: "https://desktop.invalid/?token=provider-secret",
+          ip: "203.0.113.9",
+        },
+        { id: "bx_abcdefgh", name: "ogb-orphan-abcdef", state: "archived", desktopUrl: "secret-orphan-url" },
+        { id: "bx_jkmnpqrs", name: "someone-elses-box", state: "idle", desktopUrl: "secret-foreign-url" },
+      ];
+
+      const listed = await fetch(`${BASE}/api/computers/boxes`);
+      expect(listed.status).toBe(200);
+      expect(listed.headers.get("cache-control")).toBe("private, no-store");
+      const inventory = await listed.json() as any;
+      expect(inventory.instances).toEqual([
+        expect.objectContaining({
+          boxId: "bx_23456789",
+          name: managedName,
+          ownerBotId: bot.id,
+          ownerName: bot.name,
+          orphaned: false,
+          inUse: false,
+        }),
+        expect.objectContaining({
+          boxId: "bx_abcdefgh",
+          name: "ogb-orphan-abcdef",
+          ownerBotId: null,
+          ownerName: null,
+          orphaned: true,
+        }),
+      ]);
+      expect(JSON.stringify(inventory)).not.toMatch(/provider-secret|secret-orphan-url|secret-foreign-url|desktopUrl|203\.0\.113\.9/);
+
+      expect((await api("POST", `/api/bots/${bot.id}/computer/control`, { action: "take" })).status).toBe(200);
+      const held = await api("GET", "/api/computers/boxes");
+      expect(held.body.instances.find((instance: { ownerBotId: string }) => instance.ownerBotId === bot.id).inUse).toBe(true);
+      expect((await api("POST", "/api/computers/boxes/bx_23456789/sleep", {})).status).toBe(409);
+      expect((await api("POST", "/api/computers/boxes/bx_23456789/delete", { confirmName: managedName })).status).toBe(409);
+      expect((await api("POST", `/api/bots/${bot.id}/computer/control`, { action: "release" })).status).toBe(200);
+
+      const noJson = await fetch(`${BASE}/api/computers/boxes/bx_23456789/sleep`, { method: "POST" });
+      expect(noJson.status).toBe(415);
+      boxRouteCalls.length = 0;
+      expect((await api("POST", "/api/computers/boxes/bx_23456789/sleep", {})).status).toBe(200);
+      expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes/bx_23456789/stop" });
+
+      const removed = await api("POST", "/api/computers/boxes/bx_23456789/delete", { confirmName: managedName });
+      expect(removed.status).toBe(202);
+      expect(managedBoxDeleteConfirmations).toContainEqual({
+        boxId: "bx_23456789",
+        confirmation: "bx_23456789",
+      });
+      expect(managedBoxRows.some((row) => row.id === "bx_23456789")).toBe(false);
+    } finally {
+      managedBoxListStatus = 200;
+      managedBoxRows = [];
+      managedBoxDeleteConfirmations.length = 0;
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } });
+      boxRouteCalls.length = 0;
+    }
+  });
+
+  it("keeps a bot when its hidden Box exists or the provider cannot prove it absent", async () => {
+    let botId = "";
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      const managedName = await boxNameFor(bot.id);
+      managedBoxRows = [{ id: "bx_23456789", name: managedName, state: "archived" }];
+
+      // Ownership follows the bot id, not its current destination/backend.
+      const moved = await api("PATCH", `/api/bots/${bot.id}`, { computer: null, cloudBackend: "vps" });
+      expect(moved.status).toBe(200);
+      const guarded = await api("DELETE", `/api/bots/${bot.id}`);
+      expect(guarded.status).toBe(409);
+      expect(guarded.body.error).toMatch(/cloud computer.*Settings.*Computers/i);
+      expect((await api("GET", "/api/bots?messages=0")).body.bots.some(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      )).toBe(true);
+
+      managedBoxListStatus = 503;
+      const unavailable = await api("DELETE", `/api/bots/${bot.id}`);
+      expect(unavailable.status).toBe(503);
+      expect((await api("GET", "/api/bots?messages=0")).body.bots.some(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      )).toBe(true);
+
+      managedBoxListStatus = 200;
+      managedBoxRows = [];
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+    } finally {
+      managedBoxListStatus = 200;
+      managedBoxRows = [];
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
       await api("PUT", "/api/config", { box: { token: "" } });
       boxRouteCalls.length = 0;
     }

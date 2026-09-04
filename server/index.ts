@@ -1880,6 +1880,23 @@ const checkpointRestoreLeases = new Set<string>();
 const LOCAL_VM_IDLE_MS = 8 * 60 * 60_000;
 const localVmIdles = new Map<string, LocalVmIdleTimer>();
 
+function managedBoxOwners(): box.ManagedBoxOwner[] {
+  return store.bots.map((bot) => ({
+    botId: bot.id,
+    name: bot.name,
+    // A machine is not safe to mutate while any app-level work or human
+    // control lease still names its owner. This is deliberately conservative
+    // across destination changes: an old Box may still contain valuable state.
+    inUse:
+      bot.busy === true ||
+      directTurnDispatchClaims.has(bot.id) ||
+      activeGroupTurnForBot(bot.id) !== null ||
+      Boolean(routines?.activeRunForBot(bot.id)) ||
+      activeVpsThreads.has(bot.id) ||
+      computerControl.snapshot(bot.id).held,
+  }));
+}
+
 function localVmTargetForBot(botId: string): LocalVmTarget {
   return localVmMode(cfg) === "per-bot" ? perBotLocalVmTarget(botId) : SHARED_LOCAL_VM_TARGET;
 }
@@ -8872,6 +8889,20 @@ const server = createServer(async (req, res) => {
           return json(res, 409, { error: "delete this bot's Local VM from its Computer panel before deleting the bot" });
         }
       }
+      // A Box survives destination/backend changes and contains browser
+      // sessions and files. Resolve ownership from a fresh provider listing;
+      // deleting the bot first would make that durable machine look orphaned.
+      const cloudInventory = await box.listManagedBoxes(cfg, managedBoxOwners());
+      if (cloudInventory.configured && !cloudInventory.available) {
+        return json(res, 503, {
+          error: `${cloudInventory.problem ?? "cloud computer inventory is unavailable"}. Refresh Settings → Computers before deleting this bot`,
+        });
+      }
+      if (cloudInventory.instances.some((instance) => instance.ownerBotId === bot.id)) {
+        return json(res, 409, {
+          error: "delete this bot's cloud computer from Settings → Computers before deleting the bot",
+        });
+      }
       // Establish a durable cleanup intent before any teardown. A malformed
       // or unreadable journal therefore rejects the delete with the bot and
       // all of its live work untouched. The intent is aborted if a later
@@ -9510,6 +9541,29 @@ const server = createServer(async (req, res) => {
       const fresh = botWithThread(updated);
       broadcast({ kind: "bot", bot: fresh });
       return json(res, 200, { bot: fresh });
+    }
+
+    // Account-wide Box inventory is a Settings surface, never a provisioning
+    // path. Listing remains read-only; lifecycle changes require explicit
+    // JSON actions and are revalidated against a fresh provider listing.
+    if (method === "GET" && path === "/api/computers/boxes") {
+      res.setHeader("cache-control", "private, no-store");
+      return json(res, 200, await box.listManagedBoxes(cfg, managedBoxOwners()));
+    }
+    m = path.match(/^\/api\/computers\/boxes\/([\w-]+)\/(sleep|delete)$/);
+    if (m && method === "POST") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      const body = await readBody(req);
+      const owners = managedBoxOwners();
+      if (m[2] === "sleep") {
+        return json(res, 200, await box.sleepManagedBox(cfg, owners, m[1]));
+      }
+      if (typeof body.confirmName !== "string" || body.confirmName.length > 100) {
+        return json(res, 400, { error: "confirmName must be the cloud computer name shown in Settings" });
+      }
+      return json(res, 202, await box.deleteManagedBox(cfg, owners, m[1], body.confirmName));
     }
 
     // what the user's machine can host: which runtime is installed, whether

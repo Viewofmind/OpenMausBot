@@ -6,6 +6,7 @@ import {
   loadSnapshotBoundary,
   openNotificationTarget,
   reducer,
+  requestConfirmedBotDeletion,
   visibleNotificationThread,
   type Bot,
   type Group,
@@ -13,6 +14,56 @@ import {
 } from "./store";
 import { openLiveEvents, type LiveEventSourceLike, type LiveEventsPlatform } from "../lib/live-events";
 import type { RoutineRun } from "../lib/routines";
+
+describe("server-authoritative bot deletion", () => {
+  const bot = {
+    id: "bot-delete",
+    threadId: "thread-delete",
+    name: "Keeper",
+    messages: [],
+  } as never as Bot;
+
+  const stateWithQueuedWork = () => reducer(
+    reducer(initialState, { type: "botAdded", bot }),
+    { type: "pendingQueued", threadId: bot.threadId, queueId: "queued-1", text: "keep this" },
+  );
+
+  it.each([409, 503])("keeps the bot, selection, and queued work when DELETE is rejected with %s", async (status) => {
+    let state = stateWithQueuedWork();
+    const cancel = vi.fn();
+
+    await expect(requestConfirmedBotDeletion(
+      bot.id,
+      async () => { throw new Error(`${status} computer cleanup required`); },
+      (botId) => {
+        cancel(botId);
+        state = reducer(state, { type: "deleteBot", botId });
+      },
+    )).rejects.toThrow(String(status));
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(state.selectedId).toBe(bot.id);
+    expect(state.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(state.pendingQueued[bot.threadId]).toEqual([
+      { queueId: "queued-1", text: "keep this" },
+    ]);
+  });
+
+  it("removes the bot only after DELETE succeeds", async () => {
+    let state = stateWithQueuedWork();
+    const cancel = vi.fn();
+    const requestDelete = vi.fn(async () => ({ ok: true }));
+
+    await requestConfirmedBotDeletion(bot.id, requestDelete, (botId) => {
+      cancel(botId);
+      state = reducer(state, { type: "deleteBot", botId });
+    });
+
+    expect(requestDelete).toHaveBeenCalledWith(bot.id);
+    expect(cancel).toHaveBeenCalledWith(bot.id);
+    expect(state.bots).toHaveLength(0);
+  });
+});
 
 type SnapshotFrame =
   | { kind: "hello"; resumed: boolean; cursor: string }
