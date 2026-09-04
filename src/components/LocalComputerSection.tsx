@@ -53,6 +53,146 @@ interface Status {
   };
 }
 
+export interface LocalVmInventoryInstance {
+  botId: string;
+  name: string;
+  destination: "auto" | "cloud" | "vm" | "local" | "browser" | "off";
+  container: "running" | "stopped";
+  ready: boolean;
+  problem: string | null;
+  inUse: boolean;
+}
+
+interface LocalVmInventoryPayload {
+  instances: LocalVmInventoryInstance[];
+  maxInstances: number;
+  available: boolean;
+  problem: string | null;
+}
+
+const destinationLabels: Record<LocalVmInventoryInstance["destination"], string> = {
+  auto: "Auto",
+  cloud: "Cloud",
+  vm: "Local VM",
+  local: "This computer",
+  browser: "Browser",
+  off: "Off",
+};
+
+export function localVmInventoryState(instance: LocalVmInventoryInstance): string {
+  if (instance.inUse) return "In use";
+  if (instance.container === "stopped") return "Stopped";
+  if (instance.ready) return "Running";
+  return "Needs attention";
+}
+
+export function LocalVmInventoryCard({
+  instances,
+  maxInstances,
+  loading,
+  deletingBotId,
+  error,
+  unavailableReason,
+  onRefresh,
+  onDelete,
+}: {
+  instances: LocalVmInventoryInstance[];
+  maxInstances: number;
+  loading: boolean;
+  deletingBotId: string | null;
+  error: string | null;
+  unavailableReason: string | null;
+  onRefresh: () => void;
+  onDelete: (instance: LocalVmInventoryInstance) => void;
+}) {
+  return (
+    <Card
+      title="Per-bot desktops"
+      subtitle={`${unavailableReason ? "Inventory unavailable." : `${instances.length}/${maxInstances} created.`} This list includes old desktops even when their bot now uses another destination.`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[12px] text-ink-secondary">
+          Delete desktops you no longer need to free a slot. Durable workspace files remain.
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading || deletingBotId !== null}
+          aria-label="Refresh per-bot desktops"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
+        >
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+        </button>
+      </div>
+
+      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+
+      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+        {loading && instances.length === 0 ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <Loader2 size={13} className="animate-spin" /> Checking existing desktops…
+          </div>
+        ) : unavailableReason ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <AlertTriangle size={14} className="shrink-0 text-warning" /> {unavailableReason}
+          </div>
+        ) : instances.length === 0 ? (
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">No per-bot desktops have been created.</div>
+        ) : instances.map((instance, index) => {
+          const state = localVmInventoryState(instance);
+          const deleting = deletingBotId === instance.botId;
+          return (
+            <div
+              key={instance.botId}
+              className={cn(
+                "flex items-start justify-between gap-3 px-3 py-3",
+                index > 0 && "border-t border-hairline/35",
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-[13.5px] font-medium text-ink">{instance.name}</span>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[11px]",
+                      instance.inUse || instance.ready
+                        ? "bg-success/15 text-success"
+                        : instance.container === "stopped"
+                          ? "bg-control text-ink-secondary"
+                          : "bg-warning/15 text-warning",
+                    )}
+                  >
+                    {state}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11.5px] text-ink-secondary">
+                  Current destination: {destinationLabels[instance.destination]}
+                </div>
+                {instance.problem && !instance.inUse && (
+                  <div className="mt-1 text-[11.5px] text-warning">{instance.problem}</div>
+                )}
+                {instance.inUse && (
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's turn before deleting its desktop.</div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => onDelete(instance)}
+                disabled={instance.inUse || deletingBotId !== null}
+                title={instance.inUse ? "Stop this bot's turn before deleting its Local VM" : `Delete ${instance.name}'s Local VM`}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                Delete
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 function Step({ n, title, done, children }: { n: number; title: string; done: boolean; children?: React.ReactNode }) {
   return (
     <div className="flex gap-3">
@@ -107,6 +247,13 @@ export function LocalComputerSection() {
   const [error, setError] = useState<string | null>(null);
   const [policyPending, setPolicyPending] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [inventory, setInventory] = useState<LocalVmInventoryInstance[]>([]);
+  const [inventoryMax, setInventoryMax] = useState(2);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [inventoryUnavailableReason, setInventoryUnavailableReason] = useState<string | null>(null);
+  const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
+  const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/local-computer", { signal });
@@ -114,6 +261,17 @@ export function LocalComputerSection() {
     if (!response.ok) throw new Error(body.error ?? `Status request failed (${response.status})`);
     setStatus(body as Status);
     setError(null);
+  }, []);
+
+  const refreshInventory = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/local-computer/instances", { signal });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `Inventory request failed (${response.status})`);
+    const payload = body as LocalVmInventoryPayload;
+    setInventory(payload.instances);
+    setInventoryMax(payload.maxInstances);
+    setInventoryUnavailableReason(payload.available ? null : (payload.problem ?? "Container runtime unavailable"));
+    setInventoryError(null);
   }, []);
 
   useEffect(() => {
@@ -143,6 +301,28 @@ export function LocalComputerSection() {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [refresh, refreshKey]);
+
+  useEffect(() => {
+    if (status?.mode !== "per-bot") {
+      setInventory([]);
+      setInventoryLoading(false);
+      setInventoryError(null);
+      setInventoryUnavailableReason(null);
+      return;
+    }
+    const controller = new AbortController();
+    setInventoryLoading(true);
+    void refreshInventory(controller.signal)
+      .catch((e) => {
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          setInventoryError(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setInventoryLoading(false);
+      });
+    return () => controller.abort();
+  }, [inventoryRefreshKey, refreshInventory, status?.mode]);
 
   const post = async (action: Exclude<Action, "recreate">) => {
     const response = await fetch(`/api/local-computer/${action}`, {
@@ -203,6 +383,26 @@ export function LocalComputerSection() {
     }
   };
 
+  const deletePerBotVm = async (instance: LocalVmInventoryInstance) => {
+    if (!window.confirm(`Delete ${instance.name}'s Local VM? Its durable workspace files will remain.`)) return;
+    setDeletingBotId(instance.botId);
+    setInventoryError(null);
+    try {
+      const response = await fetch(`/api/bots/${instance.botId}/local-computer/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Could not delete this Local VM");
+      await refreshInventory();
+    } catch (e) {
+      setInventoryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingBotId(null);
+    }
+  };
+
   const c = status?.commands;
   const ready = status?.ready === true;
   const existing = status?.container !== "missing";
@@ -253,6 +453,7 @@ export function LocalComputerSection() {
             onClick={() => {
               setLoading(true);
               setRefreshKey((key) => key + 1);
+              setInventoryRefreshKey((key) => key + 1);
             }}
             disabled={loading || pending !== null}
             className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1 text-[12.5px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
@@ -384,6 +585,19 @@ export function LocalComputerSection() {
           </Step>
         </div>
       </Card>
+
+      {perBot && (
+        <LocalVmInventoryCard
+          instances={inventory}
+          maxInstances={inventoryMax || status?.max_instances || 2}
+          loading={inventoryLoading}
+          deletingBotId={deletingBotId}
+          error={inventoryError}
+          unavailableReason={inventoryUnavailableReason}
+          onRefresh={() => setInventoryRefreshKey((key) => key + 1)}
+          onDelete={(instance) => void deletePerBotVm(instance)}
+        />
+      )}
 
       {unavailable && (
         <Card>

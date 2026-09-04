@@ -4514,6 +4514,28 @@ describe("harness HTTP API", () => {
     expect(firstStatus.body.container_name).not.toBe(secondStatus.body.container_name);
     expect(firstStatus.body.workspace_path).not.toBe(secondStatus.body.workspace_path);
 
+    const inventory = await fetch(`${BASE}/api/local-computer/instances`);
+    expect(inventory.status).toBe(200);
+    expect(inventory.headers.get("cache-control")).toBe("private, no-store");
+    const inventoryBody = await inventory.json() as any;
+    expect(inventoryBody).toMatchObject({
+      maxInstances: 3,
+      instances: expect.any(Array),
+      available: expect.any(Boolean),
+    });
+    for (const instance of inventoryBody.instances) {
+      expect(Object.keys(instance).sort()).toEqual([
+        "botId",
+        "container",
+        "destination",
+        "inUse",
+        "name",
+        "problem",
+        "ready",
+      ]);
+    }
+    expect(JSON.stringify(inventoryBody)).not.toMatch(/viewer_url|workspace_path|container_name|target_key/);
+
     const invalid = await api("PATCH", "/api/config", { localVm: { maxInstances: 5 } });
     expect(invalid.status).toBe(400);
     expect(invalid.body.error).toContain("localVm.maxInstances");
