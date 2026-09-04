@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "./config.ts";
 import {
@@ -8,15 +8,18 @@ import {
   connectedServices,
   connectionMode,
   connectionStatus,
+  listToolkits,
   mcpIntegration,
   normalizeAccountAlias,
   prepareProjectSession,
   removeAccount,
   removeService,
+  relayMcp,
   setManagedBrokerAccess,
 } from "./composio.ts";
 
 let api: Server;
+let origin = "";
 let base = "";
 const calls: Array<{ method: string; path: string; query: string; body: any }> = [];
 let malformedConnectedAccounts = false;
@@ -35,6 +38,45 @@ beforeAll(async () => {
     const body = raw ? JSON.parse(raw) : null;
     calls.push({ method: req.method ?? "GET", path: url.pathname, query: url.search, body });
 
+    if (url.pathname.startsWith("/broker/")) {
+      if (req.headers.authorization !== `Bearer ${"a".repeat(64)}`) {
+        res.writeHead(401, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "invalid broker token" }));
+      }
+      if (req.method === "GET" && url.pathname === "/broker/v1/connectors") {
+        const services = Object.fromEntries(
+          (url.searchParams.get("services") ?? "").split(",").filter(Boolean).map((slug) => [
+            slug,
+            { connected: slug === "github", status: slug === "github" ? "ACTIVE" : "not_connected" },
+          ]),
+        );
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ services }));
+      }
+      if (req.method === "GET" && url.pathname === "/broker/v1/connectors/connected") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ services: { github: { connected: true, status: "ACTIVE" } } }));
+      }
+      if (req.method === "POST" && url.pathname.endsWith("/authorize")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ url: "https://connect.composio.dev/managed" }));
+      }
+      if (req.method === "DELETE" && url.pathname.startsWith("/broker/v1/connectors/")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ removed: 1 }));
+      }
+      if (req.method === "GET" && url.pathname === "/broker/v1/catalog") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ items: [{ slug: "github", name: "GitHub" }] }));
+      }
+      if (req.method === "POST" && url.pathname === "/broker/v1/mcp") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ source: "broker" }));
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: "unknown broker route" }));
+    }
+
     if (req.headers["x-api-key"] !== "ak_test") {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
@@ -48,6 +90,10 @@ beforeAll(async () => {
         mcp: { type: "http", url: "https://app.composio.dev/tool_router/v3/trs_test/mcp" },
         config: { user_id: body.user_id, multi_account: body.multi_account, auth_configs: sessionAuthConfigs },
       }));
+    }
+    if (req.method === "GET" && url.pathname === "/api/v3/toolkits") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ items: [{ slug: "x", name: "X (Twitter)" }, { slug: "github", name: "GitHub" }] }));
     }
     if (req.method === "GET" && url.pathname === "/api/v3.1/tool_router/session/trs_test") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -146,13 +192,16 @@ beforeAll(async () => {
     res.end(JSON.stringify({ error: "not found" }));
   });
   await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
-  base = `http://127.0.0.1:${(api.address() as { port: number }).port}/api/v3.1`;
+  origin = `http://127.0.0.1:${(api.address() as { port: number }).port}`;
+  base = `${origin}/api/v3.1`;
   process.env.OMB_COMPOSIO_API = base;
+  process.env.OMB_COMPOSIO_TOOLKITS_API = `${origin}/api/v3`;
 });
 
 afterAll(async () => {
   setManagedBrokerAccess(null);
   delete process.env.OMB_COMPOSIO_API;
+  delete process.env.OMB_COMPOSIO_TOOLKITS_API;
   await new Promise<void>((resolve) => api.close(() => resolve()));
 });
 
@@ -205,6 +254,111 @@ describe.sequential("Composio Sessions", () => {
     expect(applyManagedBrokerMessage({ type: messageType, access: null })).toBe(true);
     expect(connectionMode({})).toBe("unavailable");
   });
+
+  it("uses a user-owned project for every connector operation even when the managed broker is available", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    setManagedBrokerAccess({ url: `${origin}/broker`, token: "a".repeat(64) });
+    const before = calls.length;
+    const realFetch = globalThis.fetch;
+    const mcpRequests: Array<{ url: string; apiKey: string | null }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+      if (url.startsWith("https://app.composio.dev/tool_router/")) {
+        mcpRequests.push({ url, apiKey: new Headers(init?.headers).get("x-api-key") });
+        return new Response(JSON.stringify({ source: "project" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "mcp-session-id": "mcp_project" },
+        });
+      }
+      return realFetch(input, init);
+    });
+
+    try {
+      expect(connectionMode(cfg)).toBe("self-hosted");
+      await expect(listToolkits(cfg)).resolves.toMatchObject({
+        source: "api",
+        cards: [{ slug: "twitter" }, { slug: "github" }],
+      });
+      await expect(connectedServices(cfg)).resolves.toHaveProperty("github.connected", true);
+      await expect(connectionStatus(cfg, ["slack"])).resolves.toHaveProperty("slack.connected", false);
+      await expect(authorizeService(cfg, "slack")).resolves.toEqual({
+        url: "https://connect.composio.dev/link/slack",
+      });
+      await expect(removeAccount(cfg, "github", "ca_github_personal")).resolves.toEqual({ removed: 1 });
+      await expect(removeService(cfg, "github")).resolves.toEqual({ removed: 1 });
+      const relayed = await relayMcp(cfg, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+      expect(JSON.parse(new TextDecoder().decode(relayed.bytes))).toEqual({ source: "project" });
+      expect(relayed.transportSessionId).toBe("mcp_project");
+
+      expect(mcpRequests).toEqual([{
+        url: "https://app.composio.dev/tool_router/v3/trs_test/mcp",
+        apiKey: "ak_test",
+      }]);
+      const since = calls.slice(before);
+      expect(since.some((call) => call.path === "/api/v3.1/tool_router/session/trs_test")).toBe(true);
+      expect(since.some((call) => call.path.startsWith("/broker/"))).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("accepts the legacy x alias but authorizes Composio's twitter toolkit", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    sessionAuthConfigs = { twitter: "ac_twitter" };
+    setManagedBrokerAccess({ url: `${origin}/broker`, token: "a".repeat(64) });
+    const before = calls.length;
+    try {
+      await expect(authorizeService(cfg, "x")).resolves.toEqual({
+        url: "https://connect.composio.dev/link/twitter",
+      });
+      await expect(connectionStatus(cfg, ["x"])).resolves.toHaveProperty("x.connected", false);
+      await expect(removeService(cfg, "x")).resolves.toEqual({ removed: 0 });
+      const catalog = await listToolkits(cfg);
+      expect(catalog.cards).toContainEqual(expect.objectContaining({ slug: "twitter" }));
+
+      const since = calls.slice(before);
+      expect(since.filter((call) => call.method === "POST" && call.path.endsWith("/link")).at(-1)?.body).toEqual({
+        toolkit: "twitter",
+      });
+      expect(since.some((call) => call.query.includes("toolkits=twitter"))).toBe(true);
+      expect(since.some((call) => call.path.startsWith("/broker/"))).toBe(false);
+    } finally {
+      sessionAuthConfigs = {};
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("falls back to the managed broker immediately after the project key is cleared", async () => {
+    const cfg: AppConfig = { composio: { apiKey: "" } };
+    setManagedBrokerAccess({ url: `${origin}/broker`, token: "a".repeat(64) });
+    const before = calls.length;
+    try {
+      expect(connectionMode(cfg)).toBe("managed");
+      await expect(connectionStatus(cfg, ["github"])).resolves.toHaveProperty("github.connected", true);
+      await expect(authorizeService(cfg, "github")).resolves.toEqual({
+        url: "https://connect.composio.dev/managed",
+      });
+      await expect(listToolkits(cfg)).resolves.toMatchObject({ source: "api", cards: [{ slug: "github" }] });
+      const relayed = await relayMcp(cfg, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+      expect(JSON.parse(new TextDecoder().decode(relayed.bytes))).toEqual({ source: "broker" });
+
+      const brokerCalls = calls.slice(before).filter((call) => call.path.startsWith("/broker/"));
+      expect(brokerCalls.map((call) => `${call.method} ${call.path}`)).toEqual([
+        "GET /broker/v1/connectors",
+        "POST /broker/v1/connectors/github/authorize",
+        "GET /broker/v1/catalog",
+        "POST /broker/v1/mcp",
+      ]);
+    } finally {
+      setManagedBrokerAccess(null);
+    }
+  });
+
   it("accepts only project API keys", async () => {
     await expect(prepareProjectSession("old_key")).rejects.toThrow(/start with ak_/i);
     await expect(prepareProjectSession("ak_wrong")).rejects.toThrow(/invalid project key/i);
