@@ -3,8 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CloudComputersCard,
   LocalVmInventoryCard,
+  cloudComputerInventoryState,
   localVmInventoryState,
+  type CloudComputerInventoryInstance,
   type LocalVmInventoryInstance,
 } from "./LocalComputerSection";
 
@@ -15,6 +18,16 @@ const cloudVm: LocalVmInventoryInstance = {
   container: "running",
   ready: true,
   problem: null,
+  inUse: false,
+};
+
+const ownedCloudComputer: CloudComputerInventoryInstance = {
+  boxId: "provider-id-must-not-render",
+  name: "ogb-current0-a1b2c3",
+  state: "ready",
+  ownerBotId: "current-owner",
+  ownerName: "Research",
+  orphaned: false,
   inUse: false,
 };
 
@@ -73,5 +86,81 @@ describe("Local VM inventory UI", () => {
     expect(markup).toContain("Inventory unavailable");
     expect(markup).toContain("Start docker first");
     expect(markup).not.toContain("No per-bot desktops have been created");
+  });
+});
+
+describe("cloud computer inventory UI", () => {
+  const renderCard = (overrides: Partial<Parameters<typeof CloudComputersCard>[0]> = {}) =>
+    renderToStaticMarkup(createElement(CloudComputersCard, {
+      instances: [],
+      configured: true,
+      loading: false,
+      pending: null,
+      error: null,
+      unavailableReason: null,
+      onRefresh: vi.fn(),
+      onSleep: vi.fn(),
+      onDelete: vi.fn(),
+      ...overrides,
+    }));
+
+  it("shows owners, orphans, lifecycle state and only the sanitized machine name", () => {
+    const markup = renderCard({
+      instances: [
+        ownedCloudComputer,
+        {
+          boxId: "another-provider-id",
+          name: "ogb-orphaned-abcdef",
+          state: "archived",
+          ownerBotId: null,
+          ownerName: null,
+          orphaned: true,
+          inUse: false,
+        },
+      ],
+    });
+
+    expect(markup).toContain("Research");
+    expect(markup).toContain("Owned by this bot");
+    expect(markup).toContain("Orphaned computer");
+    expect(markup).toContain("Its bot no longer exists");
+    expect(markup).toContain("Running");
+    expect(markup).toContain("Sleeping");
+    expect(markup).toContain("ogb-current0-a1b2c3");
+    expect(markup).not.toMatch(/provider-id-must-not-render|another-provider-id|desktopUrl|password|token=/);
+  });
+
+  it("disables destructive actions while the owner is working", () => {
+    const markup = renderCard({ instances: [{ ...ownedCloudComputer, inUse: true }] });
+
+    expect(markup).toContain("In use");
+    expect(markup).toContain("Stop this bot&#x27;s work before changing its computer.");
+    expect(markup.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it("keeps disconnected, unavailable, and empty states distinct", () => {
+    const disconnected = renderCard({ configured: false });
+    expect(disconnected).toContain("Box is not connected");
+    expect(disconnected).not.toContain("No OpenMaus-managed cloud computers found");
+
+    const unavailable = renderCard({ unavailableReason: "ascii.dev is unavailable" });
+    expect(unavailable).toContain("ascii.dev is unavailable");
+    expect(unavailable).not.toContain("No OpenMaus-managed cloud computers found");
+
+    const endpointFailure = renderCard({ configured: null, unavailableReason: "Computer inventory could not load" });
+    expect(endpointFailure).toContain("Computer inventory could not load");
+    expect(endpointFailure).not.toContain("Box is not connected");
+
+    const empty = renderCard();
+    expect(empty).toContain("No OpenMaus-managed cloud computers found");
+  });
+
+  it("uses honest state labels", () => {
+    expect(cloudComputerInventoryState(ownedCloudComputer)).toBe("Running");
+    expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "archived" })).toBe("Sleeping");
+    expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "archiving" })).toBe("Going to sleep");
+    expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "provisioning" })).toBe("Starting");
+    expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "unknown" })).toBe("Needs attention");
+    expect(cloudComputerInventoryState({ ...ownedCloudComputer, inUse: true })).toBe("In use");
   });
 });

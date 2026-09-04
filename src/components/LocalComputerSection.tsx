@@ -4,8 +4,10 @@ import {
   AlertTriangle,
   Check,
   Circle,
+  Cloud,
   ExternalLink,
   Loader2,
+  Moon,
   RefreshCw,
   RotateCcw,
   Square,
@@ -70,6 +72,26 @@ interface LocalVmInventoryPayload {
   problem: string | null;
 }
 
+export interface CloudComputerInventoryInstance {
+  boxId: string;
+  name: string;
+  state: string;
+  ownerBotId: string | null;
+  ownerName: string | null;
+  orphaned: boolean;
+  inUse: boolean;
+}
+
+interface CloudComputerInventoryPayload {
+  configured: boolean;
+  available: boolean;
+  problem: string | null;
+  instances: CloudComputerInventoryInstance[];
+}
+
+type CloudAction = "sleep" | "delete";
+type PendingCloudAction = { boxId: string; action: CloudAction } | null;
+
 const destinationLabels: Record<LocalVmInventoryInstance["destination"], string> = {
   auto: "Auto",
   cloud: "Cloud",
@@ -84,6 +106,148 @@ export function localVmInventoryState(instance: LocalVmInventoryInstance): strin
   if (instance.container === "stopped") return "Stopped";
   if (instance.ready) return "Running";
   return "Needs attention";
+}
+
+export function cloudComputerInventoryState(instance: CloudComputerInventoryInstance): string {
+  if (instance.inUse) return "In use";
+  if (["archived", "stopped"].includes(instance.state)) return "Sleeping";
+  if (["archiving", "stopping"].includes(instance.state)) return "Going to sleep";
+  if (["idle", "ready", "running"].includes(instance.state)) return "Running";
+  if (["provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "Starting";
+  return "Needs attention";
+}
+
+function cloudComputerCanSleep(instance: CloudComputerInventoryInstance): boolean {
+  return ["idle", "ready", "running"].includes(instance.state);
+}
+
+export function CloudComputersCard({
+  instances,
+  configured,
+  loading,
+  pending,
+  error,
+  unavailableReason,
+  onRefresh,
+  onSleep,
+  onDelete,
+}: {
+  instances: CloudComputerInventoryInstance[];
+  configured: boolean | null;
+  loading: boolean;
+  pending: PendingCloudAction;
+  error: string | null;
+  unavailableReason: string | null;
+  onRefresh: () => void;
+  onSleep: (instance: CloudComputerInventoryInstance) => void;
+  onDelete: (instance: CloudComputerInventoryInstance) => void;
+}) {
+  return (
+    <Card
+      title="Cloud computers"
+      subtitle="Persistent OpenMaus-managed Box desktops. Sleeping pauses compute use; deleting permanently erases that desktop and its files."
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[12px] text-ink-secondary">
+          {configured === true
+            ? "Includes computers left behind by deleted bots so they can still be cleaned up."
+            : configured === false
+              ? "Add a Box API key in Connections to create and manage cloud computers."
+              : "Refresh to check the OpenMaus-managed computers in your Box account."}
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading || pending !== null}
+          aria-label="Refresh cloud computers"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
+        >
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+        </button>
+      </div>
+
+      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+
+      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+        {loading && instances.length === 0 ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <Loader2 size={13} className="animate-spin" /> Checking cloud computers…
+          </div>
+        ) : unavailableReason ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <AlertTriangle size={14} className="shrink-0 text-warning" /> {unavailableReason}
+          </div>
+        ) : configured === false ? (
+          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
+            <Cloud size={14} className="shrink-0" /> Box is not connected.
+          </div>
+        ) : instances.length === 0 ? (
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">No OpenMaus-managed cloud computers found.</div>
+        ) : instances.map((instance, index) => {
+          const state = cloudComputerInventoryState(instance);
+          const isPending = pending?.boxId === instance.boxId;
+          const canSleep = cloudComputerCanSleep(instance);
+          return (
+            <div
+              key={instance.boxId}
+              className={cn(
+                "flex items-start justify-between gap-3 px-3 py-3",
+                index > 0 && "border-t border-hairline/35",
+              )}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-[13.5px] font-medium text-ink">
+                    {instance.orphaned ? "Orphaned computer" : instance.ownerName}
+                  </span>
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[11px]",
+                      instance.inUse || state === "Running"
+                        ? "bg-success/15 text-success"
+                        : state === "Sleeping" || state === "Going to sleep"
+                          ? "bg-control text-ink-secondary"
+                          : "bg-warning/15 text-warning",
+                    )}
+                  >
+                    {state}
+                  </span>
+                </div>
+                <div className="mt-1 break-all text-[11.5px] text-ink-secondary">
+                  {instance.orphaned ? "Its bot no longer exists" : "Owned by this bot"} · {instance.name}
+                </div>
+                {instance.inUse && (
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's work before changing its computer.</div>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onSleep(instance)}
+                  disabled={instance.inUse || pending !== null || !canSleep}
+                  title={canSleep ? "Put this cloud computer to sleep" : `This cloud computer is ${state.toLowerCase()}`}
+                  className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isPending && pending?.action === "sleep" ? <Loader2 size={12} className="animate-spin" /> : <Moon size={12} />}
+                  Sleep
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDelete(instance)}
+                  disabled={instance.inUse || pending !== null}
+                  title="Permanently delete this cloud computer"
+                  className="flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isPending && pending?.action === "delete" ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
 export function LocalVmInventoryCard({
@@ -254,6 +418,13 @@ export function LocalComputerSection() {
   const [inventoryUnavailableReason, setInventoryUnavailableReason] = useState<string | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
+  const [cloudInventory, setCloudInventory] = useState<CloudComputerInventoryInstance[]>([]);
+  const [cloudConfigured, setCloudConfigured] = useState<boolean | null>(null);
+  const [cloudLoading, setCloudLoading] = useState(true);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudUnavailableReason, setCloudUnavailableReason] = useState<string | null>(null);
+  const [cloudPending, setCloudPending] = useState<PendingCloudAction>(null);
+  const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/local-computer", { signal });
@@ -272,6 +443,21 @@ export function LocalComputerSection() {
     setInventoryMax(payload.maxInstances);
     setInventoryUnavailableReason(payload.available ? null : (payload.problem ?? "Container runtime unavailable"));
     setInventoryError(null);
+  }, []);
+
+  const refreshCloudInventory = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/computers/boxes", { signal });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `Cloud inventory request failed (${response.status})`);
+    const payload = body as CloudComputerInventoryPayload;
+    setCloudInventory(Array.isArray(payload.instances) ? payload.instances : []);
+    setCloudConfigured(payload.configured === true);
+    setCloudUnavailableReason(
+      payload.available || !payload.configured
+        ? null
+        : (payload.problem ?? "Cloud computer inventory is unavailable"),
+    );
+    setCloudError(null);
   }, []);
 
   useEffect(() => {
@@ -323,6 +509,24 @@ export function LocalComputerSection() {
       });
     return () => controller.abort();
   }, [inventoryRefreshKey, refreshInventory, status?.mode]);
+
+  // Box account listing is deliberately not polled. It can be expensive and
+  // Settings must remain an observation-only surface until the person clicks
+  // Sleep or Delete.
+  useEffect(() => {
+    const controller = new AbortController();
+    setCloudLoading(true);
+    void refreshCloudInventory(controller.signal)
+      .catch((e) => {
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          setCloudUnavailableReason(e instanceof Error ? e.message : String(e));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCloudLoading(false);
+      });
+    return () => controller.abort();
+  }, [cloudRefreshKey, refreshCloudInventory]);
 
   const post = async (action: Exclude<Action, "recreate">) => {
     const response = await fetch(`/api/local-computer/${action}`, {
@@ -403,6 +607,31 @@ export function LocalComputerSection() {
     }
   };
 
+  const actOnCloudComputer = async (action: CloudAction, instance: CloudComputerInventoryInstance) => {
+    if (
+      action === "delete" &&
+      !window.confirm(
+        `Permanently delete ${instance.orphaned ? "this orphaned cloud computer" : `${instance.ownerName}'s cloud computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
+      )
+    ) return;
+    setCloudPending({ boxId: instance.boxId, action });
+    setCloudError(null);
+    try {
+      const response = await fetch(`/api/computers/boxes/${encodeURIComponent(instance.boxId)}/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(action === "delete" ? { confirmName: instance.name } : {}),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? `Could not ${action} this cloud computer`);
+      await refreshCloudInventory();
+    } catch (e) {
+      setCloudError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCloudPending(null);
+    }
+  };
+
   const c = status?.commands;
   const ready = status?.ready === true;
   const existing = status?.container !== "missing";
@@ -423,6 +652,18 @@ export function LocalComputerSection() {
 
   return (
     <>
+      <CloudComputersCard
+        instances={cloudInventory}
+        configured={cloudConfigured}
+        loading={cloudLoading}
+        pending={cloudPending}
+        error={cloudError}
+        unavailableReason={cloudUnavailableReason}
+        onRefresh={() => setCloudRefreshKey((key) => key + 1)}
+        onSleep={(instance) => void actOnCloudComputer("sleep", instance)}
+        onDelete={(instance) => void actOnCloudComputer("delete", instance)}
+      />
+
       <Card
         title="Local VM"
         subtitle={perBot

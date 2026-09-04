@@ -21,8 +21,52 @@ import {
 // overridable so tests can point at a stub instead of the live provider
 const BOX_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
 const READY = new Set(["idle", "ready", "running"]);
+const SLEEPING = new Set(["archived", "archiving", "stopped", "stopping"]);
 const DEFAULT_BOX_TTL_SECONDS = 8 * 60 * 60;
 const TRIAL_BOX_TTL_SECONDS = 2 * 60 * 60;
+const BOX_INVENTORY_PAGE_SIZE = 200;
+// Current self-serve accounts top out below 2,000 boxes. Keep the walk
+// bounded anyway: a broken or adversarial cursor must not hold Settings open.
+const MAX_BOX_INVENTORY_PAGES = 10;
+const MANAGED_BOX_NAME = /^ogb-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
+const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const BOX_STATES = new Set([
+  "idle",
+  "ready",
+  "running",
+  "archived",
+  "archiving",
+  "stopped",
+  "stopping",
+  "provisioning",
+  "provisioned",
+  "cloning",
+  "starting",
+  "error",
+]);
+
+export interface ManagedBoxOwner {
+  botId: string;
+  name: string;
+  inUse: boolean;
+}
+
+export interface ManagedBoxInventoryInstance {
+  boxId: string;
+  name: string;
+  state: string;
+  ownerBotId: string | null;
+  ownerName: string | null;
+  orphaned: boolean;
+  inUse: boolean;
+}
+
+export interface ManagedBoxInventory {
+  configured: boolean;
+  available: boolean;
+  problem: string | null;
+  instances: ManagedBoxInventoryInstance[];
+}
 
 export type BoxTurnLifecycleAction = "attach" | "provision" | "wake" | "none";
 
@@ -61,7 +105,7 @@ async function boxJson(cfg: AppConfig, path: string, opts: RequestInit = {}) {
 }
 
 // deterministic per-bot name; the hash kills truncated-uuid collisions
-async function boxNameFor(botId: string) {
+export async function boxNameFor(botId: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(botId));
   const hash = [...new Uint8Array(digest)]
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -123,6 +167,195 @@ async function waitReady(cfg: AppConfig, boxId: string, budgetMs = 90_000) {
 // whenever the direct read fails (deleted/renamed box) and always carries
 // the live state so callers can still see "archived".
 const boxIdCache = new Map<string, string>();
+
+function boxInventoryProblem(status: number, body: any): string {
+  if (status === 401 || status === 403) {
+    return "ascii.dev rejected the Box API key — update it in Settings → Connections";
+  }
+  if (status === 429) return "ascii.dev is rate-limiting this account — wait a minute and refresh";
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  return message ? `ascii.dev could not list cloud computers: ${message}` : `ascii.dev could not list cloud computers (${status})`;
+}
+
+function safeBoxState(value: unknown): string {
+  if (typeof value !== "string") return "unknown";
+  const state = value.toLowerCase();
+  return BOX_STATES.has(state) ? state : "unknown";
+}
+
+async function listBoxPages(
+  cfg: AppConfig,
+): Promise<{ ok: true; boxes: any[] } | { ok: false; problem: string }> {
+  const boxes: any[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+
+  for (let page = 0; page < MAX_BOX_INVENTORY_PAGES; page += 1) {
+    const path = `/boxes?limit=${BOX_INVENTORY_PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    let listed: Awaited<ReturnType<typeof boxJson>>;
+    try {
+      listed = await boxJson(cfg, path, { signal: AbortSignal.timeout(20_000) });
+    } catch {
+      return { ok: false, problem: "Could not reach ascii.dev to list cloud computers — check your connection and refresh" };
+    }
+    if (!listed.ok || !Array.isArray(listed.body?.boxes)) {
+      return { ok: false, problem: boxInventoryProblem(listed.status, listed.body) };
+    }
+    boxes.push(...listed.body.boxes);
+
+    const next = listed.body?.pageInfo?.nextCursor;
+    if (next === undefined || next === null || next === "") return { ok: true, boxes };
+    if (typeof next !== "string" || next.length > 4_096) {
+      return { ok: false, problem: "ascii.dev returned an invalid cloud computer page cursor" };
+    }
+    if (seenCursors.has(next)) {
+      return { ok: false, problem: "ascii.dev repeated a cloud computer page cursor — refresh and try again" };
+    }
+    seenCursors.add(next);
+    cursor = next;
+  }
+
+  return { ok: false, problem: "ascii.dev returned too many cloud computer pages — narrow the account inventory and refresh" };
+}
+
+/**
+ * One read-only account listing for Settings and deletion guards. Only boxes
+ * carrying OpenMausBot's exact deterministic name shape leave this boundary;
+ * provider desktop links, IPs, environment details and other raw fields never
+ * reach the renderer. An unmatched managed name is an orphan left by a bot
+ * that no longer exists.
+ */
+export async function listManagedBoxes(
+  cfg: AppConfig,
+  owners: ManagedBoxOwner[],
+): Promise<ManagedBoxInventory> {
+  if (!boxConfigured(cfg)) {
+    return { configured: false, available: false, problem: null, instances: [] };
+  }
+
+  const listed = await listBoxPages(cfg);
+  if (!listed.ok) {
+    return {
+      configured: true,
+      available: false,
+      problem: listed.problem,
+      instances: [],
+    };
+  }
+
+  const namedOwners = await Promise.all(owners.map(async (owner) => [await boxNameFor(owner.botId), owner] as const));
+  const ownerByName = new Map<string, ManagedBoxOwner>(namedOwners);
+  const instances: ManagedBoxInventoryInstance[] = [];
+  const seenBoxIds = new Set<string>();
+  for (const candidate of listed.boxes) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const boxId = typeof candidate.id === "string" ? candidate.id : "";
+    const name = typeof candidate.name === "string" ? candidate.name : "";
+    if (!BOX_ID.test(boxId) || !MANAGED_BOX_NAME.test(name) || seenBoxIds.has(boxId)) continue;
+    seenBoxIds.add(boxId);
+    const owner = ownerByName.get(name) ?? null;
+    instances.push({
+      boxId,
+      name,
+      state: safeBoxState(candidate.state),
+      ownerBotId: owner?.botId ?? null,
+      ownerName: owner?.name ?? null,
+      orphaned: owner === null,
+      inUse: owner?.inUse ?? false,
+    });
+  }
+  instances.sort((a, b) => {
+    if (a.orphaned !== b.orphaned) return a.orphaned ? 1 : -1;
+    return (a.ownerName ?? a.name).localeCompare(b.ownerName ?? b.name);
+  });
+  return { configured: true, available: true, problem: null, instances };
+}
+
+function inventoryFailure(inventory: ManagedBoxInventory): Error & { status: number } {
+  const error = new Error(
+    inventory.configured
+      ? (inventory.problem ?? "Cloud computer inventory is unavailable")
+      : "Box is not configured — add its API key in Settings → Connections",
+  ) as Error & { status: number };
+  error.status = inventory.configured ? 503 : 409;
+  return error;
+}
+
+async function revalidateManagedBox(
+  cfg: AppConfig,
+  owners: ManagedBoxOwner[],
+  boxId: string,
+): Promise<ManagedBoxInventoryInstance> {
+  if (!BOX_ID.test(boxId)) throw Object.assign(new Error("invalid cloud computer id"), { status: 400 });
+  const inventory = await listManagedBoxes(cfg, owners);
+  if (!inventory.available) throw inventoryFailure(inventory);
+  const instance = inventory.instances.find((candidate) => candidate.boxId === boxId);
+  if (!instance) {
+    throw Object.assign(new Error("that OpenMaus-managed cloud computer no longer exists"), { status: 404 });
+  }
+  return instance;
+}
+
+const QUIESCE_BROWSER = [
+  'for name in chrome google-chrome chromium chromium-browser; do pid=$(pgrep -o -x "$name" 2>/dev/null || true); [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true; done',
+  'for i in 1 2 3 4 5 6 7 8; do if ! pgrep -x chrome >/dev/null 2>&1 && ! pgrep -x google-chrome >/dev/null 2>&1 && ! pgrep -x chromium >/dev/null 2>&1 && ! pgrep -x chromium-browser >/dev/null 2>&1; then break; fi; sleep 0.25; done',
+].join("; ");
+
+async function stopBox(cfg: AppConfig, boxId: string): Promise<void> {
+  // Browser shutdown is best-effort, but the provider stop is not: Settings
+  // must never say a computer is sleeping when ascii.dev rejected the action.
+  await runCommand(cfg, boxId, QUIESCE_BROWSER, { timeoutMs: 5_000 }).catch(() => null);
+  const stopped = await boxJson(cfg, `/boxes/${boxId}/stop`, { method: "POST" });
+  if (!stopped.ok) throw Object.assign(new Error(boxErrorMessage(stopped.status, "box sleep", stopped.body)), { status: stopped.status });
+}
+
+function forgetBoxId(boxId: string): void {
+  for (const [botId, cachedId] of boxIdCache) {
+    if (cachedId === boxId) boxIdCache.delete(botId);
+  }
+}
+
+/** Explicit Settings action. Re-listing prevents a stale row from targeting a
+ * renamed or foreign provider resource. This never wakes or joins a Box. */
+export async function sleepManagedBox(cfg: AppConfig, owners: ManagedBoxOwner[], boxId: string) {
+  const instance = await revalidateManagedBox(cfg, owners, boxId);
+  if (instance.inUse) {
+    throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
+  }
+  if (!SLEEPING.has(instance.state) && !READY.has(instance.state)) {
+    throw Object.assign(new Error(`this cloud computer cannot sleep while it is ${instance.state}`), { status: 409 });
+  }
+  if (!SLEEPING.has(instance.state)) await stopBox(cfg, instance.boxId);
+  forgetBoxId(instance.boxId);
+  return { ok: true };
+}
+
+/** Permanent Settings action. The caller must echo the exact freshly-listed
+ * machine name as well as its id; ascii.dev independently requires the id in
+ * its confirmation header. */
+export async function deleteManagedBox(
+  cfg: AppConfig,
+  owners: ManagedBoxOwner[],
+  boxId: string,
+  confirmName: string,
+) {
+  const instance = await revalidateManagedBox(cfg, owners, boxId);
+  if (instance.inUse) {
+    throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
+  }
+  if (confirmName !== instance.name) {
+    throw Object.assign(new Error("cloud computer confirmation no longer matches — refresh and try again"), { status: 409 });
+  }
+  const removed = await boxJson(cfg, `/boxes/${instance.boxId}`, {
+    method: "DELETE",
+    headers: { "X-Ascii-Confirm-Delete": instance.boxId },
+  });
+  if (!removed.ok) {
+    throw Object.assign(new Error(boxErrorMessage(removed.status, "box delete", removed.body)), { status: removed.status });
+  }
+  forgetBoxId(instance.boxId);
+  return { ok: true };
+}
 
 export async function findBox(cfg: AppConfig, botId: string) {
   const cachedId = boxIdCache.get(botId);
@@ -314,15 +547,8 @@ export async function joinBox(cfg: AppConfig, botId: string) {
 export async function sleepBox(cfg: AppConfig, botId: string) {
   const box = await findBox(cfg, botId);
   if (!box) throw new Error("no computer for this bot");
-  // Ask the browser's oldest (main) process to exit before the provider
-  // snapshots the disk. This gives Chrome a chance to flush cookies and
-  // session state instead of restoring a crash-marked profile next wake.
-  const quiesceBrowser = [
-    'for name in chrome google-chrome chromium chromium-browser; do pid=$(pgrep -o -x "$name" 2>/dev/null || true); [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true; done',
-    'for i in 1 2 3 4 5 6 7 8; do if ! pgrep -x chrome >/dev/null 2>&1 && ! pgrep -x google-chrome >/dev/null 2>&1 && ! pgrep -x chromium >/dev/null 2>&1 && ! pgrep -x chromium-browser >/dev/null 2>&1; then break; fi; sleep 0.25; done',
-  ].join("; ");
-  await runCommand(cfg, box.id, quiesceBrowser, { timeoutMs: 5_000 }).catch(() => null);
-  await boxJson(cfg, `/boxes/${box.id}/stop`, { method: "POST" }).catch(() => {});
+  await stopBox(cfg, box.id);
+  forgetBoxId(box.id);
   return { ok: true };
 }
 
