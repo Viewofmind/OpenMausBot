@@ -2417,6 +2417,7 @@ const delegationWatch = new Map<string, {
   toBotName?: string;
   taskId?: string;
   sourceThreadId?: string;
+  sourceBotId?: string;
   /** when the delegated turn was dispatched — elapsed time for status checks */
   startedAtMs?: number;
 }>();
@@ -2529,46 +2530,102 @@ function finalizeDelegationWatch(
   }
   const target = store.bot(watched.toBotId);
   const targetName = target?.name ?? watched.toBotName ?? watched.toBotId;
-  const source = watched.sourceThreadId ? store.botByThread(watched.sourceThreadId) : undefined;
+  const source = watched.sourceBotId
+    ? store.bot(watched.sourceBotId)
+    : (watched.sourceThreadId ? store.botByThread(watched.sourceThreadId) : undefined);
+
+  let channel: GroupRecord | undefined = watched.channelId ? store.group(watched.channelId) : undefined;
+  let terminalThreadId: string | undefined = watched.sourceThreadId;
+
   if (source && watched.sourceThreadId) {
-    if (ok && reply.trim()) {
-      const sourceReply: Omit<Message, "id" | "at"> = {
-        role: "bot",
-        kind: "text",
-        text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
-      };
-      if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
-      store.appendMessage(watched.sourceThreadId, sourceReply);
+    const sourceGroup = store.groupByThread(watched.sourceThreadId);
+    if (sourceGroup) {
+      // Shared-channel (or DM) source: revalidate membership, since a roster
+      // change while the target ran must not force a result into a group
+      // that no longer contains both bots.
+      const sourceStillMember = sourceGroup.memberIds.includes(source.id);
+      const targetStillMember = target ? sourceGroup.memberIds.includes(target.id) : false;
+      if (!sourceStillMember || !targetStillMember) {
+        if (target) {
+          channel = getOrCreateChannel(store, source, target);
+          terminalThreadId = channel.threadId;
+        } else {
+          // Target is gone: the source may still see the original group, but
+          // there is no peer to share a DM with. Keep the group for source.
+          terminalThreadId = sourceStillMember ? watched.sourceThreadId : undefined;
+          channel = undefined;
+        }
+      }
+      if (terminalThreadId) {
+        if (ok && reply.trim()) {
+          const sourceReply: Omit<Message, "id" | "at"> = {
+            role: "bot",
+            kind: "text",
+            text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
+          };
+          if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
+          store.appendMessage(terminalThreadId, sourceReply);
+        } else {
+          store.appendMessage(terminalThreadId, {
+            role: "bot",
+            kind: "activity",
+            tool: {
+              name: ok
+                ? `Delegation to @${targetName} completed without a text reply`
+                : `Delegation to @${targetName} failed — ${failureName}`,
+              ok,
+            },
+          });
+        }
+        if (channel && terminalThreadId === channel.threadId && !channel.dm) {
+          store.patchGroup(channel.id, { unread: true });
+        }
+      }
+      // Group/DM sources do not have a single direct task to mark or wake.
+      // The delegated result is already in the shared transcript; a group
+      // continuation is the responsibility of the room's own turn engine.
     } else {
-      store.appendMessage(watched.sourceThreadId, {
-        role: "bot",
-        kind: "activity",
-        tool: {
-          name: ok
-            ? `Delegation to @${targetName} completed without a text reply`
-            : `Delegation to @${targetName} failed — ${failureName}`,
-          ok,
-        },
-      });
-    }
-    markTaskContextExternallyUpdated(source, watched.sourceThreadId);
-    // Peer wake: a settled delegated turn resumes the source bot so it
-    // folds the result in and answers the user, instead of sitting idle
-    // with the reply only visible in the thread (the "delegated and went
-    // silent" gap). Failures wake it too — the user must hear the task did
-    // not finish. Idle-checked and burst-capped so a busy source or a
-    // re-delegating loop cannot spin up runs.
-    if (ok && reply.trim()) {
-      wakeDelegationSource(source, watched.sourceThreadId, targetName);
-    } else if (!ok) {
-      wakeDelegationSource(source, watched.sourceThreadId, targetName, failureName || "the delegated turn did not finish");
+      // 1:1 source: the source thread is the delegating bot's own task.
+      if (ok && reply.trim()) {
+        const sourceReply: Omit<Message, "id" | "at"> = {
+          role: "bot",
+          kind: "text",
+          text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
+        };
+        if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
+        store.appendMessage(watched.sourceThreadId, sourceReply);
+      } else {
+        store.appendMessage(watched.sourceThreadId, {
+          role: "bot",
+          kind: "activity",
+          tool: {
+            name: ok
+              ? `Delegation to @${targetName} completed without a text reply`
+              : `Delegation to @${targetName} failed — ${failureName}`,
+            ok,
+          },
+        });
+      }
+      markTaskContextExternallyUpdated(source, watched.sourceThreadId);
+      // Peer wake: a settled delegated turn resumes the source bot so it
+      // folds the result in and answers the user, instead of sitting idle
+      // with the reply only visible in the thread (the "delegated and went
+      // silent" gap). Failures wake it too — the user must hear the task did
+      // not finish. Idle-checked and burst-capped so a busy source or a
+      // re-delegating loop cannot spin up runs.
+      if (ok && reply.trim()) {
+        wakeDelegationSource(source, watched.sourceThreadId, targetName);
+      } else if (!ok) {
+        wakeDelegationSource(source, watched.sourceThreadId, targetName, failureName || "the delegated turn did not finish");
+      }
     }
   }
-  const channel = watched.channelId ? store.group(watched.channelId) : undefined;
-  if (!target || !channel) return true;
-  if (ok && reply.trim()) mirrorReply(commsBus, target, reply, channel);
-  else if (ok) mirrorActivity(commsBus, target, channel, "Delegated turn completed", true);
-  else mirrorActivity(commsBus, target, channel, failureName, false);
+
+  if (target && channel) {
+    if (ok && reply.trim()) mirrorReply(commsBus, target, reply, channel);
+    else if (ok) mirrorActivity(commsBus, target, channel, "Delegated turn completed", true);
+    else mirrorActivity(commsBus, target, channel, failureName, false);
+  }
   return true;
 }
 
@@ -2607,7 +2664,7 @@ bus.subscribe((event: RuntimeEvent) => {
 /** How a drained delegation becomes a real turn on the target. Shared by
  * the settle-time drain and the boot-time drain of what a previous process
  * left queued. */
-const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, text, commsDepth, sourceThreadId, channel, taskId) => {
+const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, text, commsDepth, sourceThreadId, channel, taskId, sourceBotId) => {
     // startTurn REJECTS on an ordinary condition — busy target, deleted bot,
     // unavailable provider. Unhandled, that rejection is fatal to the
     // harness (Node's default), which in the packaged app kills the server
@@ -2621,6 +2678,7 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, text,
         toBotName: target?.name,
         taskId,
         sourceThreadId,
+        sourceBotId,
         startedAtMs: Date.now(),
       });
     }
@@ -2649,7 +2707,7 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, text,
     };
     return startTurn(toBotId, text, {
       commsDepth,
-      unattended: isUnattended(store.botByThread(sourceThreadId)?.id),
+      unattended: isUnattended(sourceBotId),
       // startTurn schedules provider/integration setup after marking the bot
       // busy. Those asynchronous setup failures do not emit turn.completed,
       // so clear the watch and report them through this callback too.
@@ -6309,6 +6367,7 @@ const server = createServer(async (req, res) => {
             toBotName: currentTarget.name,
             taskId,
             sourceThreadId: fromThreadId,
+            sourceBotId: currentFrom.id,
           });
           store.appendMessage(fromThreadId, {
             role: "bot",
@@ -6339,7 +6398,7 @@ const server = createServer(async (req, res) => {
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
         const fromThreadId = String(url.searchParams.get("fromThreadId") ?? "");
         const from = store.bot(fromBotId);
-        if (!from || !store.taskByThread(from.id, fromThreadId)) return json(res, 403, { error: "unknown sender" });
+        if (!from || !connectorThread(from.id, fromThreadId)) return json(res, 403, { error: "unknown sender" });
         const waitMs = Math.min(Math.max(Number(url.searchParams.get("wait_ms")) || 0, 0), 240_000);
         const deadline = Date.now() + waitMs;
         // Bounded long-poll: the delegating bot parks ONE cheap HTTP request
@@ -6396,7 +6455,7 @@ const server = createServer(async (req, res) => {
           return json(res, 403, { error: "that bot belongs to a different section" });
         }
         const fromThreadId = String(body.fromThreadId ?? from.threadId);
-        if (!store.taskByThread(from.id, fromThreadId)) {
+        if (!connectorThread(from.id, fromThreadId)) {
           return json(res, 403, { error: "source thread does not belong to sender" });
         }
         const queued = queueDelegation(
@@ -6637,14 +6696,14 @@ const server = createServer(async (req, res) => {
         }))
         .sort((a, b) => b.lastAt - a.lastAt);
       const queued = pendingDelegationSnapshot().flatMap((item) => {
-        const source = store.botByThread(item.sourceThreadId);
-        if (!source || !visible.has(source.id) || !visible.has(item.toBotId)) return [];
-        return [{ sourceBotId: source.id, targetBotId: item.toBotId, reason: item.reason }];
+        if (!visible.has(item.sourceBotId) || !visible.has(item.toBotId)) return [];
+        return [{ sourceBotId: item.sourceBotId, targetBotId: item.toBotId, reason: item.reason }];
       });
       const running = [...delegationWatch.entries()].flatMap(([threadId, watch]) => {
         if (!visible.has(watch.toBotId)) return [];
         const channel = watch.channelId ? store.group(watch.channelId) : undefined;
-        const sourceBotId = channel?.memberIds.find((botId) => botId !== watch.toBotId);
+        const sourceBotId = watch.sourceBotId ??
+          channel?.memberIds.find((botId) => botId !== watch.toBotId);
         if (!sourceBotId || !visible.has(sourceBotId)) return [];
         return [{ sourceBotId, targetBotId: watch.toBotId, threadId, groupId: channel?.id }];
       });
