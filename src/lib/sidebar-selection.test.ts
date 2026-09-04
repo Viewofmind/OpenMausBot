@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { botListItemPointerIntent } from "./sidebar-selection";
 
 describe("botListItemPointerIntent", () => {
-  it("keeps the bot row selectable while its name is being edited", () => {
+  it.each(["avatar", "body", "right edge"])("selects the bot from its %s", () => {
     expect(botListItemPointerIntent("click", false)).toBe("select");
   });
 
