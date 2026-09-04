@@ -53,7 +53,7 @@ interface BotPatchQueueEntry {
   running: boolean;
   controller: AbortController | null;
   cancelled: boolean;
-  idleWaiters: Array<() => void>;
+  idleWaiters: Array<(bot: BotAnnouncement | null) => void>;
 }
 
 export interface BotPatchQueueOptions {
@@ -70,7 +70,9 @@ export interface BotPatchQueueOptions {
 
 export interface BotPatchQueue {
   enqueue: (botId: string, patch: BotUpdatePatch, fallback: BotAnnouncement) => void;
-  flush: (botId: string) => Promise<void>;
+  /** Wait for the lane to settle and return the server-authoritative bot.
+   * null means there was no queued write (or the lane was cancelled). */
+  flush: (botId: string) => Promise<BotAnnouncement | null>;
   overlayFor: (botId: string) => BotStatePatch;
   cancel: (botId: string) => void;
   /** Undo a dispose. Exists for React StrictMode, whose dev-mode mount probe
@@ -103,7 +105,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
   const settleIfIdle = (entry: BotPatchQueueEntry) => {
     if (entry.running || entry.timer !== null || hasFields(entry.pending)) return;
     entries.delete(entry.botId);
-    for (const resolve of entry.idleWaiters.splice(0)) resolve();
+    for (const resolve of entry.idleWaiters.splice(0)) resolve(entry.fallback);
   };
 
   const drain = async (entry: BotPatchQueueEntry): Promise<void> => {
@@ -179,12 +181,12 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
 
     flush(botId) {
       const entry = entries.get(botId);
-      if (!entry) return Promise.resolve();
+      if (!entry) return Promise.resolve(null);
       if (entry.timer !== null) {
         clearTimeout(entry.timer);
         entry.timer = null;
       }
-      const idle = new Promise<void>((resolve) => entry.idleWaiters.push(resolve));
+      const idle = new Promise<BotAnnouncement | null>((resolve) => entry.idleWaiters.push(resolve));
       void drain(entry);
       settleIfIdle(entry);
       return idle;
@@ -202,7 +204,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
       if (entry.timer !== null) clearTimeout(entry.timer);
       entry.controller?.abort();
       entries.delete(botId);
-      for (const resolve of entry.idleWaiters.splice(0)) resolve();
+      for (const resolve of entry.idleWaiters.splice(0)) resolve(null);
     },
 
     revive() {
@@ -215,7 +217,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
         entry.cancelled = true;
         if (entry.timer !== null) clearTimeout(entry.timer);
         entry.controller?.abort();
-        for (const resolve of entry.idleWaiters.splice(0)) resolve();
+        for (const resolve of entry.idleWaiters.splice(0)) resolve(null);
       }
       entries.clear();
     },

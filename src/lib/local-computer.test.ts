@@ -6,6 +6,7 @@ import {
   linuxAutoDescription,
   localComputerDisabledReason,
   localComputerSelectable,
+  persistedComputerSelectionMatches,
   resolveBoxPanelAction,
   shouldPollCloudPreview,
 } from "./local-computer";
@@ -190,12 +191,41 @@ describe("local computer UI eligibility", () => {
   });
 
   it("refuses cloud preview polling when a stale ready phase belongs to Auto or another destination", () => {
-    const ready = { computer: "cloud" as const, phase: "ready", botId: "bot-a", resolvedBotId: "bot-a" };
+    const ready = {
+      computer: "cloud" as const,
+      cloudBackend: "box" as const,
+      phase: "ready",
+      botId: "bot-a",
+      resolvedBotId: "bot-a",
+      resolvedComputer: "cloud" as const,
+      resolvedCloudBackend: "box" as const,
+    };
     expect(shouldPollCloudPreview(ready)).toBe(true);
     expect(shouldPollCloudPreview({ ...ready, computer: undefined })).toBe(false);
     expect(shouldPollCloudPreview({ ...ready, computer: "local" })).toBe(false);
     expect(shouldPollCloudPreview({ ...ready, phase: "starting" })).toBe(false);
     expect(shouldPollCloudPreview({ ...ready, botId: "bot-b" })).toBe(false);
     expect(shouldPollCloudPreview({ ...ready, resolvedBotId: null })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, resolvedComputer: undefined })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, cloudBackend: "vps" })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, resolvedCloudBackend: "vps" })).toBe(false);
+  });
+
+  it("rejects stale persisted selections in both cloud-backend switch directions", () => {
+    const expected = { computer: "cloud" as const, cloudBackend: "box" as const };
+    expect(persistedComputerSelectionMatches({ ...expected, persistedBot: expected })).toBe(true);
+    expect(persistedComputerSelectionMatches({
+      ...expected,
+      persistedBot: { computer: "cloud", cloudBackend: "vps" },
+    })).toBe(false);
+    expect(persistedComputerSelectionMatches({
+      computer: "cloud",
+      cloudBackend: "vps",
+      persistedBot: { computer: "cloud", cloudBackend: "box" },
+    })).toBe(false);
+    expect(persistedComputerSelectionMatches({
+      ...expected,
+      persistedBot: { computer: undefined, cloudBackend: "box" },
+    })).toBe(false);
   });
 });

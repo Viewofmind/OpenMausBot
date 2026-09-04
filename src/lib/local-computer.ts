@@ -110,17 +110,43 @@ export function resolveBoxPanelAction({
 export function shouldPollCloudPreview(
   {
     computer,
+    cloudBackend,
     phase,
     botId,
     resolvedBotId,
+    resolvedComputer,
+    resolvedCloudBackend,
   }: {
     computer: Bot["computer"];
+    cloudBackend: NonNullable<Bot["cloudBackend"]>;
     phase: string;
     botId: string;
     resolvedBotId: string | null;
+    resolvedComputer: Bot["computer"] | null;
+    resolvedCloudBackend: Bot["cloudBackend"] | null;
   },
 ): boolean {
-  return computer === "cloud" && phase === "ready" && resolvedBotId === botId;
+  return computer === "cloud"
+    && phase === "ready"
+    && resolvedBotId === botId
+    && resolvedComputer === "cloud"
+    && resolvedCloudBackend === cloudBackend;
+}
+
+/** A computer effect may render optimistic profile state while its PATCH is
+ * still in flight. Provider work is safe only when the settled server bot
+ * confirms the same destination and backend that this render expects. */
+export function persistedComputerSelectionMatches({
+  computer,
+  cloudBackend,
+  persistedBot,
+}: {
+  computer: Bot["computer"];
+  cloudBackend: NonNullable<Bot["cloudBackend"]>;
+  persistedBot: Pick<Bot, "computer" | "cloudBackend">;
+}): boolean {
+  return persistedBot.computer === computer
+    && (persistedBot.cloudBackend ?? "box") === cloudBackend;
 }
 
 export function autoSelectsLocalComputer({

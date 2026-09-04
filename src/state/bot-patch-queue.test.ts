@@ -37,6 +37,29 @@ describe("bot patch queue", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("flush waits for the PATCH and returns the server-authoritative computer selection", async () => {
+    const request = deferredBot();
+    const send = vi.fn(async () => request.promise);
+    const queue = createBotPatchQueue({
+      send,
+      reconcile: async () => bot(),
+      onAuthoritative: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    queue.enqueue("bot-1", { computer: "cloud", cloudBackend: "vps" }, bot());
+    const flushed = queue.flush("bot-1");
+    let settled = false;
+    void flushed.then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    request.resolve(bot({ computer: "cloud", cloudBackend: "vps" }));
+    await expect(flushed).resolves.toMatchObject({ computer: "cloud", cloudBackend: "vps" });
+  });
+
   it("coalesces upload then remove so an older avatar can never resurrect", async () => {
     const sent: BotUpdatePatch[] = [];
     const authoritative = vi.fn();

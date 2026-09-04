@@ -3321,22 +3321,35 @@ async function startTurn(
           throw new Error("this model engine cannot use computer tools — choose Claude, an ACP engine, or the Computer engine");
         }
         let b = await box.findBox(cfg, bot.id).catch(() => null);
-        // Explicit Cloud and the box-native Computer engine provision on first
-        // use. Auto remains non-surprising and only reuses an existing box.
-        if (!b && mountsCloudComputer && (wants === "cloud" || instance.driverKind === "boxAgent")) {
+        let lifecycle = box.boxTurnLifecycleAction({
+          explicitCloud: wants === "cloud",
+          canMount: mountsCloudComputer,
+          state: typeof b?.state === "string" ? b.state : null,
+        });
+        if (lifecycle === "provision") {
           broadcast({ kind: "computer", botId: bot.id, state: "provisioning" });
           await box.provisionBox(cfg, bot.id, bot.name);
           b = await box.findBox(cfg, bot.id).catch(() => null);
+          lifecycle = box.boxTurnLifecycleAction({
+            explicitCloud: true,
+            canMount: mountsCloudComputer,
+            state: typeof b?.state === "string" ? b.state : null,
+          });
         }
         // an archived box answers every action with an error until it
         // resumes — wake it here, once, instead of letting the agent
-        // discover it one failed tool call at a time. Only worth the
-        // resume (~8s, and it un-pauses billing) when the bot can act.
-        if (b && mountsCloudComputer && !["idle", "ready", "running"].includes(b.state)) {
+        // discover it one failed tool call at a time. Explicit Cloud is the
+        // consent boundary for the resume (~8s, and it un-pauses billing).
+        if (lifecycle === "wake") {
           broadcast({ kind: "computer", botId: bot.id, state: "waking" });
           b = (await box.readyBox(cfg, bot.id).catch(() => null)) ?? b;
+          lifecycle = box.boxTurnLifecycleAction({
+            explicitCloud: true,
+            canMount: mountsCloudComputer,
+            state: typeof b?.state === "string" ? b.state : null,
+          });
         }
-        if (b) {
+        if (b && lifecycle === "attach") {
           previewCapture = () => box.screenshotBox(cfg, bot.id, b!.id);
           if (mountsCloudComputer) {
             integrations.computer = {
@@ -10090,6 +10103,19 @@ const server = createServer(async (req, res) => {
         const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
         return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
       }
+      // Input validity is independent of destination authorization. Preserve
+      // the stable 400 contract for oversized commands without contacting the
+      // provider; a valid Auto request still reaches the 409 gate below.
+      let boxCommand: string | undefined;
+      if (m[2] === "exec") {
+        const body = await readBody(req);
+        boxCommand = String(body.command ?? "");
+        if (boxCommand.length > MAX_REMOTE_COMMAND_LENGTH) {
+          return json(res, 400, {
+            error: `command is too long (maximum ${MAX_REMOTE_COMMAND_LENGTH} characters)`,
+          });
+        }
+      }
       if (bot.computer !== "cloud") {
         return json(res, 409, {
           error: "Choose Cloud before changing or opening this Box. Auto only checks existing computer state.",
@@ -10106,16 +10132,8 @@ const server = createServer(async (req, res) => {
           return json(res, 200, await box.joinBox(cfg, botId));
         case "sleep":
           return json(res, 200, await box.sleepBox(cfg, botId));
-        case "exec": {
-          const body = await readBody(req);
-          const command = String(body.command ?? "");
-          if (command.length > MAX_REMOTE_COMMAND_LENGTH) {
-            return json(res, 400, {
-              error: `command is too long (maximum ${MAX_REMOTE_COMMAND_LENGTH} characters)`,
-            });
-          }
-          return json(res, 200, await box.execOnBox(cfg, botId, command));
-        }
+        case "exec":
+          return json(res, 200, await box.execOnBox(cfg, botId, boxCommand ?? ""));
         case "screenshot":
           return json(res, 200, await box.screenshotBox(cfg, botId));
       }

@@ -1512,7 +1512,7 @@ const StoreContext = createContext<{
   state: AppState;
   dispatch: React.Dispatch<Action>;
   /** Commit any debounced profile edits before an operation reads the bot. */
-  flushBotPatches: (botId: string) => Promise<void>;
+  flushBotPatches: (botId: string) => Promise<BotAnnouncement | null>;
   /** Re-fetch engine availability — after an install, without a restart. */
   refreshInstances: () => Promise<void>;
   /** Explicit provider/network model discovery. */
