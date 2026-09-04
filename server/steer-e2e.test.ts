@@ -7,7 +7,7 @@
 //
 // POSIX-gated like the other CLI e2es (the fakes are shebang scripts).
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,6 +127,76 @@ posixOnly("mid-turn steering e2e", () => {
     },
     40_000,
   );
+
+  it("keeps two queued attachment messages as two native images in one follow-up turn", async () => {
+    const created = (await api("POST", "/api/bots")).body.bot;
+    await api("PATCH", `/api/bots/${created.id}`, {
+      modelSelection: { instanceId: "claude", model: "claude-fake" },
+    });
+    expect((await api("POST", `/api/bots/${created.id}/messages`, { text: "first image task" })).status)
+      .toBe(202);
+    await waitFor(async () => (await getBot(created.id)).busy === true, "the image queue turn to start");
+    await waitFor(
+      async () => (await getBot(created.id)).messages.some((message: any) => message.kind === "activity"),
+      "the image queue tool chip",
+    );
+
+    const attachments = join(home, ".openmausbot", "attachments");
+    mkdirSync(attachments, { recursive: true });
+    const firstImagePath = join(attachments, "123e4567-e89b-42d3-a456-426614174000.png");
+    const secondImagePath = join(attachments, "123e4567-e89b-42d3-a456-426614174001.png");
+    writeFileSync(firstImagePath, "first png");
+    writeFileSync(secondImagePath, "second png");
+    const firstAttachedText = `look at this\n\n<attached-image path="${firstImagePath}" name="first.png" />`;
+    const secondAttachedText = `and this\n\n<attached-image path="${secondImagePath}" name="second.png" />`;
+    const firstReceipt = await api("POST", `/api/bots/${created.id}/messages`, { text: firstAttachedText });
+    const secondReceipt = await api("POST", `/api/bots/${created.id}/messages`, { text: secondAttachedText });
+
+    expect(firstReceipt.status).toBe(202);
+    expect(firstReceipt.body).toMatchObject({ ok: true, queued: true });
+    expect(firstReceipt.body.steered).toBeUndefined();
+    expect(secondReceipt.status).toBe(202);
+    expect(secondReceipt.body).toMatchObject({ ok: true, queued: true });
+    expect(secondReceipt.body.steered).toBeUndefined();
+    expect(
+      (await getBot(created.id)).messages.some(
+        (message: any) => message.text === firstAttachedText || message.text === secondAttachedText,
+      ),
+    ).toBe(false);
+
+    await waitFor(
+      async () => {
+        const messages = (await getBot(created.id)).messages;
+        return [firstAttachedText, secondAttachedText].every((text) =>
+          messages.some((message: any) => message.text === text),
+        );
+      },
+      "both attached messages to drain",
+    );
+    await waitFor(async () => (await getBot(created.id)).busy === false, "the attached follow-up to settle");
+
+    const nativeRows = readFileSync(
+      join(home, ".openmausbot", "native", `${created.threadId}.ndjson`),
+      "utf8",
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const followUp = nativeRows
+      .filter((row) => row.dir === "out" && row.source === "claude.sdk.message")
+      .at(-1)?.msg;
+    expect(followUp.message.content).toEqual([
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "[image data: 12 base64 chars]" },
+      },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "[image data: 16 base64 chars]" },
+      },
+      { type: "text", text: "look at this\n\n\n\nand this\n\n" },
+    ]);
+  }, 40_000);
 
   it("rejects a delayed steer acknowledgement after the bot is deleted", async () => {
     const created = (await api("POST", "/api/bots")).body.bot;

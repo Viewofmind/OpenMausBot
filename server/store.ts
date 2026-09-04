@@ -86,6 +86,9 @@ export interface SecretRequestCardData {
   placeholder: string;
   helpUrl: string;
   requestKey: string;
+  /** Exact successful HPKE operation. This contains no plaintext and prevents
+   * a freshly sealed value from being mistaken for a lost-response retry. */
+  phoneOperationId?: string;
   provided?: boolean;
   dismissed?: boolean;
   resumed?: boolean;
@@ -143,6 +146,12 @@ export interface Message {
   channelMode?: "chat" | "goal";
   /** group threads: which member said this (sender attribution). */
   from?: { botId: string; name: string; color: string };
+  /** Set on a room message a bot pushed in with post_to_room instead of by
+   * taking a turn there. Internal transport changes custody, not authorship:
+   * a reader's turn wraps this one in a provenance preamble rather than
+   * letting it read as ordinary room conversation. `unattended` records that
+   * nobody was watching the bot that posted it. */
+  peerPost?: { unattended?: boolean };
   /** emoji reactions; by = "user" or a member botId. */
   reactions?: Array<{ emoji: string; by: string }>;
   /** comm chips: "Messaged @X" in the caller's chat, linking to the
@@ -470,6 +479,15 @@ export interface BotRecord {
    * delegate_bot). Off by default: a chief-of-staff-style bot is most
    * useful when it can coordinate without nagging. */
   approvePeerComms?: boolean;
+  /** Bot ids this bot is allowed to contact. Unset keeps the rule the app
+   * shipped with — every visible bot in the same section — because that is
+   * what every existing workspace already relies on. An explicit list wires
+   * this bot to exactly those peers (and `[]` to none), which is the only
+   * way to bound one bot's reach inside the unsectioned team, where every
+   * bot the user never filed shares a section. Enforced in one place, by
+   * peer-roster.ts, for the roster, list_bots, ask_bot and delegate_bot
+   * alike. */
+  peers?: string[];
   /** Whether this bot may use the workspace's connected apps (Composio).
    * Unset/true = allowed (the user configured the key deliberately);
    * false = this bot never receives the connection. Imported team members

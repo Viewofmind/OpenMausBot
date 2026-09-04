@@ -17,6 +17,7 @@ import { VoiceSettings } from "./VoiceSettings";
 import { BOT_PROFILE_LIMITS } from "../../shared/bot-profile";
 import { Switch } from "./SettingsPrimitives";
 import { RoutineEditor } from "./RoutinesPage";
+import { BotInstructionsDialog } from "./BotInstructionsDialog";
 
 function Field({
   label,
@@ -542,7 +543,11 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
   const localSelectable = localComputerSelectable({ capabilities, providerSupportsLocal });
   const [localAutoWarning, setLocalAutoWarning] = useState<"auto" | "local" | null>(null);
   const [creatingRoutine, setCreatingRoutine] = useState(false);
-  useEffect(() => setCreatingRoutine(false), [bot.id]);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  useEffect(() => {
+    setCreatingRoutine(false);
+    setInstructionsOpen(false);
+  }, [bot.id]);
   const localDisabledReason = localComputerDisabledReason({ capabilities, providerSupportsLocal });
   const patch = (
     p: Partial<
@@ -552,7 +557,6 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "title"
         | "description"
         | "notifications"
-        | "computer"
         | "cloudBackend"
         | "autoStartVps"
         | "color"
@@ -570,7 +574,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "browser"
         | "modelSelection"
       >
-    > & { acknowledgeLocalAuto?: boolean },
+    > & { computer?: Bot["computer"] | null; acknowledgeLocalAuto?: boolean },
   ) => dispatch({ type: "updateBot", botId: bot.id, patch: p });
   const activeState = stateForBot(bot);
   const mascotMotion = state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
@@ -654,15 +658,33 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               onChange={(e) => patch({ title: e.target.value })}
             />
           </Field>
-          <Field label="Description">
+          <div className="block">
+            <div className="mb-1.5 flex items-center justify-between gap-3">
+              <label htmlFor={`bot-instructions-${bot.id}`} className="text-[13px] text-ink-secondary">Instructions</label>
+              <button
+                type="button"
+                onClick={() => setInstructionsOpen(true)}
+                className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] font-medium text-accent-text hover:bg-accent/10"
+              >
+                <BookOpen size={12} /> View full
+              </button>
+            </div>
             <textarea
-              className={cn(inputCls, "min-h-[96px] resize-none")}
+              id={`bot-instructions-${bot.id}`}
+              className={cn(inputCls, "min-h-[176px] resize-y leading-relaxed")}
               maxLength={BOT_PROFILE_LIMITS.description}
-              placeholder="What this agent is for"
+              placeholder="Describe this bot’s role, priorities, working style, and boundaries"
+              aria-label="Bot instructions"
               value={bot.description}
               onChange={(e) => patch({ description: e.target.value })}
             />
-          </Field>
+            <div className="mt-1.5 flex items-start justify-between gap-3 text-[11px] text-ink-secondary">
+              <span>Included in this bot’s context on every turn.</span>
+              <span className="shrink-0 tabular-nums">
+                {bot.description.length.toLocaleString()} / {BOT_PROFILE_LIMITS.description.toLocaleString()}
+              </span>
+            </div>
+          </div>
 
           <div className="rounded-xl bg-card p-4">
             <div className="flex items-center gap-2">
@@ -861,6 +883,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
               {([
+                [null, "Auto"],
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
@@ -868,7 +891,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                 ["off", "Off"],
               ] as const).map(([mode, label], i) => (
                 <button
-                  key={mode}
+                  key={mode ?? "auto"}
                   disabled={(mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)}
                   title={
                     mode === "local" && !localSelectable
@@ -878,7 +901,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                         : undefined
                   }
                   onClick={() => {
-                    if (mode === bot.computer) return;
+                    if ((mode === null && bot.computer === undefined) || mode === bot.computer) return;
                     if (mode === "local" && bot.autoApprove) setLocalAutoWarning("local");
                     // a browser-only bot must actually have its browser: flip
                     // the per-bot switch on with the destination
@@ -889,7 +912,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                     "flex-1 py-1.5 text-[13px] capitalize",
                     i > 0 && "border-l border-hairline/40",
                     ((mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)) && "cursor-not-allowed opacity-40",
-                    bot.computer === mode
+                    (mode === null ? bot.computer === undefined : bot.computer === mode)
                       ? "bg-control text-ink"
                       : "text-ink-secondary hover:bg-control/60 hover:text-ink",
                   )}
@@ -900,6 +923,12 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             {(!bot.computer || bot.computer === "cloud") && (
               <>
+                {!bot.computer && (
+                  <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
+                    <span className="font-medium text-ink">Auto cloud preference.</span>{" "}
+                    This chooses what Auto may reuse during a task; viewing settings does not create or wake a computer.
+                  </div>
+                )}
                 <CloudBackendPicker
                   value={bot.cloudBackend ?? "box"}
                   vpsSupported={canUseVps}
@@ -1022,6 +1051,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         onClose={() => setCreatingRoutine(false)}
       />
     )}
+    {instructionsOpen && <BotInstructionsDialog bot={bot} onClose={() => setInstructionsOpen(false)} />}
     <LocalComputerAutoWarning
       open={localAutoWarning !== null}
       onCancel={() => setLocalAutoWarning(null)}

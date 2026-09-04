@@ -73,6 +73,7 @@ import {
   type SectionDropPlace,
 } from "@/lib/sidebar-layout";
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
+import { botListItemPointerIntent } from "@/lib/sidebar-selection";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
 import { SidebarMoreMenu } from "./SidebarMoreMenu";
 import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
@@ -561,6 +562,7 @@ function BotContextMenu({
   }, [onClose]);
 
   if (!bot) return null;
+  const deleting = state.deletingBots[bot.id] === true;
   const engine = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId);
   const canCoordinate = engine?.capabilities?.agentsMcp === true;
   const visibleBotCount = state.bots.filter((candidate) => !candidate.hidden).length;
@@ -650,15 +652,39 @@ function BotContextMenu({
             hint: archiveHint,
           },
         ),
-        item(<Trash2 size={16} />, "Delete", () => dispatch({ type: "deleteBot", botId: bot.id }), {
-          danger: true,
-        }),
+        <BotDeleteMenuItem
+          key="delete"
+          deleting={deleting}
+          onClick={() => {
+            dispatch({ type: "deleteBot", botId: bot.id });
+            onClose();
+          }}
+        />,
       ]}
     </div>
   );
 }
 
-function BotListItem({
+export function BotDeleteMenuItem({ deleting, onClick }: { deleting: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={deleting}
+      aria-busy={deleting || undefined}
+      onClick={onClick}
+      title={deleting ? "Checking for persistent computers before deleting this bot" : undefined}
+      className={cn(
+        "flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-danger",
+        deleting ? "cursor-default opacity-40" : "hover:bg-raised/70",
+      )}
+    >
+      {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+      {deleting ? "Checking computers…" : "Delete"}
+    </button>
+  );
+}
+
+export function BotListItem({
   bot,
   density,
   onMenu,
@@ -674,6 +700,7 @@ function BotListItem({
   const { state, dispatch } = useStore();
   const [renaming, setRenaming] = useState(false);
   const selected = state.activeView === "chat" && state.selectedId === bot.id;
+  const deleting = state.deletingBots[bot.id] === true;
   const mascotMotion = selected && state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
   const iconOnly = density === "icons";
   useEffect(() => {
@@ -732,15 +759,22 @@ function BotListItem({
           )}
         </div>
         <div className="flex items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
-            {bot.chiefOfStaff && (
-              <span className="flex shrink-0 items-center gap-1 text-[11.5px] font-medium text-accent">
-                <Crown size={11} /> Chief of Staff
-              </span>
-            )}
-            {bot.chiefOfStaff && preview(bot) && <span className="shrink-0 text-ink-secondary/60">·</span>}
-            <span className="truncate">{preview(bot)}</span>
-          </span>
+          {deleting ? (
+            <span role="status" className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
+              <Loader2 size={12} className="shrink-0 animate-spin" />
+              Checking computers before deleting…
+            </span>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
+              {bot.chiefOfStaff && (
+                <span className="flex shrink-0 items-center gap-1 text-[11.5px] font-medium text-accent">
+                  <Crown size={11} /> Chief of Staff
+                </span>
+              )}
+              {bot.chiefOfStaff && preview(bot) && <span className="shrink-0 text-ink-secondary/60">·</span>}
+              <span className="truncate">{preview(bot)}</span>
+            </span>
+          )}
           {bot.unread && (
             <span className="size-2 shrink-0 rounded-full bg-accent" />
           )}
@@ -752,25 +786,28 @@ function BotListItem({
     event.preventDefault();
     onMenu({ botId: bot.id, x: event.clientX, y: event.clientY });
   };
-
-  // Keep the rename <input> out of role="button" — a button's descendants
-  // are presentational, which hides the field from assistive tech.
-  if (renaming) {
-    return (
-      <div className={rowClass} onContextMenu={onContextMenu}>
-        {body}
-      </div>
-    );
-  }
+  const onSelect = (event: React.MouseEvent) => {
+    const insideRenameInput = event.target instanceof HTMLInputElement;
+    if (botListItemPointerIntent(event.type, insideRenameInput) === "select") {
+      dispatch({ type: "select", id: bot.id });
+    }
+  };
 
   return (
     <div className="group relative" title={iconOnly ? bot.name : undefined}>
+      {/* Keep this wrapper mounted while RenameTitle swaps its label for an
+          input. Replacing the wrapper tree remounts RenameTitle, loses its
+          editing state, and leaves the row stuck in rename mode. Omitting
+          role=button also keeps the input visible to assistive technology. */}
       <div
-        role="button"
-        tabIndex={0}
-        aria-label={iconOnly ? bot.name : undefined}
-        onClick={() => dispatch({ type: "select", id: bot.id })}
+        role={renaming ? undefined : "button"}
+        tabIndex={renaming ? undefined : 0}
+        aria-label={!renaming && iconOnly ? (deleting ? `${bot.name}, checking computers before deleting` : bot.name) : undefined}
+        aria-busy={deleting || undefined}
+        data-sidebar-bot-row={bot.id}
+        onClick={onSelect}
         onKeyDown={(event) => {
+          if (renaming) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             dispatch({ type: "select", id: bot.id });
@@ -781,22 +818,22 @@ function BotListItem({
       >
         {body}
       </div>
-      {iconOnly && bot.unread && (
+      {!renaming && iconOnly && bot.unread && (
         <span className="pointer-events-none absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
       )}
-      {!iconOnly && <button
+      {deleting && iconOnly && (
+        <span className="pointer-events-none absolute bottom-1 right-1 rounded-full bg-card p-1 text-ink-secondary">
+          <Loader2 size={12} className="animate-spin" />
+        </span>
+      )}
+      {/* Disabled buttons still own their pixels in Chromium, even at zero
+          opacity. Omit the unavailable action so the entire row stays live. */}
+      {!renaming && !deleting && !iconOnly && !archiveDisabled && !bot.chiefOfStaff && <button
         type="button"
-        disabled={archiveDisabled}
         onClick={() => onArchive(bot)}
         aria-label={`Archive ${bot.name}`}
-        title={
-          bot.chiefOfStaff
-            ? "Choose another Chief of Staff first"
-            : archiveDisabled
-              ? "Keep at least one active bot"
-              : `Archive ${bot.name}`
-        }
-        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 disabled:cursor-default disabled:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
+        title={`Archive ${bot.name}`}
+        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
       >
         <Archive size={14} />
       </button>}

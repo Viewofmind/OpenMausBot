@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { augmentedPath } from "./env-path.ts";
+import { augmentedPath, resolveCliSpawn } from "./env-path.ts";
 import { DATA_DIR } from "./config.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 
@@ -198,7 +198,8 @@ LABEL ${MANAGED_LABEL}="1" \\
 }
 
 async function sh(cmd: string, args: string[], timeout = 8000): Promise<{ stdout: string }> {
-  const { stdout } = await run(cmd, args, {
+  const resolved = resolveCliSpawn(cmd, args);
+  const { stdout } = await run(resolved.command, resolved.args, {
     timeout,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
@@ -357,12 +358,15 @@ export function imageLabelsMatch(labels: Record<string, string> | undefined): bo
   );
 }
 
-function containerLabelsMatch(
+/** Ownership is intentionally independent of the current image/driver
+ * versions. An older OpenMausBot container must stay removable (and eligible
+ * for idle cleanup), while imageMatches keeps readiness version-strict. */
+function containerOwnershipLabelsMatch(
   labels: Record<string, string> | undefined,
   target: LocalVmTarget,
 ): boolean {
   return (
-    imageLabelsMatch(labels) &&
+    labels?.[MANAGED_LABEL] === "1" &&
     labels?.[WORKSPACE_LABEL] === "1" &&
     (target.key === SHARED_LOCAL_VM_TARGET.key
       ? labels?.[TARGET_LABEL] === undefined || labels?.[TARGET_LABEL] === target.label
@@ -488,7 +492,7 @@ export async function containerComputerStatus(
           : null;
       status.imageMatches =
         appleImage === IMAGE && status.image_id !== null && appleImageId === status.image_id;
-      status.managed = containerLabelsMatch(detail?.configuration?.labels, target);
+      status.managed = containerOwnershipLabelsMatch(detail?.configuration?.labels, target);
       status.persistence = appleWorkspaceMountIsSafe(detail?.configuration?.mounts, platform, target.workspaceDir)
         ? "durable"
         : "unsafe";
@@ -525,7 +529,7 @@ export async function containerComputerStatus(
         imageLabelsMatch(detail?.Config?.Labels) &&
         status.image_id !== null &&
         normalizeImageId(detail?.Image) === status.image_id;
-      status.managed = containerLabelsMatch(detail?.Config?.Labels, target);
+      status.managed = containerOwnershipLabelsMatch(detail?.Config?.Labels, target);
       status.persistence = dockerWorkspaceMountIsSafe(
         detail?.Mounts,
         platform,
@@ -940,6 +944,14 @@ export async function containerComputerAction(
     throw Object.assign(new Error("The Local VM is not running"), { status: 409 });
   }
   if (action === "remove" && before.container === "missing") return before;
+  if (action === "remove" && !before.managed) {
+    throw Object.assign(
+      new Error(
+        `The existing container named ${target.containerName} was not created by OpenMausBot; remove it manually in ${runtime}`,
+      ),
+      { status: 409 },
+    );
+  }
 
   if (action === "pull") {
     await prepareManagedImage(runtime, runner);

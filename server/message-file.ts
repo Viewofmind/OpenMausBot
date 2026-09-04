@@ -177,6 +177,29 @@ function renderedMarkdownTargets(markdown: string): string[] {
   return links;
 }
 
+/** Resolve the local image authored at one Markdown source offset. The
+ * browser can use this small message-scoped reference instead of putting an
+ * absolute host path in a GET URL. Definitions are collected first because
+ * CommonMark permits them to appear after the image reference. */
+export function messageImageTargetAt(text: string, sourceOffset: number): string | null {
+  if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0) return null;
+  const definitions = new Map<string, string>();
+  let direct: string | null = null;
+  let reference: string | null = null;
+
+  walkMarkdown(fromMarkdown(text), (node) => {
+    if (node.type === "definition" && node.identifier && node.url) {
+      if (!definitions.has(node.identifier)) definitions.set(node.identifier, node.url);
+      return;
+    }
+    if (node.position?.start.offset !== sourceOffset) return;
+    if (node.type === "image" && node.url) direct = node.url;
+    else if (node.type === "imageReference" && node.identifier) reference = node.identifier;
+  });
+
+  return direct ?? (reference ? definitions.get(reference) ?? null : null);
+}
+
 /**
  * Confirm that the requested path is carried by this message, tolerating the
  * one representation change native URL APIs make for us: a file href with

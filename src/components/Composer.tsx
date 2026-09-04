@@ -11,6 +11,7 @@ import {
   markDraftEdited,
   recoverFailedComposerSend,
   rememberFailedComposerSend,
+  replaceDraftAttachment,
   restoredSendId,
   useComposerDraft,
   useDraftAttachmentPending,
@@ -23,12 +24,15 @@ import { ComposerAttachments, pathForFile } from "./ComposerAttachments";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import {
   appendPastedText,
+  handoffAttachmentImagePreview,
   composeMessage,
   imageAttachmentFromFile,
   intakeFiles,
   isImageFile,
   isLongPaste,
+  optimisticImageAttachment,
   pasteAttachment,
+  releaseAttachmentImagePreview,
   type Attachment,
   type PasteAttachment,
 } from "@/lib/composer-attachments";
@@ -37,8 +41,10 @@ import { goalCoordinatorForComposer, groupComposerHint, roomRespondersForCompose
 import { PendingApprovalActions, PendingApprovalPanel, pendingApprovals } from "./PendingApproval";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { ReplyQuote } from "./ReplyQuote";
-import { ComposerInjectNow, composerCanInjectNow } from "./ComposerInjectNow";
-import { QueuedComposerMessages } from "./ComposerQueuedMessages";
+import {
+  QueuedComposerMessages,
+  composerCanSteerQueuedMessages,
+} from "./ComposerQueuedMessages";
 import { skillRecorderEnabled } from "@/lib/feature-flags";
 import {
   composerSlashTrigger,
@@ -263,8 +269,12 @@ export function Composer({
     [draftId],
   );
   const removeAttachment = useCallback(
-    (id: string) => editAttachments((prev) => prev.filter((a) => a.id !== id)),
-    [editAttachments],
+    (id: string) => {
+      const removed = attachments.find((attachment) => attachment.id === id);
+      if (removed?.kind === "image") releaseAttachmentImagePreview(removed);
+      editAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+    },
+    [attachments, editAttachments],
   );
   const displayPasteInChatBox = useCallback(
     /** Moves one pasted attachment into the editable draft and restores focus. */
@@ -412,16 +422,70 @@ export function Composer({
   // auto-send intent whenever navigation unmounted the composer.
   const pendingCount = (state.pendingQueued[threadId] ?? []).length;
   const queuedMessages = state.pendingQueued[threadId] ?? [];
-  const canInject = composerCanInjectNow(busy, locked, pendingCount);
+  const canSteerQueued = composerCanSteerQueuedMessages(
+    busy,
+    locked,
+    pendingCount,
+    Boolean(approval),
+  );
+  const [steering, setSteering] = useState(false);
   const interruptTurn = () => {
     if (group) dispatch({ type: "interruptGroup", groupId: group.id });
     else if (bot) dispatch({ type: "interrupt", botId: bot.id });
   };
+  const steerQueued = () => {
+    setSteering(true);
+    // Unlike the general Stop control, Steer belongs to this exact queue.
+    // Scoping prevents a 1:1 queue from interrupting the same bot in a room
+    // (or a routine) whose work is unrelated to the words shown here.
+    const onError = () => setSteering(false);
+    if (group) dispatch({ type: "interruptGroup", groupId: group.id, threadId, onError });
+    else if (bot) dispatch({ type: "interrupt", botId: bot.id, threadId, onError });
+  };
+  const queueHeadId = queuedMessages[0]?.queueId;
+  useEffect(() => setSteering(false), [threadId, queueHeadId]);
+  // Most engines acknowledge interruption quickly, but a lost response must
+  // not leave a control claiming to steer forever. Queue drain or turn end
+  // clears it immediately; twenty seconds is the final recovery floor.
+  useEffect(() => {
+    if (!busy || pendingCount === 0) {
+      setSteering(false);
+      return;
+    }
+    if (!steering) return;
+    const timeout = window.setTimeout(() => setSteering(false), 20_000);
+    return () => window.clearTimeout(timeout);
+  }, [busy, pendingCount, steering]);
   const fileInput = useRef<HTMLInputElement>(null);
   const [autoWarn, setAutoWarn] = useState(false);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   // Auto mode belongs to one bot; a room has several, each with its own.
   const autoBot = group ? undefined : bot;
+  const uploadImage = useCallback(async (file: File): Promise<Attachment | null> => {
+    const optimistic = optimisticImageAttachment(file);
+    if (!optimistic) return null;
+    appendDraftAttachments(draftId, [optimistic]);
+    try {
+      const completed = await imageAttachmentFromFile(file, optimistic);
+      if (!completed) {
+        replaceDraftAttachment(draftId, optimistic.id, null);
+        releaseAttachmentImagePreview(optimistic);
+        return null;
+      }
+      handoffAttachmentImagePreview(completed.path, completed.previewUrl);
+      if (!replaceDraftAttachment(draftId, optimistic.id, completed)) {
+        // The user removed the chip while its upload was completing.
+        releaseAttachmentImagePreview(completed);
+      }
+      // The keyed draft already owns the completed attachment; returning it
+      // would make intakeFiles append a duplicate chip.
+      return null;
+    } catch (error) {
+      replaceDraftAttachment(draftId, optimistic.id, null);
+      releaseAttachmentImagePreview(optimistic);
+      throw error;
+    }
+  }, [draftId]);
   const pickFiles = async (picked: FileList | null) => {
     if (!picked?.length) return;
     changeDraftAttachmentPending(draftId, true);
@@ -429,7 +493,7 @@ export function Composer({
       const { attachments: added, notice } = await intakeFiles(Array.from(picked), {
         allowImages: engineSupportsImages,
         getPath: pathForFile,
-        uploadImage: imageAttachmentFromFile,
+        uploadImage,
       });
       if (added.length) addAttachments(added);
       if (notice) setAttachmentNotice(notice);
@@ -710,13 +774,6 @@ export function Composer({
             />
           </div>
         )}
-        <QueuedComposerMessages
-          items={queuedMessages}
-          onCancel={(queueId) => {
-            if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
-            else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, queueId });
-          }}
-        />
         <ComposerAttachments
           items={attachments}
           onAdd={addAttachments}
@@ -726,6 +783,17 @@ export function Composer({
           notice={attachmentNotice}
           onNotice={setAttachmentNotice}
           onPendingChange={(pending) => changeDraftAttachmentPending(draftId, pending)}
+          uploadImage={uploadImage}
+        />
+        <QueuedComposerMessages
+          items={queuedMessages}
+          onSteer={canSteerQueued ? steerQueued : undefined}
+          steerMode={group ? "next" : "all"}
+          steering={steering}
+          onCancel={(queueId) => {
+            if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
+            else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, queueId });
+          }}
         />
         <div className="relative">
           {/* App-ground from the pill midline down, full-bleed. Bubbles may
@@ -813,14 +881,12 @@ export function Composer({
               changeDraftAttachmentPending(draftId, true);
               void (async () => {
                 try {
-                  for (const file of imageFiles) {
-                    try {
-                      const attachment = await imageAttachmentFromFile(file);
-                      if (attachment) appendDraftAttachments(draftId, [attachment]);
-                    } catch (err) {
+                  const results = await Promise.allSettled(imageFiles.map(uploadImage));
+                  for (const result of results) {
+                    if (result.status === "rejected") {
                       dispatch({
                         type: "error",
-                        message: err instanceof Error ? err.message : "image upload failed",
+                        message: result.reason instanceof Error ? result.reason.message : "image upload failed",
                       });
                     }
                   }
@@ -908,8 +974,6 @@ export function Composer({
               ? "Attaching files…"
               : recording
               ? "Listening…"
-              : canInject
-                ? `${busyName} is working — inject now to interrupt with the queued message`
               : busy && canSteer
                 ? `${busyName} is working — Enter sends this into the running turn`
               : busy
@@ -926,11 +990,9 @@ export function Composer({
             className="max-h-[9rem] min-h-6 min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent px-1 py-1 text-[15px] leading-6 text-ink placeholder:text-ink-secondary focus:outline-none"
           />
           <div className="flex items-center gap-1">
-          {/* Inject is stop-then-steer made visible. The square stop would
-              drain the same queue, so it yields while a send is waiting.
-              Cancelling the queued composer card brings Stop back. */}
-          {canInject && <ComposerInjectNow onInject={interruptTurn} />}
-          {busy && !locked && !canInject && (
+          {/* Stop stays a stop. Stop-then-steer is named beside the queued
+              message above, where its effect is visible before activation. */}
+          {busy && !locked && (
           <button
             onClick={interruptTurn}
             aria-label="Stop this turn"

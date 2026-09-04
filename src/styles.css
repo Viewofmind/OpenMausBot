@@ -270,6 +270,122 @@
   --radius-xl: 14px;
 }
 
+/* ── Graphite ─────────────────────────────────────────────────────────────
+   Neutral charcoal for people who want a dark workspace without Midnight's
+   near-black contrast or Foundry's warmth. Steel blue stays deliberately
+   desaturated: it marks actions and focus without making the chrome glow.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="graphite"] {
+  --color-app: #111214;
+  --color-panel: #181a1d;
+  --color-raised: #2a2d32;
+  --color-raised-hover: #353941;
+  --color-card: #22252a;
+  --color-inset: #0d0e10;
+  --color-control: #2a2d32;
+  --color-hairline: #3b4048;
+
+  --color-ink: #f2f4f7;
+  --color-ink-secondary: #b3b8c2;
+
+  --color-accent: #4f75a2;
+  --color-accent-border: #698fbb;
+  --color-accent-text: #8fb4df;
+  --color-focus: #8fb4df;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #30343a;
+
+  --color-success: #63b58a;
+  --color-danger: #dd6b73;
+  --color-danger-ink: #1e0b0e;
+  --color-success-ink: #101a14;
+  --color-warning: #d3a150;
+  --color-scrollbar: #464b54;
+  --color-maus-line: #b3b8c2;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", system-ui, sans-serif;
+  --radius-lg: 6px;
+  --radius-xl: 10px;
+}
+
+/* ── Linen ────────────────────────────────────────────────────────────────
+   A neutral daylight skin: less cream than Atelier and less blue-green than
+   Lagoon. Navy is used as ink rather than decoration, keeping the workspace
+   crisp and familiar instead of colourful.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="linen"] {
+  --color-app: #eceff3;
+  --color-panel: #f5f6f8;
+  --color-raised: #ffffff;
+  --color-raised-hover: #e1e6ed;
+  --color-card: #ffffff;
+  --color-inset: #e6e9ee;
+  --color-control: #d3d9e1;
+  --color-hairline: #b4bbc5;
+
+  --color-ink: #1d2229;
+  --color-ink-secondary: #59616c;
+
+  --color-accent: #355f8a;
+  --color-accent-border: #4978a6;
+  --color-accent-text: #2c5680;
+  --color-focus: #2c5680;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #e1e6ed;
+
+  --color-success: #2f704f;
+  --color-danger: #a83d48;
+  --color-danger-ink: #ffffff;
+  --color-success-ink: #ffffff;
+  --color-warning: #765b2b;
+  --color-scrollbar: #aeb6c0;
+  --color-maus-line: #59616c;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+}
+
+/* ── Dusk ─────────────────────────────────────────────────────────────────
+   A restrained plum-dark alternative. The violet lives in the neutrals as
+   much as the accent, so the skin feels cohesive rather than neon or themed.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-skin="dusk"] {
+  --color-app: #121014;
+  --color-panel: #19161c;
+  --color-raised: #2b2630;
+  --color-raised-hover: #37303d;
+  --color-card: #231f27;
+  --color-inset: #0d0b0f;
+  --color-control: #2b2630;
+  --color-hairline: #403847;
+
+  --color-ink: #f4eff6;
+  --color-ink-secondary: #b9afbd;
+
+  --color-accent: #765683;
+  --color-accent-border: #9670a3;
+  --color-accent-text: #c49bd2;
+  --color-focus: #c49bd2;
+  --color-accent-ink: #ffffff;
+  --color-bubble-user: #332b38;
+
+  --color-success: #6fad83;
+  --color-danger: #db727a;
+  --color-danger-ink: #210c10;
+  --color-success-ink: #101812;
+  --color-warning: #d0a35d;
+  --color-scrollbar: #4a414f;
+  --color-maus-line: #b9afbd;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", system-ui, sans-serif;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+}
+
 html,
 body,
 #root {
@@ -378,10 +494,6 @@ body {
 .turn-answer {
   transform-origin: 18px 100%;
   animation: turn-answer-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-/* last line of text → mascot ≈ 5mm (bubble py-2.5 already contributes 10px) */
-.turn-mascot-tight {
-  margin-top: max(0px, calc(5mm - 10px));
 }
 /* "Thinking…" label sheen while the model reasons */
 @keyframes shimmer {

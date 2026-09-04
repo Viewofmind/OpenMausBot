@@ -8,7 +8,6 @@ export type BotUpdatePatch = Partial<
     | "title"
     | "description"
     | "notifications"
-    | "computer"
     | "cloudBackend"
     | "autoStartVps"
     | "color"
@@ -30,11 +29,19 @@ export type BotUpdatePatch = Partial<
     | "modelSelection"
   >
 > & {
+  /** null is the wire representation for clearing an explicit destination
+   * and returning to Auto. Bot state itself keeps Auto as an absent field. */
+  computer?: Bot["computer"] | null;
   /** Rides the PATCH body only: the server's proof that the local-auto
    * warning dialog was shown (see server/index.ts's consent gate). It must
    * reach the wire inside the coalesced body and must never fold into bot
    * state — the queue strips it from every overlay it hands back. */
   acknowledgeLocalAuto?: boolean;
+};
+
+/** A wire patch after clear-only values have been normalized for Bot state. */
+export type BotStatePatch = Omit<BotUpdatePatch, "computer" | "acknowledgeLocalAuto"> & {
+  computer?: Bot["computer"];
 };
 
 interface BotPatchQueueEntry {
@@ -46,7 +53,7 @@ interface BotPatchQueueEntry {
   running: boolean;
   controller: AbortController | null;
   cancelled: boolean;
-  idleWaiters: Array<() => void>;
+  idleWaiters: Array<(bot: BotAnnouncement | null) => void>;
 }
 
 export interface BotPatchQueueOptions {
@@ -57,14 +64,16 @@ export interface BotPatchQueueOptions {
     signal: AbortSignal,
   ) => Promise<BotAnnouncement>;
   reconcile: (botId: string, signal: AbortSignal) => Promise<BotAnnouncement | null>;
-  onAuthoritative: (bot: BotAnnouncement, optimisticOverlay: BotUpdatePatch) => void;
+  onAuthoritative: (bot: BotAnnouncement, optimisticOverlay: BotStatePatch) => void;
   onError: (error: Error) => void;
 }
 
 export interface BotPatchQueue {
   enqueue: (botId: string, patch: BotUpdatePatch, fallback: BotAnnouncement) => void;
-  flush: (botId: string) => Promise<void>;
-  overlayFor: (botId: string) => BotUpdatePatch;
+  /** Wait for the lane to settle and return the server-authoritative bot.
+   * null means there was no queued write (or the lane was cancelled). */
+  flush: (botId: string) => Promise<BotAnnouncement | null>;
+  overlayFor: (botId: string) => BotStatePatch;
   cancel: (botId: string) => void;
   /** Undo a dispose. Exists for React StrictMode, whose dev-mode mount probe
    * runs the effect cleanup once against the SAME memoized queue — without
@@ -77,9 +86,10 @@ const hasFields = (patch: BotUpdatePatch): boolean => Object.keys(patch).length 
 
 /** What may fold back into renderer bot state: everything except the consent
  * flag, which is wire-only. One strip point covers both overlay paths. */
-const stateOverlay = (patch: BotUpdatePatch): BotUpdatePatch => {
-  const { acknowledgeLocalAuto: _ack, ...fields } = patch;
-  return fields;
+const stateOverlay = (patch: BotUpdatePatch): BotStatePatch => {
+  const { acknowledgeLocalAuto: _ack, computer, ...fields } = patch;
+  if (computer === null) return { ...fields, computer: undefined };
+  return computer === undefined ? fields : { ...fields, computer };
 };
 
 /**
@@ -95,7 +105,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
   const settleIfIdle = (entry: BotPatchQueueEntry) => {
     if (entry.running || entry.timer !== null || hasFields(entry.pending)) return;
     entries.delete(entry.botId);
-    for (const resolve of entry.idleWaiters.splice(0)) resolve();
+    for (const resolve of entry.idleWaiters.splice(0)) resolve(entry.fallback);
   };
 
   const drain = async (entry: BotPatchQueueEntry): Promise<void> => {
@@ -171,12 +181,12 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
 
     flush(botId) {
       const entry = entries.get(botId);
-      if (!entry) return Promise.resolve();
+      if (!entry) return Promise.resolve(null);
       if (entry.timer !== null) {
         clearTimeout(entry.timer);
         entry.timer = null;
       }
-      const idle = new Promise<void>((resolve) => entry.idleWaiters.push(resolve));
+      const idle = new Promise<BotAnnouncement | null>((resolve) => entry.idleWaiters.push(resolve));
       void drain(entry);
       settleIfIdle(entry);
       return idle;
@@ -194,7 +204,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
       if (entry.timer !== null) clearTimeout(entry.timer);
       entry.controller?.abort();
       entries.delete(botId);
-      for (const resolve of entry.idleWaiters.splice(0)) resolve();
+      for (const resolve of entry.idleWaiters.splice(0)) resolve(null);
     },
 
     revive() {
@@ -207,7 +217,7 @@ export function createBotPatchQueue(options: BotPatchQueueOptions): BotPatchQueu
         entry.cancelled = true;
         if (entry.timer !== null) clearTimeout(entry.timer);
         entry.controller?.abort();
-        for (const resolve of entry.idleWaiters.splice(0)) resolve();
+        for (const resolve of entry.idleWaiters.splice(0)) resolve(null);
       }
       entries.clear();
     },

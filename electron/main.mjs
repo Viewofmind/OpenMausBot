@@ -46,6 +46,14 @@ import {
   withoutManagedCompanionTunnelAccess,
 } from "./managed-companion-tunnel.mjs";
 import { createSecureCredentialState } from "./secure-credential-state.mjs";
+import {
+  createPhoneSecretSaveCoordinator,
+  createPhoneSecretIdentity,
+  decodePhoneSecretSaveRequest,
+  phoneSecretPrivateKeyMessage,
+  readPhoneSecretIdentity,
+  withPhoneSecretIdentity,
+} from "./phone-secret-identity.mjs";
 import { isKnownSkin } from "./skin-overlay.cjs";
 import { readSecureCredentials } from "./secure-credentials.mjs";
 import { createControlPlaneClient } from "./control-plane-client.mjs";
@@ -57,6 +65,7 @@ import {
 import capabilitiesModule from "./capabilities.cjs";
 import environmentsModule from "./environments.cjs";
 import { buildApplicationMenu } from "./menu.mjs";
+import { acquireDataDirLease } from "./data-dir-lease.mjs";
 
 const { desktopCapabilities, nativeDesktopActions } = capabilitiesModule;
 const nativeActions = nativeDesktopActions(process.platform);
@@ -236,6 +245,38 @@ let serverProc = null;
 let serverReady = true;
 let secureCredentials = {};
 let secureCredentialState = null;
+let desktopDataDirLease = null;
+const utilityServerExits = new WeakMap();
+const UTILITY_SERVER_STOP_TIMEOUT_MS = 6_500;
+
+function desktopDataDir() {
+  // Match the historical desktop fallback for an unset or empty override,
+  // then pass this exact resolved path to the utility child. server/config.ts
+  // intentionally treats an empty OMB_DATA_DIR differently, so inheriting it
+  // without normalization would lease one directory and write another.
+  return process.env.OMB_DATA_DIR || path.join(app.getPath("home"), ".openmausbot");
+}
+
+async function stopUtilityServer(proc, timeoutMs = UTILITY_SERVER_STOP_TIMEOUT_MS) {
+  if (!proc) return true;
+  const exited = utilityServerExits.get(proc);
+  if (!exited) return false;
+  try {
+    proc.kill();
+  } catch {
+    // The tracked exit promise below is still the authority. A throw can mean
+    // the process crossed the exit boundary immediately before kill().
+  }
+  let timer;
+  return Promise.race([
+    exited.then(() => true),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+let phoneSecretIdentity = null;
 
 const CREDENTIALS_FILE = path.join(app.getPath("userData"), "credentials.bin");
 
@@ -280,7 +321,7 @@ async function saveSecureCredentials(credentials) {
 }
 
 async function secureComposioConfig() {
-  const dataDir = process.env.OMB_DATA_DIR || path.join(app.getPath("home"), ".openmausbot");
+  const dataDir = desktopDataDir();
   const configPath = path.join(dataDir, "config.json");
   try {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -322,7 +363,7 @@ async function secureComposioConfig() {
 // migrates plaintext left by older versions or direct development clients.
 // See workspace-credentials.mjs for the exact rules.
 async function secureWorkspaceConfig() {
-  const dataDir = process.env.OMB_DATA_DIR || path.join(app.getPath("home"), ".openmausbot");
+  const dataDir = desktopDataDir();
   const configPath = path.join(dataDir, "config.json");
   try {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -493,6 +534,29 @@ export async function updateSecureCredentialDocument(derive, afterPersist) {
   }
 }
 
+async function ensurePhoneSecretIdentity() {
+  const existing = readPhoneSecretIdentity(secureCredentialState?.read() ?? secureCredentials);
+  if (existing) {
+    phoneSecretIdentity = existing;
+    return existing;
+  }
+  try {
+    const created = await createPhoneSecretIdentity();
+    await updateSecureCredentialDocument((credentials) =>
+      withPhoneSecretIdentity(credentials, created),
+    );
+    phoneSecretIdentity = created;
+    return created;
+  } catch (error) {
+    // Companion chat remains available. Pairing simply omits the public key,
+    // and mobile cards explain that secure entry needs the desktop until the
+    // OS credential store is available on a later launch.
+    phoneSecretIdentity = null;
+    slog(`phone credential key unavailable: ${error?.message ?? error}`);
+    return null;
+  }
+}
+
 function publicManagedCompanionState() {
   const access = managedCompanionTunnelAccess(secureCredentials);
   const status = managedCompanionConnector?.getStatus();
@@ -528,6 +592,10 @@ function companionLaunchOptions(hostedUrl = null) {
     resourcesPath: process.resourcesPath,
     harnessPort: SERVER_PORT,
     hostedUrl,
+    // Only an embedded server receives the private half over its utility
+    // port. A dev server launched in another terminal cannot decrypt, so it
+    // must not advertise a public key and strand the phone on a dead path.
+    secretPublicKey: app.isPackaged && serverProc ? phoneSecretIdentity?.publicKey ?? null : null,
     log: slog,
   };
 }
@@ -850,10 +918,42 @@ function receiveBrowserLifecycleCleanup(proc, rawMessage) {
   return true;
 }
 
+function syncPhoneSecretKey(proc) {
+  const message = phoneSecretPrivateKeyMessage(phoneSecretIdentity);
+  if (!message) return;
+  try {
+    proc.postMessage(message);
+  } catch (error) {
+    slog(`phone credential key sync failed: ${error?.message ?? error}`);
+  }
+}
+
+const savePhoneSecretOnce = createPhoneSecretSaveCoordinator((target, value) =>
+  saveWorkspaceCredential(target, value),
+);
+
+function receivePhoneSecretSave(proc, rawMessage) {
+  const request = decodePhoneSecretSaveRequest(rawMessage);
+  if (!request) return false;
+  void savePhoneSecretOnce(request).then((result) => {
+    try {
+      proc.postMessage(result);
+    } catch (error) {
+      slog(`phone credential save result failed: ${error?.message ?? error}`);
+    }
+  });
+  return true;
+}
+
 async function startServerOn(port) {
   const entry = path.join(process.resourcesPath, "server", "index.js");
   const childEnv = managedComposioChildEnvironment(composioBrokerUrl(), secureCredentials, {
     ...process.env,
+    // The desktop parent owns the durable data-directory lease. Each utility
+    // server gets only a private capability that validates that same live
+    // owner; fallback-port children must not race to replace the parent lease.
+    ...desktopDataDirLease.utilityServerLeaseEnvironment(),
+    OMB_DATA_DIR: desktopDataDir(),
     // A packaged utility child must never fall back to a descriptor inherited
     // from the launching shell. It starts fail-closed until this exact main
     // process sends the private in-memory connection after spawn.
@@ -881,23 +981,30 @@ async function startServerOn(port) {
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  let resolveServerExit;
+  utilityServerExits.set(proc, new Promise((resolve) => {
+    resolveServerExit = resolve;
+  }));
   proc.stdout?.on("data", (d) => slog(`[out] ${String(d).trimEnd()}`));
   proc.stderr?.on("data", (d) => slog(`[err] ${String(d).trimEnd()}`));
   proc.on("message", (message) => {
     try {
       if (receiveBrowserControlHold(message)) return;
       if (receiveBrowserLifecycleCleanup(proc, message)) return;
+      if (receivePhoneSecretSave(proc, message)) return;
     } catch (error) {
-      slog(`browser private sync rejected: ${error?.message ?? error}`);
+      slog(`desktop private sync rejected: ${error?.message ?? error}`);
     }
   });
   proc.once("spawn", () => {
     slog(`spawned pid=${proc.pid}`);
     syncBrowserConnection(proc);
+    syncPhoneSecretKey(proc);
   });
   let exited = false;
   proc.once("exit", (code) => {
     exited = true;
+    resolveServerExit();
     // Capabilities belong to turns in this exact server child. A crash or
     // restart invalidates them before any replacement child receives the
     // browser descriptor.
@@ -934,10 +1041,11 @@ async function startServerOn(port) {
         : `child on port ${port} did not answer /api/health within ${SERVER_BOOT_TIMEOUT_MS / 1000}s`,
     );
   }
-  try {
-    proc.kill();
-  } catch {}
-  return { proc: null, reason: identity.outcome };
+  const stopped = await stopUtilityServer(proc);
+  if (!stopped) {
+    slog(`child on port ${port} did not exit after termination; refusing to start a sibling server`);
+  }
+  return { proc: null, reason: stopped ? identity.outcome : "stuck-child", abort: !stopped };
 }
 
 async function startServerPackaged() {
@@ -952,6 +1060,7 @@ async function startServerPackaged() {
         SERVER_PORT = port;
         return true;
       }
+      if (started.abort) return false;
       // A child that exited or timed out is not evidence of a port conflict —
       // only "another process answered health checks" is.
       if (started.reason !== "foreign-owner") everyPortForeignOwned = false;
@@ -1980,7 +2089,9 @@ ipcMain.handle("skill-recorder:start", localOnly("skill-recorder:start", (event)
   return startRecorder(win);
 }));
 ipcMain.handle("skill-recorder:stop", localOnly("skill-recorder:stop", () => stopRecorder()));
-ipcMain.handle("skill-recorder:save", localOnly("skill-recorder:save", (_event, payload) => saveSkillRecording(payload)));
+ipcMain.handle("skill-recorder:save", localOnly("skill-recorder:save", (_event, payload) => (
+  saveSkillRecording(payload, { dataRoot: desktopDataDir() })
+)));
 
 // ── companion sidecar ──────────────────────────────────────────────────
 // The renderer gets these five and nothing else: it can turn the companion
@@ -2072,7 +2183,7 @@ const CREDENTIAL_PATCH = {
   openaiImageApiKey: (value) => ({ imageGen: { key: value } }),
 };
 
-ipcMain.handle("credential:set", localOnly("credential:set", async (_event, name, value) => {
+async function saveWorkspaceCredential(name, value) {
   const patchFor = CREDENTIAL_PATCH[name];
   if (!patchFor || typeof value !== "string") {
     throw new Error("Unsupported credential");
@@ -2108,7 +2219,11 @@ ipcMain.handle("credential:set", localOnly("credential:set", async (_event, name
     },
     applyToHarness,
   );
-}));
+}
+
+ipcMain.handle("credential:set", localOnly("credential:set", (_event, name, value) =>
+  saveWorkspaceCredential(name, value),
+));
 
 async function broadcastDesktopCapabilities() {
   const capabilities = desktopCapabilities({
@@ -2130,6 +2245,23 @@ setCuaStateListener((connection) => {
 });
 
 app.whenReady().then(async () => {
+  if (app.isPackaged) {
+    try {
+      // Acquire before either plaintext credential migration reads or writes
+      // config.json. The parent retains ownership across utility-child port
+      // fallbacks and restarts for the entire desktop process lifetime.
+      desktopDataDirLease = acquireDataDirLease(desktopDataDir(), {
+        legacyDataDir: path.join(app.getPath("home"), ".opengrokbot"),
+      });
+    } catch (error) {
+      dialog.showErrorBox(
+        "OpenMausBot could not start safely",
+        error?.message ?? "Another process is using this OpenMausBot data folder.",
+      );
+      app.quit();
+      return;
+    }
+  }
   if (app.isPackaged) app.setAsDefaultProtocolClient("openmausbot");
   if (process.platform === "darwin") app.dock.setIcon(APP_ICON);
   secureCredentials = await loadSecureCredentials();
@@ -2144,6 +2276,7 @@ app.whenReady().then(async () => {
     writable: !credentialStoreUnavailable,
   });
   secureCredentials = secureCredentialState.read();
+  if (app.isPackaged) await ensurePhoneSecretIdentity();
   const hostedAccount = ensureCompanionAccountService();
   // Display capture remains user-initiated. The renderer first sends a
   // short-lived one-shot intent, then calls getDisplayMedia in the same click.
@@ -2293,9 +2426,8 @@ app.on("before-quit", (e) => {
   desktopShutdownStarted = true;
   if (cuaCleanedUp) return;
   e.preventDefault();
-  try {
-    serverProc?.kill();
-  } catch {}
+  const stoppingServer = serverProc;
+  serverProc = null;
   // Release the sleep blocker synchronously; child shutdown is awaited below.
   syncCompanionKeepAwake(false, false);
   // a live dictation session runs its own helper child that holds the mic —
@@ -2305,7 +2437,7 @@ app.on("before-quit", (e) => {
   try {
     browserSurface?.closeAll();
   } catch {}
-  const cleanup = Promise.race([
+  const ownedHelperCleanup = Promise.race([
     Promise.all([
       stopCua().catch(() => {}),
       browserHost?.stop().catch(() => {}) ?? Promise.resolve(),
@@ -2316,8 +2448,32 @@ app.on("before-quit", (e) => {
     ]),
     new Promise((resolve) => setTimeout(resolve, CUA_STOP_TIMEOUT_MS).unref()),
   ]);
+  const cleanup = Promise.all([
+    ownedHelperCleanup,
+    stopUtilityServer(stoppingServer).then((stopped) => {
+      if (!stopped) slog("server child did not stop before desktop exit; retaining the data-directory lease");
+    }),
+  ]);
   cleanup.then(() => {
     cuaCleanedUp = true;
     app.quit();
   });
 });
+
+function releaseDesktopDataDirLease() {
+  if (!desktopDataDirLease) return;
+  try {
+    desktopDataDirLease.release();
+    desktopDataDirLease = null;
+  } catch (error) {
+    // Never print the private child capability. Lease errors contain only the
+    // data-safety reason and, for contention, the owning process id.
+    slog(`data-directory lease release failed: ${error?.message ?? error}`);
+  }
+}
+
+// before-quit is deliberately too early: this app defers it while owned
+// helpers shut down. will-quit is the final Electron lifecycle boundary; the
+// process hook covers app.exit()/fatal exits that bypass it.
+app.on("will-quit", releaseDesktopDataDirLease);
+process.once("exit", releaseDesktopDataDirLease);

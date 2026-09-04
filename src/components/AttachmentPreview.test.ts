@@ -10,6 +10,7 @@ import {
   contentDispositionFilename,
   imageGalleryLayout,
   isExternalImageSource,
+  messageImagePreviewUrl,
   previewImage,
   previewKeyAction,
   safeDownloadFilename,
@@ -98,6 +99,18 @@ describe("attachment preview surfaces", () => {
     expect(html).toContain("Loading Launch artwork.png");
     expect(html).toContain("Preview attached image Launch artwork.png");
     expect(html).toContain("/api/attachments/123e4567-e89b-12d3-a456-426614174000.png");
+    expect(html).toContain("loading=\"lazy\"");
+    expect(html).not.toContain("fetchPriority=\"high\"");
+  });
+
+  it("can prioritize a newly sent image without making old galleries eager", () => {
+    const html = renderToStaticMarkup(createElement(AttachedImageGallery, {
+      paths: ["/store/123e4567-e89b-12d3-a456-426614174000.png"],
+      eager: true,
+    }));
+
+    expect(html).toContain("loading=\"eager\"");
+    expect(html).toContain("fetchPriority=\"high\"");
   });
 
   it("keeps remote Markdown images private until explicitly loaded", () => {
@@ -147,5 +160,16 @@ describe("attachment preview surfaces", () => {
     }));
     expect(html).toContain("Save a copy of Final report.pdf");
     expect(html).toContain("type=\"button\"");
+  });
+});
+
+describe("local Markdown image lifecycle", () => {
+  it("builds a path-free, directly streamable message preview URL", () => {
+    expect(messageImagePreviewUrl(
+      { threadId: "thread-one", messageId: "message-two" },
+      42,
+    )).toBe(
+      "/api/threads/thread-one/messages/message-two/file?preview=1&ref=42",
+    );
   });
 });

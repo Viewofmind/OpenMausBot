@@ -5,15 +5,16 @@
 //
 // The fake is a shebang script — the same constraint codex.cmd itself
 // hits on Windows. resolveCliSpawn covers both, so these run everywhere.
-import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { ProviderInstance } from "../contracts.ts";
+import { NATIVE_DIR } from "../config.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
-import { CodexDriver } from "./codex.ts";
+import { CodexDriver, codexPredatesAstra, codexUpdateCommand } from "./codex.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
 
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "testing", "fake-codex-app-server.ts");
@@ -59,6 +60,8 @@ describe("CodexDriver turns (fake app-server)", () => {
     delete process.env.FAKE_CODEX_PARTIAL_FAILS;
     delete process.env.FAKE_CODEX_STATE;
     delete process.env.FAKE_CODEX_RETRY_SCALE;
+    delete process.env.FAKE_CODEX_VERSION;
+    delete process.env.FAKE_CODEX_ASTRA;
     delete process.env.OPENAI_API_KEY;
     delete process.env.BOX_TOKEN;
     delete process.env.OMB_TTS_KEY;
@@ -127,6 +130,35 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(turnStart.params.input[0].text).toBe("You are Testy.\n\nlist files");
     const threadStart = seen.calls.find((c: { method: string }) => c.method === "thread/start");
     expect(threadStart.params).toMatchObject({ model: "gpt-5.6-sol", modelProvider: "openai" });
+  });
+
+  it("sends current-turn images as native localImage inputs without logging their private paths", async () => {
+    await create();
+    const dump = join(scratch, "images.json");
+    const imagePath = join(scratch, "private image.png");
+    process.env.FAKE_CODEX_DUMP = dump;
+    mkdirSync(NATIVE_DIR, { recursive: true });
+    writeFileSync(imagePath, "png");
+
+    await instance.adapter.sendTurn({
+      threadId: "t-native-input-image",
+      text: "describe this",
+      system: "You are Testy.",
+      images: [{ path: imagePath, mime: "image/png", bytes: 3 }],
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    const turnStart = seen.calls.find((call: { method: string }) => call.method === "turn/start");
+    expect(turnStart.params.input).toEqual([
+      { type: "text", text: "You are Testy.\n\ndescribe this" },
+      { type: "localImage", path: imagePath },
+    ]);
+
+    const nativeLog = readFileSync(join(NATIVE_DIR, "t-native-input-image.ndjson"), "utf8");
+    expect(nativeLog).toContain('"type":"localImage"');
+    expect(nativeLog).toContain("[private attachment path omitted]");
+    expect(nativeLog).not.toContain(imagePath);
   });
 
   it("normalizes native image generation bytes without exposing the provider path", async () => {
@@ -518,6 +550,62 @@ describe("CodexDriver turns (fake app-server)", () => {
       state: "available",
       authenticated: true,
     });
+  });
+
+  it("offers the exact Astra update command without blocking older Codex models", async () => {
+    process.env.FAKE_CODEX_VERSION = "codex-cli 0.152.1";
+    await create();
+
+    await expect(instance.snapshot()).resolves.toMatchObject({
+      state: "available",
+      update: {
+        title: "Update Codex for GPT-6 Astra",
+        command: codexUpdateCommand(FAKE_CLI),
+      },
+    });
+  });
+
+  it("does not show an Astra update prompt for a supported Codex version", async () => {
+    process.env.FAKE_CODEX_VERSION = "codex-cli 0.153.1";
+    await create();
+
+    expect((await instance.snapshot()).update).toBeUndefined();
+  });
+
+  it("trusts a live Astra catalog even when the bundled CLI version predates the documented release", async () => {
+    process.env.FAKE_CODEX_VERSION = "codex-cli 0.153.0";
+    process.env.FAKE_CODEX_ASTRA = "1";
+    await create();
+
+    expect(instance.models.options.map((model) => model.id)).toContain("gpt-6-astra");
+    expect((await instance.snapshot()).update).toBeUndefined();
+  });
+
+  it("compares Codex versions conservatively", () => {
+    expect(codexPredatesAstra("codex-cli 0.152.1")).toBe(true);
+    expect(codexPredatesAstra("codex-cli 0.153.0")).toBe(true);
+    expect(codexPredatesAstra("codex-cli 0.153.1")).toBe(false);
+    expect(codexPredatesAstra("codex-cli 1.0.0-beta.1")).toBe(false);
+    expect(codexPredatesAstra("wrapper 0.1.0 using codex-cli 0.153.3")).toBe(false);
+    expect(codexPredatesAstra("wrapper 1.0.0 using codex-cli 0.151.0")).toBe(true);
+    expect(codexPredatesAstra("codex-cli 0.152.1.4")).toBe(false);
+    expect(codexPredatesAstra("custom nightly")).toBe(false);
+  });
+
+  it("updates the selected Codex executable instead of installing a second copy", () => {
+    expect(codexUpdateCommand("codex", "darwin")).toBe("codex update");
+    expect(codexUpdateCommand("'/Applications/My Codex/codex'", "darwin")).toBe(
+      "'/Applications/My Codex/codex' update",
+    );
+    expect(codexUpdateCommand("'C:\\Program Files\\Codex\\codex.exe'", "win32")).toBe(
+      "& 'C:\\Program Files\\Codex\\codex.exe' update",
+    );
+    expect(codexUpdateCommand("/usr/local/bin/ag codex", "darwin")).toBe(
+      "'/usr/local/bin/ag' 'codex' update",
+    );
+    expect(codexUpdateCommand("'C:\\Program Files\\ag.exe' codex", "win32")).toBe(
+      "& 'C:\\Program Files\\ag.exe' 'codex' update",
+    );
   });
 
   it("marks a Codex 401 as setup so the UI offers sign-in instead of Retry", async () => {
