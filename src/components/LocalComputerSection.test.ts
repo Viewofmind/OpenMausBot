@@ -6,9 +6,14 @@ import {
   CloudComputersCard,
   LocalVmInventoryCard,
   VpsComputersCard,
+  cloudComputerActionPlan,
   cloudComputerInventoryState,
+  computerInventoryRequest,
+  confirmComputerAction,
   localVmInventoryState,
+  perBotLocalVmDeletePlan,
   reconcileCloudInventorySnapshot,
+  vpsComputerRemovePlan,
   vpsComputerInventoryState,
   vpsComputerShortId,
   type CloudComputerInventoryInstance,
@@ -35,6 +40,91 @@ const ownedCloudComputer: CloudComputerInventoryInstance = {
   orphaned: false,
   inUse: false,
 };
+
+describe("computer inventory request wiring", () => {
+  it("keeps every mount and refresh request observation-only", () => {
+    const controller = new AbortController();
+    const requests = ([
+      ["status", "/api/local-computer"],
+      ["local-vms", "/api/local-computer/instances"],
+      ["cloud", "/api/computers/boxes"],
+      ["vps", "/api/computers/vps"],
+    ] as const).map(([kind, expectedUrl]) => ({
+      expectedUrl,
+      request: computerInventoryRequest(kind, controller.signal),
+    }));
+
+    for (const { expectedUrl, request: [url, init] } of requests) {
+      expect(url).toBe(expectedUrl);
+      expect(init).toEqual({ signal: controller.signal });
+      expect(init.method).toBeUndefined();
+      expect(init.body).toBeUndefined();
+    }
+  });
+
+  it("does not expose a destructive request when confirmation is cancelled", () => {
+    const confirm = vi.fn(() => false);
+    const request = confirmComputerAction(perBotLocalVmDeletePlan(cloudVm), confirm);
+
+    expect(request).toBeNull();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledWith(
+      "Delete Research's Local VM? Its durable workspace files will remain.",
+    );
+  });
+
+  it("builds the exact confirmed Local VM, Box, and VPS lifecycle requests", () => {
+    const confirm = vi.fn(() => true);
+    const local = confirmComputerAction(perBotLocalVmDeletePlan(cloudVm), confirm);
+    const cloudDelete = confirmComputerAction(cloudComputerActionPlan("delete", ownedCloudComputer), confirm);
+    const cloudSleep = confirmComputerAction(cloudComputerActionPlan("sleep", ownedCloudComputer), confirm);
+    const vpsName = "openmausbot-vps-current-123456abcdef";
+    const vps = confirmComputerAction(vpsComputerRemovePlan({
+      name: vpsName,
+      state: "running",
+      ownerBotId: "current-owner",
+      ownerName: "Research",
+      orphaned: false,
+      inUse: false,
+    }), confirm);
+
+    expect(local).toEqual([
+      "/api/bots/cloud-bot/local-computer/remove",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    ]);
+    expect(cloudDelete).toEqual([
+      "/api/computers/boxes/provider-id-must-not-render/delete",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirmName: ownedCloudComputer.name }),
+      },
+    ]);
+    expect(cloudSleep).toEqual([
+      "/api/computers/boxes/provider-id-must-not-render/sleep",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    ]);
+    expect(vps).toEqual([
+      `/api/computers/vps/${vpsName}/remove`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirmName: vpsName }),
+      },
+    ]);
+    // Sleep is reversible and intentionally skips confirmation; all three
+    // destructive actions above remain explicitly gated.
+    expect(confirm).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("Local VM inventory UI", () => {
   it("shows capacity, current destinations, health, and an in-use deletion guard", () => {

@@ -186,6 +186,77 @@ export function vpsComputerShortId(name: string): string {
   return suffix ? suffix.slice(-8).toLowerCase() : "unknown";
 }
 
+type ComputerInventoryRequest = "status" | "local-vms" | "cloud" | "vps";
+type ComputerApiRequest = [url: string, init: RequestInit];
+export interface ComputerActionPlan {
+  confirmation: string | null;
+  request: ComputerApiRequest;
+}
+
+const computerInventoryPaths: Record<ComputerInventoryRequest, string> = {
+  status: "/api/local-computer",
+  "local-vms": "/api/local-computer/instances",
+  cloud: "/api/computers/boxes",
+  vps: "/api/computers/vps",
+};
+
+/** Keep the observation-only Settings reads explicit and independently
+ * testable: opening Computers must never provision or wake anything. */
+export function computerInventoryRequest(
+  inventory: ComputerInventoryRequest,
+  signal?: AbortSignal,
+): ComputerApiRequest {
+  return [computerInventoryPaths[inventory], { signal }];
+}
+
+function jsonPostRequest(url: string, body: unknown): ComputerApiRequest {
+  return [url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }];
+}
+
+export function perBotLocalVmDeletePlan(instance: LocalVmInventoryInstance): ComputerActionPlan {
+  return {
+    confirmation: `Delete ${instance.name}'s Local VM? Its durable workspace files will remain.`,
+    request: jsonPostRequest(`/api/bots/${instance.botId}/local-computer/remove`, {}),
+  };
+}
+
+export function cloudComputerActionPlan(
+  action: CloudAction,
+  instance: CloudComputerInventoryInstance,
+): ComputerActionPlan {
+  return {
+    confirmation: action === "delete"
+      ? `Permanently delete ${instance.orphaned ? "this orphaned cloud computer" : `${instance.ownerName}'s cloud computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`
+      : null,
+    request: jsonPostRequest(
+      `/api/computers/boxes/${encodeURIComponent(instance.boxId)}/${action}`,
+      action === "delete" ? { confirmName: instance.name } : {},
+    ),
+  };
+}
+
+export function vpsComputerRemovePlan(instance: VpsComputerInventoryInstance): ComputerActionPlan {
+  const shortId = vpsComputerShortId(instance.name);
+  return {
+    confirmation: `Permanently remove ${instance.orphaned ? `orphaned VPS computer ID ${shortId}` : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
+    request: jsonPostRequest(`/api/computers/vps/${encodeURIComponent(instance.name)}/remove`, {
+      confirmName: instance.name,
+    }),
+  };
+}
+
+export function confirmComputerAction(
+  plan: ComputerActionPlan,
+  confirm: (message: string) => boolean,
+): ComputerApiRequest | null {
+  if (plan.confirmation !== null && !confirm(plan.confirmation)) return null;
+  return plan.request;
+}
+
 export function VpsComputersCard({
   instances,
   configured,
@@ -661,7 +732,7 @@ export function LocalComputerSection() {
   const [announcement, setAnnouncement] = useState("");
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/local-computer", { signal });
+    const response = await fetch(...computerInventoryRequest("status", signal));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error ?? `Status request failed (${response.status})`);
     setStatus(body as Status);
@@ -669,7 +740,7 @@ export function LocalComputerSection() {
   }, []);
 
   const refreshInventory = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/local-computer/instances", { signal });
+    const response = await fetch(...computerInventoryRequest("local-vms", signal));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error ?? `Inventory request failed (${response.status})`);
     const payload = body as LocalVmInventoryPayload;
@@ -680,7 +751,7 @@ export function LocalComputerSection() {
   }, []);
 
   const refreshCloudInventory = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/computers/boxes", { signal });
+    const response = await fetch(...computerInventoryRequest("cloud", signal));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error ?? `Cloud inventory request failed (${response.status})`);
     const payload = body as CloudComputerInventoryPayload;
@@ -702,7 +773,7 @@ export function LocalComputerSection() {
   }, []);
 
   const refreshVpsInventory = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/computers/vps", { signal });
+    const response = await fetch(...computerInventoryRequest("vps", signal));
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error ?? `VPS inventory request failed (${response.status})`);
     const payload = body as VpsComputerInventoryPayload;
@@ -863,15 +934,15 @@ export function LocalComputerSection() {
   };
 
   const deletePerBotVm = async (instance: LocalVmInventoryInstance) => {
-    if (!window.confirm(`Delete ${instance.name}'s Local VM? Its durable workspace files will remain.`)) return;
+    const request = confirmComputerAction(
+      perBotLocalVmDeletePlan(instance),
+      (message) => window.confirm(message),
+    );
+    if (!request) return;
     setDeletingBotId(instance.botId);
     setInventoryError(null);
     try {
-      const response = await fetch(`/api/bots/${instance.botId}/local-computer/remove`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
+      const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? "Could not delete this Local VM");
       await refreshInventory();
@@ -884,21 +955,16 @@ export function LocalComputerSection() {
   };
 
   const actOnCloudComputer = async (action: CloudAction, instance: CloudComputerInventoryInstance) => {
-    if (
-      action === "delete" &&
-      !window.confirm(
-        `Permanently delete ${instance.orphaned ? "this orphaned cloud computer" : `${instance.ownerName}'s cloud computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
-      )
-    ) return;
+    const request = confirmComputerAction(
+      cloudComputerActionPlan(action, instance),
+      (message) => window.confirm(message),
+    );
+    if (!request) return;
     setCloudPending({ boxId: instance.boxId, action });
     setCloudError(null);
     setAnnouncement("");
     try {
-      const response = await fetch(`/api/computers/boxes/${encodeURIComponent(instance.boxId)}/${action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(action === "delete" ? { confirmName: instance.name } : {}),
-      });
+      const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? `Could not ${action} this cloud computer`);
       cloudOverridesRef.current = {
@@ -930,19 +996,15 @@ export function LocalComputerSection() {
 
   const removeVpsComputer = async (instance: VpsComputerInventoryInstance) => {
     const shortId = vpsComputerShortId(instance.name);
-    if (
-      !window.confirm(
-        `Permanently remove ${instance.orphaned ? `orphaned VPS computer ID ${shortId}` : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
-      )
-    ) return;
+    const request = confirmComputerAction(
+      vpsComputerRemovePlan(instance),
+      (message) => window.confirm(message),
+    );
+    if (!request) return;
     setVpsRemovingName(instance.name);
     setVpsError(null);
     try {
-      const response = await fetch(`/api/computers/vps/${encodeURIComponent(instance.name)}/remove`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ confirmName: instance.name }),
-      });
+      const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? "Could not remove this VPS computer");
       await refreshVpsInventory();

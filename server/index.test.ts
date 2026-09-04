@@ -36,9 +36,17 @@ const boxRouteCalls: Array<{ method: string; path: string }> = [];
 let boxSlowRequestCount = 0;
 let managedBoxRows: Array<Record<string, unknown>> = [];
 let managedBoxListStatus = 200;
-let managedBoxListDelayMs = 0;
 let managedBoxStopDelayMs = 0;
 let managedBoxRenameDelayMs = 0;
+type DeferredGate = { wait: Promise<void>; release: () => void };
+const deferredGate = (): DeferredGate => {
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { wait, release };
+};
+let managedBoxListGate: DeferredGate | null = null;
 type ManagedBoxCreateMode = "refuse" | "ambiguous" | "fail-rename" | "success";
 let managedBoxCreateMode: ManagedBoxCreateMode = "refuse";
 let managedBoxCreateId = "bx_cdefghjk";
@@ -525,9 +533,8 @@ beforeAll(async () => {
       const requestUrl = new URL(path, "http://box.invalid");
       boxRouteCalls.push({ method, path });
       if (method === "GET" && requestUrl.pathname === "/boxes") {
-        if (managedBoxListDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, managedBoxListDelayMs));
-        }
+        const listGate = managedBoxListGate;
+        if (listGate) await listGate.wait;
         res.writeHead(managedBoxListStatus, { "content-type": "application/json" });
         return res.end(JSON.stringify(
           managedBoxListStatus === 200
@@ -1943,7 +1950,8 @@ describe("harness HTTP API", () => {
       expect(managedBoxRows.some((row) => row.id === "bx_23456789")).toBe(false);
     } finally {
       managedBoxListStatus = 200;
-      managedBoxListDelayMs = 0;
+      managedBoxListGate?.release();
+      managedBoxListGate = null;
       managedBoxStopDelayMs = 0;
       managedBoxRows = [];
       managedBoxDeleteConfirmations.length = 0;
@@ -2000,7 +2008,8 @@ describe("harness HTTP API", () => {
       expect((await api("PATCH", `/api/groups/${room.id}`, {
         defaultResponder: { kind: "mentions" },
       })).status).toBe(200);
-      managedBoxListDelayMs = 2_000;
+      const listGate = deferredGate();
+      managedBoxListGate = listGate;
       boxRouteCalls.length = 0;
       const deletion = api("DELETE", `/api/bots/${bot.id}`);
       await expect.poll(() => boxRouteCalls.some(
@@ -2016,13 +2025,15 @@ describe("harness HTTP API", () => {
         return currentRoom?.messages.some((message: { tool?: { name?: string } }) =>
           message.tool?.name === "Target's cloud computer is being changed — skipped this round"
         ) ?? false;
-      }, { timeout: 1_500 }).toBe(true);
+      }, { timeout: 5_000 }).toBe(true);
+      listGate.release();
       expect((await deletion).status).toBe(200);
-      managedBoxListDelayMs = 0;
+      managedBoxListGate = null;
       botId = "";
     } finally {
       managedBoxListStatus = 200;
-      managedBoxListDelayMs = 0;
+      managedBoxListGate?.release();
+      managedBoxListGate = null;
       managedBoxRows = [];
       if (roomId) await api("DELETE", `/api/groups/${roomId}`).catch(() => undefined);
       if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
