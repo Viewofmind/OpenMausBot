@@ -8303,8 +8303,23 @@ const server = createServer(async (req, res) => {
           else section = trimmed;
         }
       }
-      for (const key of ["unread", "computer", "cloudBackend", "color", "mascotExpression", "mascotBody", "pinned", "hidden"] as const) {
+      for (const key of ["unread", "cloudBackend", "color", "mascotExpression", "mascotBody", "pinned", "hidden"] as const) {
         if (body[key] !== undefined) patch[key] = body[key];
+      }
+      const computerSpecified = Object.prototype.hasOwnProperty.call(body, "computer");
+      let requestedComputer = existingBot?.computer;
+      if (computerSpecified) {
+        if (body.computer === null) {
+          // Auto is represented by an absent durable field. JSON needs a
+          // concrete clear value, so clients send null at the PATCH boundary.
+          requestedComputer = undefined;
+          patch.computer = undefined;
+        } else if (["cloud", "vm", "local", "browser", "off"].includes(String(body.computer))) {
+          requestedComputer = body.computer;
+          patch.computer = body.computer;
+        } else {
+          return json(res, 400, { error: "computer must be null (Auto), cloud, vm, local, browser, or off" });
+        }
       }
       if (normalizedSelection) patch.modelSelection = normalizedSelection;
       // one pinned message per thread; null/"" clears. The id is not
@@ -8347,12 +8362,6 @@ const server = createServer(async (req, res) => {
           patch.browserProfile = requestedProfile;
         } else return json(res, 400, { error: "browserProfile must name an existing browser profile" });
       }
-      if (
-        body.computer !== undefined &&
-        !["cloud", "vm", "local", "browser", "off"].includes(String(body.computer))
-      ) {
-        return json(res, 400, { error: "computer must be cloud, vm, local, browser, or off" });
-      }
       if (body.cloudBackend !== undefined && !["box", "vps"].includes(String(body.cloudBackend))) {
         return json(res, 400, { error: "cloudBackend must be box or vps" });
       }
@@ -8394,7 +8403,7 @@ const server = createServer(async (req, res) => {
       // create the combination — a bot curling the loopback API from a tool
       // call, a script, a stale client — is refused. The renderer dialog
       // alone is not a boundary; this check is.
-      const wantsComputer = body.computer !== undefined ? body.computer : existingBot?.computer;
+      const wantsComputer = computerSpecified ? requestedComputer : existingBot?.computer;
       const wantsAuto = body.autoApprove !== undefined ? body.autoApprove : existingBot?.autoApprove === true;
       const alreadyGranted = existingBot?.computer === "local" && existingBot?.autoApprove === true;
       if (wantsComputer === "local" && wantsAuto === true && !alreadyGranted && body.acknowledgeLocalAuto !== true) {
@@ -8414,7 +8423,7 @@ const server = createServer(async (req, res) => {
         }
         patch.alwaysAllow = [...new Set(body.alwaysAllow as string[])].slice(0, 200);
       }
-      if (existingBot?.computer === "local" && body.computer !== undefined && body.computer !== "local") {
+      if (existingBot?.computer === "local" && computerSpecified && requestedComputer !== "local") {
         cancelDirectTurnDispatch(existingBot.id, existingBot.threadId);
         await registry
           .get(existingBot.modelSelection.instanceId)
@@ -10080,6 +10089,11 @@ const server = createServer(async (req, res) => {
         if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
         const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
         return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
+      }
+      if (m[2] === "provision" && bot.computer !== "cloud") {
+        return json(res, 409, {
+          error: "Choose Cloud before creating or waking this Box. Auto only checks existing computer state.",
+        });
       }
       if (m[2] === "remove") {
         // Boxes sleep and wake; only the VPS backend has a container to remove.

@@ -59,35 +59,44 @@ export function linuxAutoDescription(): string {
   return "Auto reuses an existing cloud box; otherwise computer use stays off.";
 }
 
-export type BoxPanelAction = "ensure-box" | "local" | "unconfigured" | "auto-unavailable";
+export type BoxPanelAction =
+  | "ensure-box"
+  | "show-ready-box"
+  | "show-sleeping-box"
+  | "local"
+  | "unconfigured"
+  | "auto-unavailable";
+
+const READY_BOX_STATES = new Set(["idle", "ready", "running"]);
 
 /** Mirror the turn router's Box choice without letting a passive panel open
- * create infrastructure. Auto may wake an existing Box. The box-native
- * Computer engine is the sole creation exception because it cannot run
- * anywhere else; explicit Cloud is always an intentional creation request. */
+ * mutate infrastructure. Auto only reports an existing Box's current state;
+ * it never creates, wakes, bootstraps, or opens one. This is deliberately
+ * independent of the engine: even the box-native Computer engine needs an
+ * explicit Cloud choice before the panel may provision. */
 export function resolveBoxPanelAction({
   computer,
-  driverKind,
   configured,
-  hasExistingBox,
+  boxState,
   canUseCloud,
   autoLocal,
 }: {
   computer: Bot["computer"];
-  driverKind: string | undefined;
   configured: boolean;
-  hasExistingBox: boolean;
+  boxState: string | null;
   canUseCloud: boolean;
   autoLocal: boolean;
 }): BoxPanelAction {
   const explicitCloud = computer === "cloud";
-  const boxNative = driverKind === "boxAgent";
 
   if (!configured) {
-    if (explicitCloud || boxNative) return "unconfigured";
+    if (explicitCloud) return "unconfigured";
     return autoLocal ? "local" : "auto-unavailable";
   }
-  if (canUseCloud && (hasExistingBox || explicitCloud || boxNative)) return "ensure-box";
+  if (explicitCloud) return canUseCloud ? "ensure-box" : "auto-unavailable";
+  if (canUseCloud && boxState) {
+    return READY_BOX_STATES.has(boxState) ? "show-ready-box" : "show-sleeping-box";
+  }
   return autoLocal ? "local" : "auto-unavailable";
 }
 

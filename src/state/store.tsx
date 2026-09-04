@@ -1236,7 +1236,12 @@ export function reducer(state: AppState, action: Action): AppState {
             ),
           }
         : animated;
-      const { acknowledgeLocalAuto: _ack, ...botPatch } = action.patch;
+      const { acknowledgeLocalAuto: _ack, computer, ...rest } = action.patch;
+      const botPatch = computer === null
+        ? { ...rest, computer: undefined }
+        : computer === undefined
+          ? rest
+          : { ...rest, computer };
       return updateBot(next, action.botId, (b) => ({ ...b, ...botPatch }));
     }
     case "threadActive": {

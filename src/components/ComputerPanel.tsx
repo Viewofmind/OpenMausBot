@@ -1,10 +1,10 @@
 // The bot's computer, in the right-side slot. Where it runs decides the
-// whole flow: cloud → provision the box on open (idempotent) and preview
+// whole flow: explicit cloud → provision the box on open (idempotent) and preview
 // via SSE frames or a ~4s screenshot poll. macOS local mode keeps the legacy
 // in-panel capture. Linux local mode is an automation readiness state and its
-// separate preview remains explicitly user-initiated. Auto reuses but never
-// creates a Box (except for the box-native engine), and never selects a Linux
-// user's desktop.
+// separate preview remains explicitly user-initiated. Auto only reads an
+// existing Box's state: opening this panel never creates, wakes, bootstraps,
+// screenshots, or opens one, regardless of engine.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
@@ -39,7 +39,6 @@ import { LocalScreenPreview } from "./LocalScreenPreview";
 import { LinuxLocalControl } from "./LinuxLocalControl";
 import { MacLocalControl } from "./MacLocalControl";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
-import { Switch } from "./SettingsPrimitives";
 import {
   autoSelectsLocalComputer,
   instanceSupportsLocalComputer,
@@ -76,6 +75,8 @@ type Phase =
   | "local"
   | "local-unavailable"
   | "auto-unavailable"
+  | "show-ready-box"
+  | "show-sleeping-box"
   | "browser"
   | "off"
   | "error";
@@ -303,7 +304,7 @@ export function ComputerPanel({
         ? "the built-in browser"
         : bot.computer === "off"
           ? null
-          : phase === "ready"
+          : phase === "ready" || phase === "show-ready-box"
             ? cloudBackend === "vps" ? "the self-hosted VPS selected by Auto" : "the cloud box selected by Auto"
             : "this computer selected by Auto";
 
@@ -469,9 +470,9 @@ export function ComputerPanel({
         alive = false;
       };
     }
-    // Cloud creates/wakes its Box. Auto may wake an existing Box but must not
-    // create one merely because this passive panel was opened. This mirrors
-    // turn routing, including the box-native engine's required exception.
+    // Explicit Cloud may create/wake its Box. Auto is observation-only here:
+    // even a ready Box and the box-native engine stay free of POSTs until the
+    // person deliberately chooses Cloud.
     api(`/api/bots/${bot.id}/computer`)
       .then((status) => {
         if (!alive) return;
@@ -483,13 +484,15 @@ export function ComputerPanel({
         });
         const action = resolveBoxPanelAction({
           computer: bot.computer,
-          driverKind: selectedInstance?.driverKind,
           configured: Boolean(status.configured),
-          hasExistingBox: Boolean(status.box),
+          boxState: typeof status.box?.state === "string" ? status.box.state : null,
           canUseCloud: cloudSupported,
           autoLocal,
         });
         if (action !== "ensure-box") {
+          if (action === "show-ready-box" || action === "show-sleeping-box") {
+            setBoxState(typeof status.box?.state === "string" ? status.box.state : null);
+          }
           setPhase(action);
           return;
         }
@@ -854,6 +857,8 @@ export function ComputerPanel({
     starting: "Starting your bot's computer…",
     unconfigured: "No cloud computer configured",
     "auto-unavailable": "Auto found no existing computer. Choose Cloud to create one, or pick another destination.",
+    "show-ready-box": "Auto found an existing cloud computer. It was not opened or changed.",
+    "show-sleeping-box": "Auto found a sleeping cloud computer. It was not woken or changed.",
     "vps-unconfigured": "No managed VPS computer is configured for this bot",
     "vps-incompatible": "This VPS computer belongs to an earlier OpenMausBot version",
     "vps-stopped": "The managed VPS computer is stopped",
@@ -966,6 +971,9 @@ export function ComputerPanel({
             <span>{bot.name}'s screen</span>
             {phase === "local" && <span className="text-[11px]">this computer</span>}
             {phase === "vm" && <span className="text-[11px]">Local VM</span>}
+            {(phase === "show-ready-box" || phase === "show-sleeping-box") && (
+              <span className="text-[11px]">cloud box · Auto · read-only</span>
+            )}
             {cloudBackend === "vps" && (phase === "ready" || phase === "starting") && <span className="text-[11px]">self-hosted VPS</span>}
         </div>
         <div className="flex aspect-[16/10] w-full items-center justify-center overflow-hidden rounded-xl bg-card">
@@ -1031,6 +1039,15 @@ export function ComputerPanel({
                   className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover"
                 >
                   Open the Browser tab
+                </button>
+              )}
+              {(phase === "show-ready-box" || phase === "show-sleeping-box") && (
+                <button
+                  type="button"
+                  onClick={() => dispatch({ type: "updateBot", botId: bot.id, patch: { computer: "cloud" } })}
+                  className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover"
+                >
+                  {phase === "show-sleeping-box" ? "Choose Cloud to wake" : "Choose Cloud to open"}
                 </button>
               )}
               {phase === "vm-unavailable" && (
@@ -1277,6 +1294,7 @@ export function ComputerPanel({
           <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
             {(
               [
+                [null, "Auto"],
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
@@ -1302,11 +1320,11 @@ export function ComputerPanel({
                           : undefined;
                 return (
               <button
-                key={mode}
+                key={mode ?? "auto"}
                 disabled={disabled}
                 title={unavailableTitle}
                 onClick={() => {
-                  if (mode === bot.computer) return;
+                  if ((mode === null && bot.computer === undefined) || mode === bot.computer) return;
                   if (mode === "local" && bot.autoApprove) setLocalAutoWarning(true);
                   // a browser-only bot must actually have its browser: flip
                   // the per-bot switch on with the destination
@@ -1317,7 +1335,7 @@ export function ComputerPanel({
                   "flex-1 py-1.5 text-[13px]",
                   i > 0 && "border-l border-hairline/40",
                   disabled && "cursor-not-allowed opacity-40",
-                  bot.computer === mode
+                  (mode === null ? bot.computer === undefined : bot.computer === mode)
                     ? "bg-control text-ink"
                     : "text-ink-secondary hover:bg-control/60 hover:text-ink",
                 )}
@@ -1328,33 +1346,19 @@ export function ComputerPanel({
               })()
             ))}
           </div>
-          {(!bot.computer || bot.computer === "cloud") && (
+          {bot.computer === "cloud" && (
             <>
               <CloudBackendPicker
                 value={cloudBackend}
                 vpsSupported={vpsSupported}
                 onChange={(backend) => dispatch({ type: "updateBot", botId: bot.id, patch: { cloudBackend: backend } })}
               />
-              {!bot.computer && cloudBackend === "vps" && (
-                <div className="mt-3 flex items-center justify-between gap-4 rounded-lg bg-inset px-3 py-2.5">
-                  <div className="min-w-0">
-                    <div className="text-[13px] text-ink">Start VPS automatically</div>
-                    <div className="mt-0.5 text-[11.5px] text-ink-secondary">
-                      Off by default. When enabled, Auto may create or wake this bot's managed container.
-                    </div>
-                  </div>
-                  <Switch
-                    checked={Boolean(bot.autoStartVps)}
-                    aria-label="Start VPS automatically"
-                    onClick={() => dispatch({
-                      type: "updateBot",
-                      botId: bot.id,
-                      patch: { autoStartVps: !bot.autoStartVps },
-                    })}
-                  />
-                </div>
-              )}
             </>
+          )}
+          {!bot.computer && (
+            <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
+              Auto is selected. Opening this panel only checks for an existing computer; it never creates or wakes one. Choose Cloud to configure or start a cloud computer.
+            </div>
           )}
         </div>
 

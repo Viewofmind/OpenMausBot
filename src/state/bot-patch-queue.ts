@@ -8,7 +8,6 @@ export type BotUpdatePatch = Partial<
     | "title"
     | "description"
     | "notifications"
-    | "computer"
     | "cloudBackend"
     | "autoStartVps"
     | "color"
@@ -30,11 +29,19 @@ export type BotUpdatePatch = Partial<
     | "modelSelection"
   >
 > & {
+  /** null is the wire representation for clearing an explicit destination
+   * and returning to Auto. Bot state itself keeps Auto as an absent field. */
+  computer?: Bot["computer"] | null;
   /** Rides the PATCH body only: the server's proof that the local-auto
    * warning dialog was shown (see server/index.ts's consent gate). It must
    * reach the wire inside the coalesced body and must never fold into bot
    * state — the queue strips it from every overlay it hands back. */
   acknowledgeLocalAuto?: boolean;
+};
+
+/** A wire patch after clear-only values have been normalized for Bot state. */
+export type BotStatePatch = Omit<BotUpdatePatch, "computer" | "acknowledgeLocalAuto"> & {
+  computer?: Bot["computer"];
 };
 
 interface BotPatchQueueEntry {
@@ -57,14 +64,14 @@ export interface BotPatchQueueOptions {
     signal: AbortSignal,
   ) => Promise<BotAnnouncement>;
   reconcile: (botId: string, signal: AbortSignal) => Promise<BotAnnouncement | null>;
-  onAuthoritative: (bot: BotAnnouncement, optimisticOverlay: BotUpdatePatch) => void;
+  onAuthoritative: (bot: BotAnnouncement, optimisticOverlay: BotStatePatch) => void;
   onError: (error: Error) => void;
 }
 
 export interface BotPatchQueue {
   enqueue: (botId: string, patch: BotUpdatePatch, fallback: BotAnnouncement) => void;
   flush: (botId: string) => Promise<void>;
-  overlayFor: (botId: string) => BotUpdatePatch;
+  overlayFor: (botId: string) => BotStatePatch;
   cancel: (botId: string) => void;
   /** Undo a dispose. Exists for React StrictMode, whose dev-mode mount probe
    * runs the effect cleanup once against the SAME memoized queue — without
@@ -77,9 +84,10 @@ const hasFields = (patch: BotUpdatePatch): boolean => Object.keys(patch).length 
 
 /** What may fold back into renderer bot state: everything except the consent
  * flag, which is wire-only. One strip point covers both overlay paths. */
-const stateOverlay = (patch: BotUpdatePatch): BotUpdatePatch => {
-  const { acknowledgeLocalAuto: _ack, ...fields } = patch;
-  return fields;
+const stateOverlay = (patch: BotUpdatePatch): BotStatePatch => {
+  const { acknowledgeLocalAuto: _ack, computer, ...fields } = patch;
+  if (computer === null) return { ...fields, computer: undefined };
+  return computer === undefined ? fields : { ...fields, computer };
 };
 
 /**

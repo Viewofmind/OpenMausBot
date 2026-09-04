@@ -105,9 +105,8 @@ describe("local computer UI eligibility", () => {
     expect(
       resolveBoxPanelAction({
         computer: undefined,
-        driverKind: "claude",
         configured: true,
-        hasExistingBox: false,
+        boxState: null,
         canUseCloud: true,
         autoLocal: true,
       }),
@@ -115,54 +114,71 @@ describe("local computer UI eligibility", () => {
     expect(
       resolveBoxPanelAction({
         computer: undefined,
-        driverKind: "claude",
         configured: true,
-        hasExistingBox: false,
+        boxState: null,
         canUseCloud: true,
         autoLocal: false,
       }),
     ).toBe("auto-unavailable");
   });
 
-  it("reuses an existing Auto Box and provisions only for intentional cloud use", () => {
+  it("shows existing Auto Boxes without provisioning or waking them", () => {
     const base = {
       configured: true,
       canUseCloud: true,
       autoLocal: true,
+      computer: undefined,
     };
-    expect(
-      resolveBoxPanelAction({
-        ...base,
-        computer: undefined,
-        driverKind: "claude",
-        hasExistingBox: true,
-      }),
-    ).toBe("ensure-box");
-    expect(
-      resolveBoxPanelAction({
-        ...base,
-        computer: "cloud",
-        driverKind: "claude",
-        hasExistingBox: false,
-      }),
-    ).toBe("ensure-box");
-    expect(
-      resolveBoxPanelAction({
-        ...base,
-        computer: undefined,
-        driverKind: "boxAgent",
-        hasExistingBox: false,
-      }),
-    ).toBe("ensure-box");
+    for (const boxState of ["idle", "ready", "running"]) {
+      expect(resolveBoxPanelAction({ ...base, boxState })).toBe("show-ready-box");
+    }
+    for (const boxState of ["archived", "stopped", "provisioning"]) {
+      expect(resolveBoxPanelAction({ ...base, boxState })).toBe("show-sleeping-box");
+    }
+  });
+
+  it("provisions only after an explicit Cloud choice", () => {
+    expect(resolveBoxPanelAction({
+      computer: "cloud",
+      configured: true,
+      boxState: null,
+      canUseCloud: true,
+      autoLocal: true,
+    })).toBe("ensure-box");
+    expect(resolveBoxPanelAction({
+      computer: "cloud",
+      configured: true,
+      boxState: "archived",
+      canUseCloud: true,
+      autoLocal: true,
+    })).toBe("ensure-box");
+  });
+
+  it("never gives the box-native engine a passive Auto creation exception", () => {
+    // Engine kind intentionally is not an input: every engine follows the
+    // same read-only Auto rule, including boxAgent.
+    expect(resolveBoxPanelAction({
+      computer: undefined,
+      configured: true,
+      boxState: null,
+      canUseCloud: true,
+      autoLocal: false,
+    })).toBe("auto-unavailable");
+    expect(resolveBoxPanelAction({
+      computer: undefined,
+      configured: true,
+      boxState: "archived",
+      canUseCloud: true,
+      autoLocal: false,
+    })).toBe("show-sleeping-box");
   });
 
   it("falls back locally when the selected engine cannot use an existing Box", () => {
     expect(
       resolveBoxPanelAction({
         computer: undefined,
-        driverKind: "claude",
         configured: true,
-        hasExistingBox: true,
+        boxState: "running",
         canUseCloud: false,
         autoLocal: true,
       }),

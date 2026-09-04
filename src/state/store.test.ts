@@ -623,6 +623,17 @@ describe("section Chiefs", () => {
     expect(next.bots.find((candidate) => candidate.id === workCandidate.id)?.chiefOfStaff).toBe(true);
     expect(next.bots.find((candidate) => candidate.id === personalChief.id)?.chiefOfStaff).toBe(true);
   });
+
+  it("optimistically clears an explicit computer when Auto is selected", () => {
+    const current = { ...bot("cloud-bot", "Work"), computer: "cloud" as const, messages: [] };
+    const next = reducer({ ...initialState, bots: [current] }, {
+      type: "updateBot",
+      botId: current.id,
+      patch: { computer: null },
+    });
+
+    expect(next.bots[0]?.computer).toBeUndefined();
+  });
 });
 
 describe("pending queued chip", () => {
