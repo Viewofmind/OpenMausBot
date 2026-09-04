@@ -24,9 +24,11 @@ import {
   containerComputerStatus,
   containerRuntimeStatus,
   containerRunArgs,
+  localVmRecreatableOnDemand,
   managedImageDockerfile,
   perBotLocalVmTarget,
   podmanSecurityIsHardened,
+  SHARED_LOCAL_VM_TARGET,
   setupCommands,
   type CommandRunner,
   type LocalVmTarget,
@@ -832,5 +834,70 @@ describe("setupCommands", () => {
 
   it("offers the supported Podman Desktop installer on Windows", () => {
     expect(setupCommands(null, "win32").install).toBe("winget install -e --id RedHat.Podman-Desktop");
+  });
+});
+
+describe("localVmRecreatableOnDemand", () => {
+  const linuxPodman = {
+    "/usr/bin/which docker": new Error("missing"),
+    "/usr/bin/which podman": "podman\n",
+    "podman info --format json": '{"host":{"arch":"amd64"}}\n',
+  };
+
+  it("recreates a Local VM the idle timer removed", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`podman inspect ${target.containerName}`]: new Error("no such container"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.container).toBe("missing");
+    expect(status.problem).toBe("Create the Local VM");
+    expect(localVmRecreatableOnDemand(status)).toBe(true);
+  });
+
+  it("leaves a stopped container alone, because it is asked to be recreated not started", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const detail = JSON.parse(readyInspect())[0];
+    detail.State = { Running: false, Status: "exited" };
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`podman inspect ${target.containerName}`]: JSON.stringify([detail]),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.container).toBe("stopped");
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
+  });
+
+  it("does not create anything when no container runtime is installed", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": new Error("missing"),
+      "/usr/bin/which podman": new Error("missing"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", SHARED_LOCAL_VM_TARGET);
+
+    expect(status.runtime).toBeNull();
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
+  });
+
+  it("does not create anything before the desktop image has been prepared", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: new Error("no such image"),
+      [`podman inspect ${target.containerName}`]: new Error("no such container"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.image).toBe(false);
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
   });
 });

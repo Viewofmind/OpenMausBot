@@ -328,6 +328,31 @@ function emptyStatus(platform: NodeJS.Platform, target: LocalVmTarget): Containe
   };
 }
 
+/** Whether a turn may recreate this Local VM itself instead of failing.
+ *
+ * True for exactly one state: the container is gone, and a plain `run` is all
+ * that is needed to bring it back. That is what `LocalVmIdleTimer` leaves
+ * behind — it removes an unused Local VM rather than pausing it — so a turn
+ * arriving after an idle period should not have to send the person to App
+ * Settings for a container the app itself deleted.
+ *
+ * Every other problem in `statusProblem` stays the person's call and returns
+ * false here: no runtime, daemon down, image never prepared, `create_supported`
+ * false, and any existing container — stale image, unmanaged, unsafe network,
+ * security or persistence. A stopped container is excluded deliberately, since
+ * `statusProblem` says this desktop image cannot safely resume and asks for a
+ * recreate rather than a start.
+ */
+export function localVmRecreatableOnDemand(
+  status: ContainerComputerStatus,
+): status is ContainerComputerStatus & { runtime: Runtime } {
+  return Boolean(status.runtime)
+    && status.daemonUp
+    && status.image
+    && status.container === "missing"
+    && status.create_supported;
+}
+
 function statusProblem(status: ContainerComputerStatus): string | null {
   if (!status.runtime) return "Install a supported container runtime first";
   if (!status.daemonUp) return `Start ${status.runtime} first`;
