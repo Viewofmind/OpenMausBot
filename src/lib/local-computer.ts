@@ -63,11 +63,13 @@ export type BoxPanelAction =
   | "ensure-box"
   | "show-ready-box"
   | "show-sleeping-box"
+  | "show-pending-box"
   | "local"
   | "unconfigured"
   | "auto-unavailable";
 
 const READY_BOX_STATES = new Set(["idle", "ready", "running"]);
+const SLEEPING_BOX_STATES = new Set(["archived", "stopped"]);
 
 /** Mirror the turn router's Box choice without letting a passive panel open
  * mutate infrastructure. Auto only reports an existing Box's current state;
@@ -95,9 +97,30 @@ export function resolveBoxPanelAction({
   }
   if (explicitCloud) return canUseCloud ? "ensure-box" : "auto-unavailable";
   if (canUseCloud && boxState) {
-    return READY_BOX_STATES.has(boxState) ? "show-ready-box" : "show-sleeping-box";
+    if (READY_BOX_STATES.has(boxState)) return "show-ready-box";
+    if (SLEEPING_BOX_STATES.has(boxState)) return "show-sleeping-box";
+    return "show-pending-box";
   }
   return autoLocal ? "local" : "auto-unavailable";
+}
+
+/** A stale ready phase can survive one render while the selected bot or its
+ * destination changes. Keep every cloud preview POST behind the durable,
+ * explicit Cloud choice as well as the resolved phase. */
+export function shouldPollCloudPreview(
+  {
+    computer,
+    phase,
+    botId,
+    resolvedBotId,
+  }: {
+    computer: Bot["computer"];
+    phase: string;
+    botId: string;
+    resolvedBotId: string | null;
+  },
+): boolean {
+  return computer === "cloud" && phase === "ready" && resolvedBotId === botId;
 }
 
 export function autoSelectsLocalComputer({

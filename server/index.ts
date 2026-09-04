@@ -10090,9 +10090,9 @@ const server = createServer(async (req, res) => {
         const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
         return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
       }
-      if (m[2] === "provision" && bot.computer !== "cloud") {
+      if (bot.computer !== "cloud") {
         return json(res, 409, {
-          error: "Choose Cloud before creating or waking this Box. Auto only checks existing computer state.",
+          error: "Choose Cloud before changing or opening this Box. Auto only checks existing computer state.",
         });
       }
       if (m[2] === "remove") {

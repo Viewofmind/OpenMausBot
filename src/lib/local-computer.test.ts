@@ -7,6 +7,7 @@ import {
   localComputerDisabledReason,
   localComputerSelectable,
   resolveBoxPanelAction,
+  shouldPollCloudPreview,
 } from "./local-computer";
 
 describe("local computer UI eligibility", () => {
@@ -132,8 +133,11 @@ describe("local computer UI eligibility", () => {
     for (const boxState of ["idle", "ready", "running"]) {
       expect(resolveBoxPanelAction({ ...base, boxState })).toBe("show-ready-box");
     }
-    for (const boxState of ["archived", "stopped", "provisioning"]) {
+    for (const boxState of ["archived", "stopped"]) {
       expect(resolveBoxPanelAction({ ...base, boxState })).toBe("show-sleeping-box");
+    }
+    for (const boxState of ["provisioning", "creating", "unknown-provider-state"]) {
+      expect(resolveBoxPanelAction({ ...base, boxState })).toBe("show-pending-box");
     }
   });
 
@@ -183,5 +187,15 @@ describe("local computer UI eligibility", () => {
         autoLocal: true,
       }),
     ).toBe("local");
+  });
+
+  it("refuses cloud preview polling when a stale ready phase belongs to Auto or another destination", () => {
+    const ready = { computer: "cloud" as const, phase: "ready", botId: "bot-a", resolvedBotId: "bot-a" };
+    expect(shouldPollCloudPreview(ready)).toBe(true);
+    expect(shouldPollCloudPreview({ ...ready, computer: undefined })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, computer: "local" })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, phase: "starting" })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, botId: "bot-b" })).toBe(false);
+    expect(shouldPollCloudPreview({ ...ready, resolvedBotId: null })).toBe(false);
   });
 });

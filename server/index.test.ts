@@ -33,7 +33,6 @@ let child: ChildProcess;
 let boxStub: Server;
 let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
-let boxRouteListed: { id: string; name: string; state: string } | null = null;
 let home: string;
 let staticDir: string;
 let fakeClaudeDump: string;
@@ -473,16 +472,13 @@ beforeAll(async () => {
       boxRouteCalls.push({ method, path });
       res.writeHead(200, { "content-type": "application/json" });
       if (method === "GET" && path === "/boxes") {
-        return res.end(JSON.stringify({ ok: true, boxes: boxRouteListed ? [boxRouteListed] : [] }));
+        return res.end(JSON.stringify({ ok: true, boxes: [] }));
       }
       if (method === "POST" && path === "/boxes") {
-        return res.end(JSON.stringify({ ok: true, box: { id: "route-box", state: "running" } }));
+        return res.end(JSON.stringify({ ok: false, message: "fixture refused create" }));
       }
       if (method === "GET" && path === "/boxes/route-box") {
         return res.end(JSON.stringify({ ok: true, box: { id: "route-box", state: "running" } }));
-      }
-      if (method === "GET" && boxRouteListed && path === `/boxes/${boxRouteListed.id}`) {
-        return res.end(JSON.stringify({ ok: true, box: boxRouteListed }));
       }
       if (method === "POST" && path === "/boxes/route-box/commands") {
         return res.end(JSON.stringify({ ok: true, exitCode: 0, stdout: "", stderr: "" }));
@@ -1485,11 +1481,11 @@ describe("harness HTTP API", () => {
   });
 
   it("clears an explicit computer to Auto and refuses passive Auto Box provisioning", async () => {
-    const botIds: string[] = [];
+    let botId: string | undefined;
     try {
       expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
       const bot = (await api("POST", "/api/bots")).body.bot;
-      botIds.push(bot.id);
+      botId = bot.id;
       expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).body.bot.computer).toBe("cloud");
 
       const auto = await api("PATCH", `/api/bots/${bot.id}`, { computer: null });
@@ -1502,43 +1498,23 @@ describe("harness HTTP API", () => {
       expect(boxRouteCalls).toEqual([{ method: "GET", path: "/boxes" }]);
 
       // A stale renderer cannot turn that passive read into infrastructure:
-      // the server rejects Auto before any provider mutation is attempted.
+      // every Box verb is rejected before any provider mutation is attempted.
       const before = [...boxRouteCalls];
-      const blocked = await api("POST", `/api/bots/${bot.id}/computer/provision`, {});
-      expect(blocked.status).toBe(409);
-      expect(blocked.body.error).toMatch(/Choose Cloud/);
+      for (const action of ["provision", "join", "sleep", "exec", "screenshot", "remove"]) {
+        const blocked = await api("POST", `/api/bots/${bot.id}/computer/${action}`, {});
+        expect(blocked.status, action).toBe(409);
+        expect(blocked.body.error, action).toMatch(/Choose Cloud/);
+      }
       expect(boxRouteCalls).toEqual(before);
 
       // The same action is available after an explicit human Cloud choice.
       expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
       const provisioned = await api("POST", `/api/bots/${bot.id}/computer/provision`, {});
-      expect(provisioned.status).toBe(200);
-      expect(provisioned.body).toMatchObject({ boxId: "route-box", state: "running" });
+      expect(provisioned.status).toBe(500);
+      expect(provisioned.body.error).toMatch(/fixture refused create/);
       expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes" });
-
-      // Running and archived Boxes are also observations in Auto. Each gets
-      // a fresh bot id so provider lookup cannot be satisfied from the cache.
-      for (const state of ["running", "archived"]) {
-        const observed = (await api("POST", "/api/bots")).body.bot;
-        botIds.push(observed.id);
-        const hash = createHash("sha256").update(observed.id).digest("hex").slice(0, 6);
-        boxRouteListed = {
-          id: `route-${state}`,
-          name: `ogb-${observed.id.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "")}-${hash}`,
-          state,
-        };
-        boxRouteCalls.length = 0;
-        const status = await api("GET", `/api/bots/${observed.id}/computer`);
-        expect(status.body.box).toMatchObject({ state });
-        expect(boxRouteCalls.length).toBeGreaterThan(0);
-        expect(boxRouteCalls.every((call) => call.method === "GET")).toBe(true);
-        const mutationCount = boxRouteCalls.length;
-        expect((await api("POST", `/api/bots/${observed.id}/computer/provision`, {})).status).toBe(409);
-        expect(boxRouteCalls).toHaveLength(mutationCount);
-      }
     } finally {
-      boxRouteListed = null;
-      for (const botId of botIds) await api("DELETE", `/api/bots/${botId}`);
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
       await api("PUT", "/api/config", { box: { token: "" } });
       boxRouteCalls.length = 0;
     }

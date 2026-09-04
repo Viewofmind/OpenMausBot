@@ -46,6 +46,7 @@ import {
   localComputerDisabledReason,
   localComputerSelectable,
   resolveBoxPanelAction,
+  shouldPollCloudPreview,
 } from "@/lib/local-computer";
 import {
   readComputerPanelView,
@@ -77,6 +78,7 @@ type Phase =
   | "auto-unavailable"
   | "show-ready-box"
   | "show-sleeping-box"
+  | "show-pending-box"
   | "browser"
   | "off"
   | "error";
@@ -190,6 +192,13 @@ export function ComputerPanel({
   const [localAutoWarning, setLocalAutoWarning] = useState(false);
   const localDisabledReason = localComputerDisabledReason({ capabilities, providerSupportsLocal });
   const [phase, setPhase] = useState<Phase>("checking");
+  const [cloudReadyBotId, setCloudReadyBotId] = useState<string | null>(null);
+  const cloudPreviewReady = shouldPollCloudPreview({
+    computer: bot.computer,
+    phase,
+    botId: bot.id,
+    resolvedBotId: cloudReadyBotId,
+  });
   const [boxState, setBoxState] = useState<string | null>(null);
   const [polledFrame, setPolledFrame] = useState<{ png: string; mime: string } | null>(null);
   const [vmFrame, setVmFrame] = useState<string | null>(null);
@@ -304,7 +313,7 @@ export function ComputerPanel({
         ? "the built-in browser"
         : bot.computer === "off"
           ? null
-          : phase === "ready" || phase === "show-ready-box"
+          : phase === "ready" || phase === "show-ready-box" || phase === "show-sleeping-box" || phase === "show-pending-box"
             ? cloudBackend === "vps" ? "the self-hosted VPS selected by Auto" : "the cloud box selected by Auto"
             : "this computer selected by Auto";
 
@@ -315,6 +324,7 @@ export function ComputerPanel({
     // wake a box, or churn preview state behind either tab.
     if (panelView !== "computer") return;
     let alive = true;
+    setCloudReadyBotId(null);
     setPhase("checking");
     setPolledFrame(null);
     setVmFrame(null);
@@ -425,6 +435,7 @@ export function ComputerPanel({
           }
           if (status.ready) {
             setBoxState(status.container ?? null);
+            if (bot.computer === "cloud") setCloudReadyBotId(bot.id);
             setPhase("ready");
             return;
           }
@@ -442,7 +453,10 @@ export function ComputerPanel({
             return api(`/api/bots/${bot.id}/computer/provision`, { method: "POST" }).then((result) => {
               if (!alive) return;
               setBoxState(result.container ?? null);
-              if (result.ready) setPhase("ready");
+              if (result.ready) {
+                setCloudReadyBotId(bot.id);
+                setPhase("ready");
+              }
               else {
                 setError(result.problem ?? "The VPS Cua desktop is not ready yet");
                 setPhase("error");
@@ -490,7 +504,7 @@ export function ComputerPanel({
           autoLocal,
         });
         if (action !== "ensure-box") {
-          if (action === "show-ready-box" || action === "show-sleeping-box") {
+          if (action === "show-ready-box" || action === "show-sleeping-box" || action === "show-pending-box") {
             setBoxState(typeof status.box?.state === "string" ? status.box.state : null);
           }
           setPhase(action);
@@ -500,6 +514,7 @@ export function ComputerPanel({
         return api(`/api/bots/${bot.id}/computer/provision`, { method: "POST" }).then((r) => {
           if (!alive) return;
           setBoxState(r.state ?? null);
+          setCloudReadyBotId(bot.id);
           setPhase("ready");
         });
       })
@@ -537,7 +552,7 @@ export function ComputerPanel({
   const sseFlowing = Boolean(bot.busy && live);
   const inFlight = useRef(false);
   useEffect(() => {
-    if (panelView !== "computer" || phase !== "ready" || sseFlowing || viewerOpen || !pageVisible) return;
+    if (panelView !== "computer" || !cloudPreviewReady || sseFlowing || viewerOpen || !pageVisible) return;
     let alive = true;
     const shoot = async () => {
       if (inFlight.current) return;
@@ -557,7 +572,7 @@ export function ComputerPanel({
       alive = false;
       clearInterval(timer);
     };
-  }, [panelView, phase, sseFlowing, bot.id, viewerOpen, pageVisible, bot.busy]);
+  }, [panelView, cloudPreviewReady, sseFlowing, bot.id, viewerOpen, pageVisible, bot.busy]);
 
   // Local VM preview comes directly from Cua Driver through the harness. It
   // does not use the password-protected noVNC viewer or cloud endpoints.
@@ -623,12 +638,12 @@ export function ComputerPanel({
       ? vmFrame
       : phase === "local" && !isLinux
       ? localFrame
-      : phase === "ready" || phase === "starting"
+      : cloudPreviewReady || (bot.computer === "cloud" && phase === "starting")
         ? cloudFrame && `data:${cloudFrame.mime};base64,${cloudFrame.png}`
         : null;
   const previewOpensDesktop = Boolean(
     frameSrc &&
-      ((phase === "vm" && vmViewerUrl) || phase === "ready"),
+      ((phase === "vm" && vmViewerUrl) || cloudPreviewReady),
   );
 
   // who-is-driving: SSE keeps this fresh; the mount fetch covers a panel
@@ -724,7 +739,7 @@ export function ComputerPanel({
       }
 
       let viewerUrl = vmViewerUrl;
-      if (phase === "ready") {
+      if (cloudPreviewReady) {
         const result = await api(`/api/bots/${bot.id}/computer/join`, { method: "POST" });
         viewerUrl = result.joinUrl?.constructor === String ? String(result.joinUrl) : null;
       }
@@ -746,7 +761,7 @@ export function ComputerPanel({
       // Release the bot before waiting on best-effort tunnel cleanup. A sick
       // SSH process must never leave the agent paused indefinitely.
       if (tookControl) await transitionControl("release").catch(() => {});
-      if (phase === "ready" && cloudBackend === "vps") {
+      if (cloudPreviewReady && cloudBackend === "vps") {
         await api(`/api/bots/${bot.id}/computer/viewer-close`, { method: "POST", body: "{}" }).catch(() => {});
       }
       setError(e instanceof Error ? e.message : String(e));
@@ -763,13 +778,17 @@ export function ComputerPanel({
       .then((result) => {
         if (kind === "provision") {
           setBoxState(result.container ?? null);
-          if (result.ready) setPhase("ready");
+          if (result.ready) {
+            if (bot.computer === "cloud") setCloudReadyBotId(bot.id);
+            setPhase("ready");
+          }
           else {
             setError(result.problem ?? "The VPS Cua desktop is not ready yet");
             setPhase("error");
           }
         }
         if (kind === "sleep") {
+          setCloudReadyBotId(null);
           setBoxState(cloudBackend === "vps" ? "stopped" : "archived");
           if (cloudBackend === "vps") setPhase("vps-stopped");
         }
@@ -832,6 +851,7 @@ export function ComputerPanel({
       });
       setVpsStatus(result);
       setBoxState(result.container ?? null);
+      if (result.ready && bot.computer === "cloud") setCloudReadyBotId(bot.id);
       setPhase(result.ready ? "ready" : "error");
       if (!result.ready) setError(result.problem ?? "The replacement VPS Cua desktop is not ready yet");
     } catch (e) {
@@ -859,6 +879,7 @@ export function ComputerPanel({
     "auto-unavailable": "Auto found no existing computer. Choose Cloud to create one, or pick another destination.",
     "show-ready-box": "Auto found an existing cloud computer. It was not opened or changed.",
     "show-sleeping-box": "Auto found a sleeping cloud computer. It was not woken or changed.",
+    "show-pending-box": "Auto found an existing cloud computer that is not ready. It was not changed.",
     "vps-unconfigured": "No managed VPS computer is configured for this bot",
     "vps-incompatible": "This VPS computer belongs to an earlier OpenMausBot version",
     "vps-stopped": "The managed VPS computer is stopped",
@@ -971,10 +992,10 @@ export function ComputerPanel({
             <span>{bot.name}'s screen</span>
             {phase === "local" && <span className="text-[11px]">this computer</span>}
             {phase === "vm" && <span className="text-[11px]">Local VM</span>}
-            {(phase === "show-ready-box" || phase === "show-sleeping-box") && (
+            {(phase === "show-ready-box" || phase === "show-sleeping-box" || phase === "show-pending-box") && (
               <span className="text-[11px]">cloud box · Auto · read-only</span>
             )}
-            {cloudBackend === "vps" && (phase === "ready" || phase === "starting") && <span className="text-[11px]">self-hosted VPS</span>}
+            {bot.computer === "cloud" && cloudBackend === "vps" && (phase === "ready" || phase === "starting") && <span className="text-[11px]">self-hosted VPS</span>}
         </div>
         <div className="flex aspect-[16/10] w-full items-center justify-center overflow-hidden rounded-xl bg-card">
           {frameSrc && previewOpensDesktop ? (
@@ -1013,8 +1034,10 @@ export function ComputerPanel({
                 <Monitor size={22} />
               )}
               <span className="text-[12px]">
-                {phase === "ready"
+                {cloudPreviewReady
                   ? "Waiting for the first frame…"
+                  : phase === "ready"
+                    ? "Auto found an existing cloud computer. Choose Cloud to open it."
                   : phase === "vm"
                     ? "Capturing the Local VM screen…"
                   : phase === "local"
@@ -1041,13 +1064,17 @@ export function ComputerPanel({
                   Open the Browser tab
                 </button>
               )}
-              {(phase === "show-ready-box" || phase === "show-sleeping-box") && (
+              {(phase === "show-ready-box" || phase === "show-sleeping-box" || phase === "show-pending-box") && (
                 <button
                   type="button"
                   onClick={() => dispatch({ type: "updateBot", botId: bot.id, patch: { computer: "cloud" } })}
                   className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover"
                 >
-                  {phase === "show-sleeping-box" ? "Choose Cloud to wake" : "Choose Cloud to open"}
+                  {phase === "show-sleeping-box"
+                    ? "Choose Cloud to wake"
+                    : phase === "show-ready-box"
+                      ? "Choose Cloud to open"
+                      : "Choose Cloud to manage"}
                 </button>
               )}
               {phase === "vm-unavailable" && (
@@ -1152,7 +1179,7 @@ export function ComputerPanel({
           )}
 
         {/* Who is driving — take the wheel / hand it back */}
-        {(phase === "ready" || phase === "vm") && control.helpReason && !control.held && (
+        {(cloudPreviewReady || phase === "vm") && control.helpReason && !control.held && (
           <div className="mt-3 rounded-xl border border-warning/25 bg-warning/10 p-4">
             <div className="text-[13px] leading-relaxed text-warning">
               <b>{bot.name}</b> asked for your hands: {control.helpReason}
@@ -1160,7 +1187,7 @@ export function ComputerPanel({
             <div className="mt-2 flex gap-2">
               <button
                 onClick={() =>
-                  phase === "vm" || phase === "ready" ? void openDesktop() : controlAction("take")
+                  phase === "vm" || cloudPreviewReady ? void openDesktop() : controlAction("take")
                 }
                 disabled={controlPending || pending === "join"}
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-accent py-2 text-[13px] font-medium text-white hover:brightness-110 disabled:opacity-50"
@@ -1178,11 +1205,11 @@ export function ComputerPanel({
             </div>
           </div>
         )}
-        {(phase === "ready" || phase === "vm") && control.held && (
+        {(cloudPreviewReady || phase === "vm") && control.held && (
           <div className="mt-3 rounded-xl border border-accent/25 bg-accent/10 p-4">
             <div className="text-[13px] leading-relaxed text-ink">
               You have the wheel — the bot's clicks and keystrokes are refused until you hand it back.
-              {phase === "ready" && " Use Open desktop to drive."}
+              {cloudPreviewReady && " Use Open desktop to drive."}
               {phase === "vm" && " Use Open desktop to drive — the preview here is watch-only."}
             </div>
             <button
@@ -1232,7 +1259,7 @@ export function ComputerPanel({
           </button>
         )}
         {/* Cloud-only actions */}
-        {phase === "ready" && (
+        {cloudPreviewReady && (
           <div className="mt-3 flex gap-2">
             {!control.held && !control.helpReason && (
               <button
