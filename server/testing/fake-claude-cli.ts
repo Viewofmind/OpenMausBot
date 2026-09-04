@@ -258,6 +258,18 @@ const playTurn = (prompt: JsonValue) => {
     turnRunning = false;
     finishIfDone();
   };
+  if (mode === "background-result") {
+    // Claude can emit a synthetic result when a background task finishes.
+    // It does not complete the user turn currently waiting on permission.
+    out({ type: "result", origin: { kind: "task-notification" }, is_error: false, total_cost_usd: 99 });
+    out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "parent still working" } } });
+    const poll = setInterval(() => {
+      if (!process.env.FAKE_CLAUDE_FINISH_GATE || !existsSync(process.env.FAKE_CLAUDE_FINISH_GATE)) return;
+      clearInterval(poll);
+      finish();
+    }, 10);
+    return;
+  }
   if (mode === "slow") {
     // a gap a test can steer into; the closing reply carries anything that
     // was folded in, the way the real CLI includes a mid-turn message in

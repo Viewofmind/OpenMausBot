@@ -507,6 +507,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.mcpConfig.mcpServers.agents).toMatchObject({
+      alwaysLoad: true,
       args: ["/fake/agents-proxy.js"],
       env: { OMB_BOT_ID: "b1", OMB_COMMS_TOKEN: "tok" },
     });
@@ -515,6 +516,42 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.stringify(seen.argv)).not.toContain("tok");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
+    expect(seen.mcpConfig.mcpServers.ogb.alwaysLoad).toBe(true);
+  });
+
+  it("keeps native background workers inside the harness-owned turn", async () => {
+    const dump = join(scratch, "background-policy.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" });
+    await instance.adapter.sendTurn({ threadId: "t-background-policy", text: "hi" });
+    await recorder.until((e) => e.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(seen.argv).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("does not end the current turn or its approvals on a background-task result", async () => {
+    const gate = join(scratch, "finish-parent");
+    await create("background-result", { FAKE_CLAUDE_FINISH_GATE: gate });
+    const { turnId } = await instance.adapter.sendTurn({ threadId: "t-background-result", text: "hi" });
+    await recorder.until((e) => e.type === "content.delta" && e.delta === "parent still working");
+    expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(0);
+    expect(instance.adapter.hasSession("t-background-result")).toBe(true);
+    const conn = await connectSocket(permissionSocketPath("t-background-result"));
+    try {
+      const answer = answerQueue(conn)();
+      conn.write(JSON.stringify({ t: "ask", id: "network-after-background", tool: "WebFetch", input: { url: "https://example.com" } }) + "\n");
+      await recorder.until((e) => e.type === "request.opened" && e.requestId === "network-after-background");
+      await expect(instance.adapter.respondToRequest("t-background-result", "network-after-background", { behavior: "allow" })).resolves.toBe("allowed-once");
+      await expect(answer).resolves.toMatchObject({ behavior: "allow" });
+      writeFileSync(gate, "finish");
+      await recorder.until((e) => e.type === "turn.completed");
+      expect(recorder.events.filter((e) => e.type === "turn.completed")).toEqual([
+        expect.objectContaining({ turnId, ok: true, cost: 0.01 }),
+      ]);
+    } finally {
+      conn.destroy();
+    }
   });
 
   it("mounts custom MCP servers without pre-allowing their tools", async () => {
