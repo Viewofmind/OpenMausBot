@@ -6,6 +6,7 @@ import {
   linuxAutoDescription,
   localComputerDisabledReason,
   localComputerSelectable,
+  resolveBoxPanelAction,
 } from "./local-computer";
 
 describe("local computer UI eligibility", () => {
@@ -98,5 +99,73 @@ describe("local computer UI eligibility", () => {
         localSelectable: true,
       }),
     ).toBe(false);
+  });
+
+  it("never creates a missing Box merely because an Auto panel opened", () => {
+    expect(
+      resolveBoxPanelAction({
+        computer: undefined,
+        driverKind: "claude",
+        configured: true,
+        hasExistingBox: false,
+        canUseCloud: true,
+        autoLocal: true,
+      }),
+    ).toBe("local");
+    expect(
+      resolveBoxPanelAction({
+        computer: undefined,
+        driverKind: "claude",
+        configured: true,
+        hasExistingBox: false,
+        canUseCloud: true,
+        autoLocal: false,
+      }),
+    ).toBe("auto-unavailable");
+  });
+
+  it("reuses an existing Auto Box and provisions only for intentional cloud use", () => {
+    const base = {
+      configured: true,
+      canUseCloud: true,
+      autoLocal: true,
+    };
+    expect(
+      resolveBoxPanelAction({
+        ...base,
+        computer: undefined,
+        driverKind: "claude",
+        hasExistingBox: true,
+      }),
+    ).toBe("ensure-box");
+    expect(
+      resolveBoxPanelAction({
+        ...base,
+        computer: "cloud",
+        driverKind: "claude",
+        hasExistingBox: false,
+      }),
+    ).toBe("ensure-box");
+    expect(
+      resolveBoxPanelAction({
+        ...base,
+        computer: undefined,
+        driverKind: "boxAgent",
+        hasExistingBox: false,
+      }),
+    ).toBe("ensure-box");
+  });
+
+  it("falls back locally when the selected engine cannot use an existing Box", () => {
+    expect(
+      resolveBoxPanelAction({
+        computer: undefined,
+        driverKind: "claude",
+        configured: true,
+        hasExistingBox: true,
+        canUseCloud: false,
+        autoLocal: true,
+      }),
+    ).toBe("local");
   });
 });

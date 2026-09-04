@@ -2,8 +2,9 @@
 // whole flow: cloud → provision the box on open (idempotent) and preview
 // via SSE frames or a ~4s screenshot poll. macOS local mode keeps the legacy
 // in-panel capture. Linux local mode is an automation readiness state and its
-// separate preview remains explicitly user-initiated. Auto never selects a
-// Linux user's desktop.
+// separate preview remains explicitly user-initiated. Auto reuses but never
+// creates a Box (except for the box-native engine), and never selects a Linux
+// user's desktop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
@@ -45,6 +46,7 @@ import {
   linuxAutoDescription,
   localComputerDisabledReason,
   localComputerSelectable,
+  resolveBoxPanelAction,
 } from "@/lib/local-computer";
 import {
   readComputerPanelView,
@@ -73,6 +75,7 @@ type Phase =
   | "vps-stopped"
   | "local"
   | "local-unavailable"
+  | "auto-unavailable"
   | "browser"
   | "off"
   | "error";
@@ -466,7 +469,9 @@ export function ComputerPanel({
         alive = false;
       };
     }
-    // cloud, or auto (cloud box wins when one exists, else local in-app)
+    // Cloud creates/wakes its Box. Auto may wake an existing Box but must not
+    // create one merely because this passive panel was opened. This mirrors
+    // turn routing, including the box-native engine's required exception.
     api(`/api/bots/${bot.id}/computer`)
       .then((status) => {
         if (!alive) return;
@@ -476,12 +481,16 @@ export function ComputerPanel({
           capabilitiesReady,
           localSelectable,
         });
-        if (!status.configured) {
-          setPhase(autoLocal ? "local" : "unconfigured");
-          return;
-        }
-        if (!status.box && autoLocal) {
-          setPhase("local");
+        const action = resolveBoxPanelAction({
+          computer: bot.computer,
+          driverKind: selectedInstance?.driverKind,
+          configured: Boolean(status.configured),
+          hasExistingBox: Boolean(status.box),
+          canUseCloud: cloudSupported,
+          autoLocal,
+        });
+        if (action !== "ensure-box") {
+          setPhase(action);
           return;
         }
         setPhase("starting");
@@ -509,6 +518,7 @@ export function ComputerPanel({
     localSelectable,
     isLinux,
     providerSupportsLocal,
+    selectedInstance?.driverKind,
     vmSupported,
     cloudSupported,
     vpsSupported,
@@ -843,6 +853,7 @@ export function ComputerPanel({
     checking: "Checking…",
     starting: "Starting your bot's computer…",
     unconfigured: "No cloud computer configured",
+    "auto-unavailable": "Auto found no existing computer. Choose Cloud to create one, or pick another destination.",
     "vps-unconfigured": "No managed VPS computer is configured for this bot",
     "vps-incompatible": "This VPS computer belongs to an earlier OpenMausBot version",
     "vps-stopped": "The managed VPS computer is stopped",

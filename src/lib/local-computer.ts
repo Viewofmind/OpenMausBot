@@ -56,7 +56,39 @@ export function localComputerDisabledReason({
 }
 
 export function linuxAutoDescription(): string {
-  return "Auto uses a cloud box when one is configured; otherwise computer use stays off.";
+  return "Auto reuses an existing cloud box; otherwise computer use stays off.";
+}
+
+export type BoxPanelAction = "ensure-box" | "local" | "unconfigured" | "auto-unavailable";
+
+/** Mirror the turn router's Box choice without letting a passive panel open
+ * create infrastructure. Auto may wake an existing Box. The box-native
+ * Computer engine is the sole creation exception because it cannot run
+ * anywhere else; explicit Cloud is always an intentional creation request. */
+export function resolveBoxPanelAction({
+  computer,
+  driverKind,
+  configured,
+  hasExistingBox,
+  canUseCloud,
+  autoLocal,
+}: {
+  computer: Bot["computer"];
+  driverKind: string | undefined;
+  configured: boolean;
+  hasExistingBox: boolean;
+  canUseCloud: boolean;
+  autoLocal: boolean;
+}): BoxPanelAction {
+  const explicitCloud = computer === "cloud";
+  const boxNative = driverKind === "boxAgent";
+
+  if (!configured) {
+    if (explicitCloud || boxNative) return "unconfigured";
+    return autoLocal ? "local" : "auto-unavailable";
+  }
+  if (canUseCloud && (hasExistingBox || explicitCloud || boxNative)) return "ensure-box";
+  return autoLocal ? "local" : "auto-unavailable";
 }
 
 export function autoSelectsLocalComputer({
