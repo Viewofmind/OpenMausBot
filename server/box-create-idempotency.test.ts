@@ -446,6 +446,125 @@ describe("Box create idempotency", () => {
     }
   });
 
+  it("bounds retries when a lock disappears between EEXIST and owner read", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-vanishing-lock-"));
+    const lockPath = join(dataDir, "box-create-requests.lock");
+    const source = `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      const lockPath = ${JSON.stringify(lockPath)};
+      const originalLink = fs.linkSync.bind(fs);
+      const originalRead = fs.readFileSync.bind(fs);
+      fs.linkSync = (existingPath, newPath) => {
+        if (String(newPath) === lockPath) {
+          const error = new Error("fixture lock exists");
+          error.code = "EEXIST";
+          throw error;
+        }
+        return originalLink(existingPath, newPath);
+      };
+      fs.readFileSync = (path, ...args) => {
+        if (String(path) === lockPath) {
+          const error = new Error("fixture lock vanished");
+          error.code = "ENOENT";
+          throw error;
+        }
+        return originalRead(path, ...args);
+      };
+      syncBuiltinESMExports();
+      let clock = 0;
+      Object.defineProperty(performance, "now", { value: () => (clock += 1_001) });
+      const started = performance.now();
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      try {
+        journal.beginBoxCreate("vanishing-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
+      } catch (error) {
+        process.stdout.write(JSON.stringify({
+          error: String(error?.message ?? error),
+          elapsed: performance.now() - started,
+        }) + "\\n");
+      }
+    `;
+    const worker = journalWorker(dataDir, source);
+    try {
+      const result = JSON.parse(await workerLine(worker, "vanishing-lock worker")) as {
+        error?: string;
+        elapsed?: number;
+      };
+      await expectCleanWorkerExit(worker, "vanishing-lock worker");
+      expect(result.error).toMatch(/locked by another OpenMausBot process/i);
+      expect(result.elapsed).toBeGreaterThanOrEqual(1_500);
+      expect(result.elapsed).toBeLessThan(5_000);
+    } finally {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds retries when every successfully reaped lock is replaced", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-replaced-lock-"));
+    const exited = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const exitedPid = exited.pid;
+    expect(exitedPid).toBeTypeOf("number");
+    await once(exited, "exit");
+    const lockPath = join(dataDir, "box-create-requests.lock");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({
+      version: 1,
+      pid: exitedPid,
+      token: randomUUID(),
+      createdAt: Date.now(),
+    }));
+    const source = `
+      import fs from "node:fs";
+      import { randomUUID } from "node:crypto";
+      import { syncBuiltinESMExports } from "node:module";
+      const lockPath = ${JSON.stringify(lockPath)};
+      const deadPid = ${JSON.stringify(exitedPid)};
+      const originalUnlink = fs.unlinkSync.bind(fs);
+      fs.unlinkSync = (path) => {
+        originalUnlink(path);
+        if (String(path) === lockPath) {
+          fs.writeFileSync(lockPath, JSON.stringify({
+            version: 1,
+            pid: deadPid,
+            token: randomUUID(),
+            createdAt: Date.now(),
+          }));
+        }
+      };
+      syncBuiltinESMExports();
+      let clock = 0;
+      Object.defineProperty(performance, "now", { value: () => (clock += 1_001) });
+      const started = performance.now();
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      try {
+        journal.beginBoxCreate("replaced-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
+      } catch (error) {
+        process.stdout.write(JSON.stringify({
+          error: String(error?.message ?? error),
+          elapsed: performance.now() - started,
+        }) + "\\n");
+      }
+    `;
+    const worker = journalWorker(dataDir, source);
+    try {
+      const result = JSON.parse(await workerLine(worker, "replaced-lock worker")) as {
+        error?: string;
+        elapsed?: number;
+      };
+      await expectCleanWorkerExit(worker, "replaced-lock worker");
+      expect(result.error).toMatch(/locked by another OpenMausBot process/i);
+      expect(result.elapsed).toBeGreaterThanOrEqual(1_500);
+      expect(result.elapsed).toBeLessThan(5_000);
+    } finally {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("never bypasses a live elected reaper when contenders race", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-live-reaper-"));
     const exitedOwner = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });

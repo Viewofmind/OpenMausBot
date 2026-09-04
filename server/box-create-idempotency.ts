@@ -319,11 +319,14 @@ function acquireJournalLock(): JournalLockOwner {
       }
 
       const current = readLockOwner();
-      if (!current) continue;
-      if (!processIsAlive(current.pid) && reapDeadLock(current)) continue;
+      const reaped = current !== null && !processIsAlive(current.pid) && reapDeadLock(current);
+      // Every retry path is bounded. In particular, an adversarially changing
+      // lock can disappear between link(EEXIST) and read, or replace each
+      // successfully reaped owner before the next link attempt.
       if (performance.now() >= deadline) {
         throw recoveryStateError("locked by another OpenMausBot process");
       }
+      if (reaped) continue;
       Atomics.wait(lockWait, 0, 0, LOCK_RETRY_MS);
     }
   } finally {
