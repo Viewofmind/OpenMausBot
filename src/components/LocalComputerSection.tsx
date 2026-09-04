@@ -149,6 +149,11 @@ export function vpsComputerInventoryState(instance: VpsComputerInventoryInstance
   return "Needs attention";
 }
 
+export function vpsComputerShortId(name: string): string {
+  const suffix = /-([a-f0-9]{12})$/i.exec(name)?.[1];
+  return suffix ? suffix.slice(-8).toLowerCase() : "unknown";
+}
+
 export function VpsComputersCard({
   instances,
   configured,
@@ -214,6 +219,7 @@ export function VpsComputersCard({
         ) : instances.map((instance, index) => {
           const state = vpsComputerInventoryState(instance);
           const removing = removingName === instance.name;
+          const shortId = vpsComputerShortId(instance.name);
           return (
             <div
               key={instance.name}
@@ -225,7 +231,7 @@ export function VpsComputersCard({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-[13.5px] font-medium text-ink">
-                    {instance.orphaned ? "Orphaned VPS computer" : instance.ownerName}
+                    {instance.orphaned ? `Orphaned VPS computer · ID ${shortId}` : instance.ownerName}
                   </span>
                   <span
                     className={cn(
@@ -250,7 +256,7 @@ export function VpsComputersCard({
               <button
                 type="button"
                 onClick={() => onRemove(instance)}
-                disabled={instance.inUse || removingName !== null}
+                disabled={loading || instance.inUse || removingName !== null}
                 title="Permanently remove this VPS computer"
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -368,7 +374,7 @@ export function CloudComputersCard({
                 <button
                   type="button"
                   onClick={() => onSleep(instance)}
-                  disabled={instance.inUse || pending !== null || !canSleep}
+                  disabled={loading || instance.inUse || pending !== null || !canSleep}
                   title={canSleep ? "Put this cloud computer to sleep" : `This cloud computer is ${state.toLowerCase()}`}
                   className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -378,7 +384,7 @@ export function CloudComputersCard({
                 <button
                   type="button"
                   onClick={() => onDelete(instance)}
-                  disabled={instance.inUse || pending !== null}
+                  disabled={loading || instance.inUse || pending !== null}
                   title="Permanently delete this cloud computer"
                   className="flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -486,7 +492,7 @@ export function LocalVmInventoryCard({
               <button
                 type="button"
                 onClick={() => onDelete(instance)}
-                disabled={instance.inUse || deletingBotId !== null}
+                disabled={loading || instance.inUse || deletingBotId !== null}
                 title={instance.inUse ? "Stop this bot's turn before deleting its Local VM" : `Delete ${instance.name}'s Local VM`}
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -818,9 +824,10 @@ export function LocalComputerSection() {
   };
 
   const removeVpsComputer = async (instance: VpsComputerInventoryInstance) => {
+    const shortId = vpsComputerShortId(instance.name);
     if (
       !window.confirm(
-        `Permanently remove ${instance.orphaned ? "this orphaned VPS computer" : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
+        `Permanently remove ${instance.orphaned ? `orphaned VPS computer ID ${shortId}` : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
       )
     ) return;
     setVpsRemovingName(instance.name);

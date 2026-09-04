@@ -1583,7 +1583,7 @@ describe("harness HTTP API", () => {
           desktopUrl: "https://desktop.invalid/?token=provider-secret",
           ip: "203.0.113.9",
         },
-        { id: "bx_abcdefgh", name: "ogb-orphan-abcdef", state: "archived", desktopUrl: "secret-orphan-url" },
+        { id: "bx_abcdefgh", name: "ogb-orphan-abcdef", state: "idle", desktopUrl: "secret-orphan-url" },
         { id: "bx_jkmnpqrs", name: "someone-elses-box", state: "idle", desktopUrl: "secret-foreign-url" },
       ];
 
@@ -1640,6 +1640,24 @@ describe("harness HTTP API", () => {
       expect((await sleeping).status).toBe(200);
       managedBoxStopDelayMs = 0;
       expect(boxRouteCalls).toContainEqual({ method: "POST", path: "/boxes/bx_23456789/stop" });
+
+      // Orphans have no bot id for the shared lifecycle lane. Serialize their
+      // Settings actions by provider id so two paired clients cannot Sleep and
+      // Delete the same durable computer at once.
+      boxRouteCalls.length = 0;
+      managedBoxStopDelayMs = 250;
+      const orphanSleep = api("POST", "/api/computers/boxes/bx_abcdefgh/sleep", {});
+      await expect.poll(() => boxRouteCalls.some(
+        (call) => call.method === "POST" && call.path === "/boxes/bx_abcdefgh/stop",
+      )).toBe(true);
+      const racedOrphanDelete = await api("POST", "/api/computers/boxes/bx_abcdefgh/delete", {
+        confirmName: "ogb-orphan-abcdef",
+      });
+      expect(racedOrphanDelete.status).toBe(409);
+      expect(racedOrphanDelete.body.error).toMatch(/cloud computer is being changed/i);
+      expect(managedBoxDeleteConfirmations.some(({ boxId }) => boxId === "bx_abcdefgh")).toBe(false);
+      expect((await orphanSleep).status).toBe(200);
+      managedBoxStopDelayMs = 0;
 
       // The same lifecycle lane works in the other direction: an already
       // running bot-scoped provider action excludes a Settings deletion.

@@ -9,6 +9,7 @@ import {
   cloudComputerInventoryState,
   localVmInventoryState,
   vpsComputerInventoryState,
+  vpsComputerShortId,
   type CloudComputerInventoryInstance,
   type LocalVmInventoryInstance,
   type VpsComputerInventoryInstance,
@@ -90,6 +91,22 @@ describe("Local VM inventory UI", () => {
     expect(markup).toContain("Start docker first");
     expect(markup).not.toContain("No per-bot desktops have been created");
   });
+
+  it("disables deletion while refreshing an existing inventory", () => {
+    const markup = renderToStaticMarkup(createElement(LocalVmInventoryCard, {
+      instances: [cloudVm],
+      maxInstances: 4,
+      loading: true,
+      deletingBotId: null,
+      error: null,
+      unavailableReason: null,
+      onRefresh: vi.fn(),
+      onDelete: vi.fn(),
+    }));
+
+    // Refresh and Delete cannot race one another.
+    expect(markup.match(/disabled=""/g)).toHaveLength(2);
+  });
 });
 
 describe("cloud computer inventory UI", () => {
@@ -139,6 +156,13 @@ describe("cloud computer inventory UI", () => {
     expect(markup).toContain("In use");
     expect(markup).toContain("Stop this bot&#x27;s work before changing its computer.");
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it("disables lifecycle actions while refreshing an existing inventory", () => {
+    const markup = renderCard({ instances: [ownedCloudComputer], loading: true });
+
+    // Refresh, Sleep, and Delete all wait for one authoritative snapshot.
+    expect(markup.match(/disabled=""/g)).toHaveLength(3);
   });
 
   it("keeps disconnected, unavailable, and empty states distinct", () => {
@@ -210,11 +234,16 @@ describe("VPS computer inventory UI", () => {
     expect(markup).toContain("SSH host: production-vps");
     expect(markup).toContain("Research");
     expect(markup).toContain("Owned by this bot");
-    expect(markup).toContain("Orphaned VPS computer");
+    expect(markup).toContain("Orphaned VPS computer · ID ef123456");
     expect(markup).toContain("Its bot no longer exists");
     expect(markup).toContain("Running");
     expect(markup).toContain("Stopped");
     expect(markup).not.toMatch(new RegExp(`${ownedVps.name}|${orphanName}|containerId|VNC_PW|password`));
+  });
+
+  it("derives a stable identifier without exposing the bot-derived container name", () => {
+    expect(vpsComputerShortId("openmausbot-vps-deleted-abcdef123456")).toBe("ef123456");
+    expect(vpsComputerShortId("unexpected-provider-name")).toBe("unknown");
   });
 
   it("disables removal while the owner is working", () => {
@@ -223,6 +252,13 @@ describe("VPS computer inventory UI", () => {
     expect(markup).toContain("In use");
     expect(markup).toContain("Stop this bot&#x27;s work before removing its VPS computer.");
     expect(markup).toContain("disabled=\"\"");
+  });
+
+  it("disables removal while refreshing an existing inventory", () => {
+    const markup = renderCard({ instances: [ownedVps], loading: true });
+
+    // Refresh and Remove cannot race one another.
+    expect(markup.match(/disabled=""/g)).toHaveLength(2);
   });
 
   it("keeps disconnected, unavailable, and empty states distinct", () => {

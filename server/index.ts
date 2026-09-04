@@ -1875,6 +1875,7 @@ let localVmProvisionBusy = false;
 let localVmModeChangeBusy = false;
 const activeVpsThreads = new Map<string, string>();
 const boxLifecycleBusyBots = new Set<string>();
+const orphanBoxLifecycleBusyIds = new Set<string>();
 // A restore mutates and cleans a project work tree. Claim the bot across the
 // entire async Git operation so a turn cannot start in that folder midway.
 const checkpointRestoreLeases = new Set<string>();
@@ -1903,7 +1904,13 @@ function managedBoxOwners(): box.ManagedBoxOwner[] {
  * a new turn and an irreversible lifecycle action cannot pass each other. */
 function claimManagedBoxMutation(instance: box.ManagedBoxInventoryInstance): () => void {
   const ownerBotId = instance.ownerBotId;
-  if (!ownerBotId) return () => {};
+  if (!ownerBotId) {
+    if (orphanBoxLifecycleBusyIds.has(instance.boxId)) {
+      throw Object.assign(new Error("this cloud computer is being changed — wait for it to finish"), { status: 409 });
+    }
+    orphanBoxLifecycleBusyIds.add(instance.boxId);
+    return () => orphanBoxLifecycleBusyIds.delete(instance.boxId);
+  }
   const owner = managedBoxOwners().find((candidate) => candidate.botId === ownerBotId);
   if (owner?.inUse) {
     throw Object.assign(new Error("this cloud computer is in use — stop its bot's work first"), { status: 409 });
