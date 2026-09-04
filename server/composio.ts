@@ -1,7 +1,7 @@
 // A project API key (ak_…) creates/reuses one Composio Session. That
 // Session owns connection state, auth links and the MCP endpoint.
 import { saveConfig, type AppConfig } from "./config.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
@@ -206,6 +206,31 @@ function projectApiKey(cfg: AppConfig): string | null {
 function canonicalToolkitSlug(slug: string): string {
   const normalized = slug.trim().toLowerCase();
   return normalized === "x" ? "twitter" : normalized;
+}
+
+/** Keep credential-backed caches and transport sessions separated without
+ * retaining another plaintext copy of the credential as their identity. */
+function backendFingerprint(kind: string, endpoint: string, credential: string): string {
+  return createHash("sha256")
+    .update(kind)
+    .update("\0")
+    .update(endpoint)
+    .update("\0")
+    .update(credential)
+    .digest("hex");
+}
+
+const MAX_TRACKED_TRANSPORT_SESSIONS = 512;
+const transportSessionBackends = new Map<string, string>();
+
+function rememberTransportSession(sessionId: string, identity: string): void {
+  transportSessionBackends.delete(sessionId);
+  transportSessionBackends.set(sessionId, identity);
+  while (transportSessionBackends.size > MAX_TRACKED_TRANSPORT_SESSIONS) {
+    const oldest = transportSessionBackends.keys().next().value;
+    if (oldest === undefined) break;
+    transportSessionBackends.delete(oldest);
+  }
 }
 
 function canonicalServiceRecord<T>(services: Record<string, T>): Record<string, T> {
@@ -538,20 +563,32 @@ export async function relayMcp(
 ): Promise<{ status: number; bytes: Uint8Array; contentType: string; transportSessionId?: string }> {
   const apiKey = projectApiKey(cfg);
   let url: string;
+  let identity: string;
   const headers = new Headers({
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
   });
-  if (transportSessionId) headers.set("mcp-session-id", transportSessionId);
   if (apiKey) {
     const session = await ensureProjectSession(cfg);
     url = session.mcp.url;
     headers.set("x-api-key", apiKey);
+    identity = backendFingerprint("project-mcp", url, apiKey);
   } else {
     const broker = brokerAccess();
     if (!broker) throw new Error("Connected apps are unavailable");
     url = `${broker.url}/v1/mcp`;
     headers.set("authorization", `Bearer ${broker.token}`);
+    identity = backendFingerprint("managed-mcp", url, broker.token);
+  }
+  const knownIdentity = transportSessionId
+    ? transportSessionBackends.get(transportSessionId)
+    : undefined;
+  const forwardedTransportSessionId = transportSessionId
+    && knownIdentity === identity
+    ? transportSessionId
+    : undefined;
+  if (forwardedTransportSessionId) {
+    headers.set("mcp-session-id", forwardedTransportSessionId);
   }
   const response = await fetch(url, {
     method: "POST",
@@ -563,11 +600,14 @@ export async function relayMcp(
   if (declared > 20 * 1024 * 1024) throw new Error("Connected-app response exceeded 20 MB");
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength > 20 * 1024 * 1024) throw new Error("Connected-app response exceeded 20 MB");
+  if (forwardedTransportSessionId) rememberTransportSession(forwardedTransportSessionId, identity);
+  const nextTransportSessionId = response.headers.get("mcp-session-id") ?? undefined;
+  if (nextTransportSessionId) rememberTransportSession(nextTransportSessionId, identity);
   return {
     status: response.status,
     bytes,
     contentType: response.headers.get("content-type") ?? "application/json",
-    transportSessionId: response.headers.get("mcp-session-id") ?? undefined,
+    transportSessionId: nextTransportSessionId,
   };
 }
 
@@ -967,7 +1007,7 @@ const CURATED: ToolkitCard[] = [
   { slug: "stripe", label: "Stripe", blurb: "Payments and customers", domain: "stripe.com", logo: null },
 ];
 
-let toolkitCache: { at: number; cards: ToolkitCard[]; mode: "managed" | "self-hosted" } | null = null;
+let toolkitCache: { at: number; cards: ToolkitCard[]; identity: string } | null = null;
 
 /**
  * Marketplace catalog. Tries the v3 toolkits API (official names,
@@ -976,8 +1016,12 @@ let toolkitCache: { at: number; cards: ToolkitCard[]; mode: "managed" | "self-ho
 export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard[]; source: "api" | "curated" }> {
   const backendKey = projectApiKey(cfg);
   const broker = backendKey ? null : brokerAccess();
-  const mode = backendKey ? "self-hosted" : broker ? "managed" : null;
-  if (mode && toolkitCache?.mode === mode && Date.now() - toolkitCache.at < 10 * 60_000) {
+  const identity = backendKey
+    ? backendFingerprint("project-catalog", toolkitBase(), backendKey)
+    : broker
+      ? backendFingerprint("managed-catalog", broker.url, broker.token)
+      : null;
+  if (identity && toolkitCache?.identity === identity && Date.now() - toolkitCache.at < 10 * 60_000) {
     return { cards: toolkitCache.cards, source: "api" };
   }
   if (backendKey || broker) {
@@ -1003,7 +1047,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
           const uniqueCards = cards.filter(
             (card, index) => card.slug && cards.findIndex((candidate) => candidate.slug === card.slug) === index,
           );
-          toolkitCache = { at: Date.now(), cards: uniqueCards, mode: mode! };
+          toolkitCache = { at: Date.now(), cards: uniqueCards, identity: identity! };
           return { cards: uniqueCards, source: "api" };
         }
       }

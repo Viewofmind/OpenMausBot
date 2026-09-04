@@ -21,7 +21,14 @@ import {
 let api: Server;
 let origin = "";
 let base = "";
-const calls: Array<{ method: string; path: string; query: string; body: any }> = [];
+const calls: Array<{
+  method: string;
+  path: string;
+  query: string;
+  body: any;
+  apiKey: string;
+  transportSessionId: string;
+}> = [];
 let malformedConnectedAccounts = false;
 let connectedAccountsUnavailable = false;
 // The project's own auth configs, and the ones the stub Session was created
@@ -36,7 +43,14 @@ beforeAll(async () => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
     const body = raw ? JSON.parse(raw) : null;
-    calls.push({ method: req.method ?? "GET", path: url.pathname, query: url.search, body });
+    calls.push({
+      method: req.method ?? "GET",
+      path: url.pathname,
+      query: url.search,
+      body,
+      apiKey: String(req.headers["x-api-key"] ?? ""),
+      transportSessionId: String(req.headers["mcp-session-id"] ?? ""),
+    });
 
     if (url.pathname.startsWith("/broker/")) {
       if (req.headers.authorization !== `Bearer ${"a".repeat(64)}`) {
@@ -70,14 +84,15 @@ beforeAll(async () => {
         return res.end(JSON.stringify({ items: [{ slug: "github", name: "GitHub" }] }));
       }
       if (req.method === "POST" && url.pathname === "/broker/v1/mcp") {
-        res.writeHead(200, { "content-type": "application/json" });
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "mcp_broker" });
         return res.end(JSON.stringify({ source: "broker" }));
       }
       res.writeHead(404, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: "unknown broker route" }));
     }
 
-    if (req.headers["x-api-key"] !== "ak_test") {
+    const apiKey = String(req.headers["x-api-key"] ?? "");
+    if (!["ak_test", "ak_catalog_a", "ak_catalog_b"].includes(apiKey)) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
     }
@@ -93,6 +108,12 @@ beforeAll(async () => {
     }
     if (req.method === "GET" && url.pathname === "/api/v3/toolkits") {
       res.writeHead(200, { "content-type": "application/json" });
+      if (apiKey === "ak_catalog_a") {
+        return res.end(JSON.stringify({ items: [{ slug: "notion", name: "Catalog A" }] }));
+      }
+      if (apiKey === "ak_catalog_b") {
+        return res.end(JSON.stringify({ items: [{ slug: "linear", name: "Catalog B" }] }));
+      }
       return res.end(JSON.stringify({ items: [{ slug: "x", name: "X (Twitter)" }, { slug: "github", name: "GitHub" }] }));
     }
     if (req.method === "GET" && url.pathname === "/api/v3.1/tool_router/session/trs_test") {
@@ -253,6 +274,88 @@ describe.sequential("Composio Sessions", () => {
 
     expect(applyManagedBrokerMessage({ type: messageType, access: null })).toBe(true);
     expect(connectionMode({})).toBe("unavailable");
+  });
+
+  it("does not reuse a self-hosted catalog after the project key changes", async () => {
+    const before = calls.length;
+    const first = await listToolkits({ composio: { apiKey: "ak_catalog_a" } });
+    const second = await listToolkits({ composio: { apiKey: "ak_catalog_b" } });
+
+    expect(first.cards).toEqual([expect.objectContaining({ slug: "notion", label: "Catalog A" })]);
+    expect(second.cards).toEqual([expect.objectContaining({ slug: "linear", label: "Catalog B" })]);
+    expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits").map((call) => call.apiKey)).toEqual([
+      "ak_catalog_a",
+      "ak_catalog_b",
+    ]);
+  });
+
+  it("drops a managed MCP session when routing switches to a user project", async () => {
+    setManagedBrokerAccess({ url: `${origin}/broker`, token: "a".repeat(64) });
+    const projectSessions: string[] = [];
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+      if (url.startsWith("https://app.composio.dev/tool_router/")) {
+        projectSessions.push(new Headers(init?.headers).get("mcp-session-id") ?? "");
+        return new Response(JSON.stringify({ source: "project" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "mcp-session-id": "mcp_project_after_managed" },
+        });
+      }
+      return realFetch(input, init);
+    });
+    try {
+      const managed = await relayMcp({}, { jsonrpc: "2.0", id: 101, method: "tools/list" });
+      expect(managed.transportSessionId).toBe("mcp_broker");
+      await relayMcp(
+        {},
+        { jsonrpc: "2.0", id: 105, method: "tools/list" },
+        managed.transportSessionId,
+      );
+      expect(calls.findLast((call) => call.path === "/broker/v1/mcp" && call.body?.id === 105)?.transportSessionId)
+        .toBe("mcp_broker");
+      const project = await relayMcp(
+        { composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" } },
+        { jsonrpc: "2.0", id: 102, method: "tools/list" },
+        managed.transportSessionId,
+      );
+      expect(project.transportSessionId).toBe("mcp_project_after_managed");
+      expect(projectSessions).toEqual([""]);
+    } finally {
+      fetchSpy.mockRestore();
+      setManagedBrokerAccess(null);
+    }
+  });
+
+  it("drops a project MCP session when routing switches to the managed broker", async () => {
+    setManagedBrokerAccess({ url: `${origin}/broker`, token: "a".repeat(64) });
+    const realFetch = globalThis.fetch;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+      if (url.startsWith("https://app.composio.dev/tool_router/")) {
+        return new Response(JSON.stringify({ source: "project" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "mcp-session-id": "mcp_project_before_managed" },
+        });
+      }
+      return realFetch(input, init);
+    });
+    try {
+      const project = await relayMcp(
+        { composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" } },
+        { jsonrpc: "2.0", id: 103, method: "tools/list" },
+      );
+      expect(project.transportSessionId).toBe("mcp_project_before_managed");
+      await relayMcp(
+        {},
+        { jsonrpc: "2.0", id: 104, method: "tools/list" },
+        project.transportSessionId,
+      );
+      expect(calls.findLast((call) => call.path === "/broker/v1/mcp" && call.body?.id === 104)?.transportSessionId).toBe("");
+    } finally {
+      fetchSpy.mockRestore();
+      setManagedBrokerAccess(null);
+    }
   });
 
   it("uses a user-owned project for every connector operation even when the managed broker is available", async () => {
