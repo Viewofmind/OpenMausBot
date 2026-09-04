@@ -507,7 +507,7 @@ describe("containerComputerStatus", () => {
     expect(fake.calls).not.toContain(readinessProbe);
   });
 
-  it("rejects a lookalike container with a different driver or base-image label", async () => {
+  it("keeps an owned stale container removable without treating it as ready", async () => {
     const fake = runner({
       "/usr/bin/which docker": "docker\n",
       "/usr/bin/which podman": new Error("missing"),
@@ -516,13 +516,20 @@ describe("containerComputerStatus", () => {
       [`docker inspect ${CONTAINER}`]: readyInspect({
         Config: {
           Image: IMAGE,
-          Labels: { [MANAGED_LABEL]: "1", [DRIVER_LABEL]: "0.12.4", [BASE_IMAGE_LABEL]: "wrong" },
+          Labels: {
+            [MANAGED_LABEL]: "1",
+            [DRIVER_LABEL]: "0.12.4",
+            [BASE_IMAGE_LABEL]: "wrong",
+            [IMAGE_LAYER_LABEL]: "old",
+            [WORKSPACE_LABEL]: "1",
+          },
         },
       }),
     });
 
     const status = await containerComputerStatus(fake.run, "linux");
 
+    expect(status.managed).toBe(true);
     expect(status.imageMatches).toBe(false);
     expect(status.ready).toBe(false);
     expect(status.problem).toContain("older desktop or Cua Driver");
@@ -661,6 +668,33 @@ describe("containerComputerAction", () => {
       /not created by OpenMausBot.*remove it manually/i,
     );
     expect(fake.calls).not.toContain(`docker rm -f ${CONTAINER}`);
+  });
+
+  it("removes a verified OpenMausBot container even when its version labels are stale", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": "docker\n",
+      "/usr/bin/which podman": new Error("missing"),
+      "docker info --format {{.ServerVersion}}": "29\n",
+      [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`docker inspect ${CONTAINER}`]: readyInspect({
+        Config: {
+          Image: IMAGE,
+          Labels: {
+            [MANAGED_LABEL]: "1",
+            [DRIVER_LABEL]: "0.12.4",
+            [BASE_IMAGE_LABEL]: "old",
+            [IMAGE_LAYER_LABEL]: "old",
+            [WORKSPACE_LABEL]: "1",
+          },
+          Env: [],
+        },
+      }),
+      [`docker rm -f ${CONTAINER}`]: "",
+    });
+
+    await containerComputerAction("remove", fake.run, "linux");
+
+    expect(fake.calls).toContain(`docker rm -f ${CONTAINER}`);
   });
 
   it("fails closed instead of giving Apple container an invalid dynamic-port spec", async () => {

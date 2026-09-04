@@ -358,12 +358,15 @@ export function imageLabelsMatch(labels: Record<string, string> | undefined): bo
   );
 }
 
-function containerLabelsMatch(
+/** Ownership is intentionally independent of the current image/driver
+ * versions. An older OpenMausBot container must stay removable (and eligible
+ * for idle cleanup), while imageMatches keeps readiness version-strict. */
+function containerOwnershipLabelsMatch(
   labels: Record<string, string> | undefined,
   target: LocalVmTarget,
 ): boolean {
   return (
-    imageLabelsMatch(labels) &&
+    labels?.[MANAGED_LABEL] === "1" &&
     labels?.[WORKSPACE_LABEL] === "1" &&
     (target.key === SHARED_LOCAL_VM_TARGET.key
       ? labels?.[TARGET_LABEL] === undefined || labels?.[TARGET_LABEL] === target.label
@@ -489,7 +492,7 @@ export async function containerComputerStatus(
           : null;
       status.imageMatches =
         appleImage === IMAGE && status.image_id !== null && appleImageId === status.image_id;
-      status.managed = containerLabelsMatch(detail?.configuration?.labels, target);
+      status.managed = containerOwnershipLabelsMatch(detail?.configuration?.labels, target);
       status.persistence = appleWorkspaceMountIsSafe(detail?.configuration?.mounts, platform, target.workspaceDir)
         ? "durable"
         : "unsafe";
@@ -526,7 +529,7 @@ export async function containerComputerStatus(
         imageLabelsMatch(detail?.Config?.Labels) &&
         status.image_id !== null &&
         normalizeImageId(detail?.Image) === status.image_id;
-      status.managed = containerLabelsMatch(detail?.Config?.Labels, target);
+      status.managed = containerOwnershipLabelsMatch(detail?.Config?.Labels, target);
       status.persistence = dockerWorkspaceMountIsSafe(
         detail?.Mounts,
         platform,
