@@ -1899,6 +1899,13 @@ function managedBoxOwners(): box.ManagedBoxOwner[] {
   }));
 }
 
+function botHasActiveTurn(botId: string): boolean {
+  const bot = store.bot(botId);
+  return bot?.busy === true ||
+    directTurnDispatchClaims.has(botId) ||
+    activeGroupTurnForBot(botId) !== null;
+}
+
 /** Claim the owning bot synchronously after Box revalidation and before the
  * provider mutation. startTurn checks the same set before doing any work, so
  * a new turn and an irreversible lifecycle action cannot pass each other. */
@@ -8943,6 +8950,11 @@ const server = createServer(async (req, res) => {
       if ((box.boxConfigured(cfg) || vpsSshAlias(cfg)) && (bot.busy || directTurnDispatchClaims.has(bot.id))) {
         return json(res, 409, { error: "stop this bot's work before checking and deleting its cloud computer" });
       }
+      if (box.hasUnresolvedBoxCreate(bot.id)) {
+        return json(res, 409, {
+          error: "finish reconciling this bot's pending cloud computer creation before deleting it — check ascii.dev, then retry Box setup",
+        });
+      }
       const releaseComputerLifecycle = claimBotComputerLifecycle(bot.id);
       try {
         if (localVmMode(cfg) === "per-bot") {
@@ -10637,6 +10649,12 @@ const server = createServer(async (req, res) => {
           releaseComputerLifecycle();
         }
       }
+      const activeBoxTurn = botHasActiveTurn(botId);
+      if (["provision", "sleep"].includes(m[2]) && activeBoxTurn) {
+        return json(res, 409, {
+          error: "this bot's cloud computer is being used by an active turn — interrupt it first",
+        });
+      }
       // Input validity is independent of destination authorization. Preserve
       // the stable 400 contract for oversized commands without contacting the
       // provider; a valid Auto request still reaches the 409 gate below.
@@ -10665,7 +10683,7 @@ const server = createServer(async (req, res) => {
           case "provision":
             return json(res, 200, await box.provisionBox(cfg, botId, bot.name));
           case "join":
-            return json(res, 200, await box.joinBox(cfg, botId));
+            return json(res, 200, await (activeBoxTurn ? box.joinReadyBox(cfg, botId) : box.joinBox(cfg, botId)));
           case "sleep":
             return json(res, 200, await box.sleepBox(cfg, botId));
           case "exec":

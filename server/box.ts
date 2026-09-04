@@ -17,7 +17,9 @@ import { loadEnvironmentId } from "./environment.ts";
 import {
   beginBoxCreate,
   discardBoxCreate,
+  hasUnresolvedBoxCreate,
   rememberCreatedBox,
+  resolveBoxCreate,
   type BoxCreateRequest,
 } from "./box-create-idempotency.ts";
 import {
@@ -467,6 +469,8 @@ export function boxConfigured(cfg: AppConfig) {
   return Boolean(cfg.box?.token);
 }
 
+export { hasUnresolvedBoxCreate };
+
 /** Ask the provider whether a token is real, before we let someone save
  * it. Without this the paste "succeeds", and the first sign of trouble is
  * a 401 in a different panel minutes later, with nothing to act on. */
@@ -653,6 +657,7 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
         body: JSON.stringify({ name: vmName }),
       });
       if (!rename.ok) throw new Error(boxErrorMessage(rename.status, "box naming", rename.body));
+      if (createRequest) createRequest = resolveBoxCreate(createRequest);
     }
     const ready = await waitReady(cfg, box.id);
     if (!ready) throw new Error("box did not become ready within 90s — retry in a minute");
@@ -708,6 +713,20 @@ export async function joinBox(cfg: AppConfig, botId: string) {
   // driver daemon before handing the desktop back to the user.
   await runCommand(cfg, box.id, ensureRemoteCuaCommand(), { timeoutMs: 15_000 }).catch(() => null);
   return { joinUrl: await mintDesktopUrl(cfg, box.id), state: ready.state ?? null };
+}
+
+/** Mint a human-control URL without changing provider lifecycle or guest
+ * processes. This is the only join path allowed while a bot turn is active. */
+export async function joinReadyBox(cfg: AppConfig, botId: string) {
+  const box = await findBox(cfg, botId);
+  if (!box) throw Object.assign(new Error("no computer yet — provision it first"), { status: 409 });
+  if (!READY.has(box.state)) {
+    throw Object.assign(
+      new Error("the cloud computer is sleeping or starting — interrupt the bot before waking it"),
+      { status: 409 },
+    );
+  }
+  return { joinUrl: await mintDesktopUrl(cfg, box.id), state: box.state ?? null };
 }
 
 /** Archive the bot's box now (billing pauses, disk survives). */

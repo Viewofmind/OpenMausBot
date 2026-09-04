@@ -200,4 +200,23 @@ describe("Box create idempotency", () => {
       now.mockRestore();
     }
   });
+
+  it("keeps key-only and remembered-ID attempts unresolved until provider naming succeeds", async () => {
+    vi.resetModules();
+    const {
+      beginBoxCreate,
+      hasUnresolvedBoxCreate,
+      rememberCreatedBox,
+      resolveBoxCreate,
+    } = await import("./box-create-idempotency.ts");
+    const botId = "deletion-guard-bot";
+    const attempt = beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+
+    expect(hasUnresolvedBoxCreate(botId)).toBe(true);
+    const remembered = rememberCreatedBox(attempt.request, "bx_3456789a");
+    expect(hasUnresolvedBoxCreate(botId)).toBe(true);
+
+    resolveBoxCreate(remembered);
+    expect(hasUnresolvedBoxCreate(botId)).toBe(false);
+  });
 });

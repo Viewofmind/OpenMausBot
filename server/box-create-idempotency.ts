@@ -18,6 +18,9 @@ export interface BoxCreateRequest {
   idempotencyKey: string;
   createdAt: number;
   boxId?: string;
+  /** The provider Box has its deterministic OpenMaus name. Until this is
+   * true, deleting the bot would make an ambiguous or unnamed Box orphaned. */
+  resolved?: true;
 }
 
 export interface BoxCreateAttempt {
@@ -46,6 +49,7 @@ function isRequest(value: unknown): value is BoxCreateRequest {
     && Number.isFinite(request.createdAt)
     && request.createdAt > 0
     && (request.boxId === undefined || (typeof request.boxId === "string" && BOX_ID.test(request.boxId)))
+    && (request.resolved === undefined || (request.resolved === true && typeof request.boxId === "string"))
   );
 }
 
@@ -162,6 +166,31 @@ export function rememberCreatedBox(request: BoxCreateRequest, boxId: string): Bo
   // known, it is the only recovery authority we need to retain.
   save([...requests.filter((candidate) => candidate.botId !== request.botId), completed]);
   return { ...completed };
+}
+
+/** Mark the recovery record safe only after the deterministic provider rename
+ * succeeds. Keeping the resolved Box ID still lets a later retry recover from
+ * an eventually-consistent account listing without blocking bot deletion. */
+export function resolveBoxCreate(request: BoxCreateRequest): BoxCreateRequest {
+  load();
+  const current = requests.find((candidate) => (
+    candidate.botId === request.botId
+    && candidate.requestBody === request.requestBody
+    && candidate.idempotencyKey === request.idempotencyKey
+    && candidate.boxId === request.boxId
+  ));
+  if (!current?.boxId) throw recoveryStateError("out of date");
+  const resolved: BoxCreateRequest = { ...current, resolved: true };
+  save(requests.map((candidate) => candidate.idempotencyKey === current.idempotencyKey ? resolved : candidate));
+  return { ...resolved };
+}
+
+/** Read-only deletion guard. Both a key-only request with an ambiguous
+ * provider outcome and a known-but-not-yet-named Box must keep its bot owner. */
+export function hasUnresolvedBoxCreate(botId: string): boolean {
+  if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer creation");
+  load();
+  return requests.some((request) => request.botId === botId && request.resolved !== true);
 }
 
 export function discardBoxCreate(request: BoxCreateRequest): void {
