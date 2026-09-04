@@ -691,8 +691,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const sendTurn = async (turn: SendTurnInput) => {
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
+      // A bot-level mode is authoritative for this turn. In particular, an
+      // old provider instance may still be configured with
+      // `bypassPermissions`; Ask/Auto must restore Claude's interactive
+      // broker instead of inheriting that silent bypass. Calls without a
+      // per-turn mode keep the legacy adapter behavior.
+      const permissionMode = turn.approvalMode === undefined
+        ? config.permissionMode
+        : config.permissionMode === "bypassPermissions"
+          ? "acceptEdits"
+          : config.permissionMode;
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
-      if (controlsHost && config.permissionMode === "bypassPermissions") {
+      if (controlsHost && permissionMode === "bypassPermissions") {
         throw new Error("local computer control requires the interactive approval broker");
       }
       // Materialize before creating a broker or process. A missing/corrupt
@@ -717,7 +727,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // token-level streaming: content_block_delta events between the
         // whole-message frames, so the bubble grows as the model writes
         "--include-partial-messages",
-        "--permission-mode", config.permissionMode === "auto" ? "acceptEdits" : config.permissionMode,
+        "--permission-mode", permissionMode === "auto" ? "acceptEdits" : permissionMode,
       ];
       if (config.tools !== undefined) args.push("--tools", config.tools.join(","));
       if (config.disallowedTools?.length) {
@@ -807,7 +817,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // bypassPermissions (fullAuto) — nothing would ever ask.
       let broker: Awaited<ReturnType<typeof createPermissionBroker>> | undefined;
       let socketPath: string | null = null;
-      if (config.permissionMode !== "bypassPermissions") {
+      if (permissionMode !== "bypassPermissions") {
         socketPath = permissionSocketPath(threadId);
         args.push("--permission-prompt-tool", "mcp__ogb__approve");
         mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
@@ -1373,7 +1383,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           nativeImageInput: true,
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
           queueing: true,
-          localComputerMcp: config.permissionMode !== "bypassPermissions",
+          // Harness turns reassert a per-bot mode and restore the broker even
+          // when an old instance was configured with bypassPermissions.
+          localComputerMcp: true,
         },
         sendTurn,
         steer,

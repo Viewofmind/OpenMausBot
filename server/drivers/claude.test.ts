@@ -119,7 +119,7 @@ describe("ClaudeDriver.decodeConfig", () => {
     expect(permissionSocketPath("t-perm-dup-1")).not.toBe(permissionSocketPath("t-perm-dup-2"));
   });
 
-  it("does not advertise or accept local CUA in bypassPermissions mode", async () => {
+  it("advertises per-bot local CUA but rejects legacy bypass turns without a mode", async () => {
     const bypass = await ClaudeDriver.create({
       instanceId: "claude-bypass",
       displayName: "Claude Bypass",
@@ -127,7 +127,7 @@ describe("ClaudeDriver.decodeConfig", () => {
       enabled: true,
       config: { cli: FAKE_CLI, permissionMode: "bypassPermissions" },
     });
-    expect(bypass.adapter.capabilities.localComputerMcp).toBe(false);
+    expect(bypass.adapter.capabilities.localComputerMcp).toBe(true);
     await expect(
       bypass.adapter.sendTurn({
         threadId: "t-bypass-local",
@@ -360,6 +360,24 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.env.XAI_API_KEY).toBeUndefined();
     expect(seen.env.BOX_TOKEN).toBeUndefined();
     expect(seen.env.OMB_TTS_KEY).toBeUndefined();
+  });
+
+  it("per-bot Ask restores the broker on a legacy bypass instance", async () => {
+    await create(undefined, {}, { permissionMode: "bypassPermissions" });
+    const dump = join(scratch, "ask-overrides-bypass.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+
+    await instance.adapter.sendTurn({
+      threadId: "t-ask-overrides-bypass",
+      text: "go",
+      approvalMode: "ask",
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv).toContain("--permission-mode");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(seen.argv).toContain("--permission-prompt-tool");
   });
 
   it("sends attached images as native blocks before text without logging their bytes", async () => {
@@ -1001,10 +1019,11 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("brokers a permission ask into request.opened and answers over the socket", async () => {
-    await create("hang");
+    await create("hang", {}, { permissionMode: "bypassPermissions" });
     await instance.adapter.sendTurn({
       threadId: "t-perm-abc",
       text: "go",
+      approvalMode: "ask",
       integrations: {
         localComputer: {
           command: "/cua-driver",

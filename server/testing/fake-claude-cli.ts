@@ -274,11 +274,21 @@ const playTurn = (prompt: JsonValue) => {
     // a gap a test can steer into; the closing reply carries anything that
     // was folded in, the way the real CLI includes a mid-turn message in
     // the same turn's next model call
-    setTimeout(() => {
+    const finishSlowTurn = () => {
       const tail = steered.length ? ` + steered: ${steered.join(" | ")}` : "";
       out({ type: "assistant", message: { content: [{ type: "text", text: `reply to: ${promptText(prompt)}${tail}` }] } });
       finish();
-    }, 800);
+    };
+    const finishGate = process.env.FAKE_CLAUDE_SLOW_FINISH_GATE;
+    if (finishGate) {
+      const poll = setInterval(() => {
+        if (!existsSync(finishGate)) return;
+        clearInterval(poll);
+        finishSlowTurn();
+      }, 10);
+    } else {
+      setTimeout(finishSlowTurn, 800);
+    }
   } else {
     finish();
   }
