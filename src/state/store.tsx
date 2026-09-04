@@ -586,7 +586,7 @@ export type Action =
   | { type: "switchGroupTask"; groupId: string; threadId: string }
   | { type: "renameGroupTask"; groupId: string; threadId: string; title: string }
   | { type: "deleteGroupTask"; groupId: string; threadId: string }
-  | { type: "interruptGroup"; groupId: string }
+  | { type: "interruptGroup"; groupId: string; threadId?: string; onError?: () => void }
   | { type: "instances"; instances: InstanceInfo[] }
   | { type: "configStatus"; config: ConfigStatus }
   | { type: "select"; id: string }
@@ -641,7 +641,7 @@ export type Action =
   | { type: "provisioning"; botId: string; on: boolean }
   | { type: "computerControl"; botId: string; held: boolean; helpReason: string | null }
   | { type: "setModel"; botId: string; selection: ModelSelection }
-  | { type: "interrupt"; botId: string }
+  | { type: "interrupt"; botId: string; threadId?: string; onError?: () => void }
   | { type: "connected"; value: boolean }
   | { type: "error"; message: string | null }
   | { type: "toggleSettings"; open?: boolean }
@@ -1914,7 +1914,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }).catch(showError);
           break;
         case "interrupt":
-          api(`/api/bots/${action.botId}/interrupt`, { method: "POST" }).catch(showError);
+          api(`/api/bots/${action.botId}/interrupt`, {
+            method: "POST",
+            body: action.threadId ? JSON.stringify({ threadId: action.threadId }) : undefined,
+          }).catch((error) => {
+            showError(error);
+            action.onError?.();
+          });
           break;
         // tasks: the server answers with the bot AND the live transcript,
         // because switching changes which conversation is on screen
@@ -1963,7 +1969,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             .catch(showError);
           break;
         case "interruptGroup":
-          api(`/api/groups/${action.groupId}/interrupt`, { method: "POST" }).catch(showError);
+          api(`/api/groups/${action.groupId}/interrupt`, {
+            method: "POST",
+            body: action.threadId ? JSON.stringify({ threadId: action.threadId }) : undefined,
+          }).catch((error) => {
+            showError(error);
+            action.onError?.();
+          });
           break;
         case "updateBot": {
           if (botBeforeUpdate) {
