@@ -8394,13 +8394,13 @@ const server = createServer(async (req, res) => {
 
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
       if (channelTaskBlocked(group)) {
         return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
       }
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasGroup(group.id)) {
         return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
       }
@@ -8437,13 +8437,13 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { group: responseGroup });
     }
     if (m && method === "PATCH") {
+      const body = await readBody(req);
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
       if (channelTaskBlocked(group)) {
         return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
       }
-      const body = await readBody(req);
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
       }
@@ -9742,10 +9742,10 @@ const server = createServer(async (req, res) => {
     // switch which fork of the conversation is visible (no new turn)
     m = path.match(/^\/api\/bots\/([\w-]+)\/active-branch$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       if (bot.busy) return json(res, 409, { error: "the bot is working — stop it before switching versions" });
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasThread(bot.threadId)) {
         return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
       }
@@ -9920,10 +9920,10 @@ const server = createServer(async (req, res) => {
 
     m = path.match(/^\/api\/bots\/([\w-]+)\/tasks$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       if (bot.busy) return json(res, 409, { error: "this bot is working — let it finish before starting a task" });
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasBot(bot.id)) {
         return json(res, 409, { error: "this bot is securely saving a credential — try again when it finishes" });
       }
