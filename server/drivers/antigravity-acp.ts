@@ -450,7 +450,7 @@ export class AntigravityAuthController {
       const flow: AuthFlow = {
         id: randomUUID(),
         client,
-        completed: authenticated.then(() => undefined),
+        completed: authenticated,
         pending: { redirectUri: outcome.request.redirectUri, state: outcome.request.state },
         expiresAt: Date.now() + AUTH_TIMEOUT_MS,
       };
