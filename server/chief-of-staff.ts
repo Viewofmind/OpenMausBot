@@ -46,6 +46,7 @@ export function chiefOfStaffSystemPrompt(
         "When the user asks you to assemble a team, use create_bot for each genuinely useful specialist. Give each one a clear role and instructions, then use delegate_bot to assign its work. Do not create duplicate or unnecessary bots.",
         "Delegate with a clear, self-contained brief. Say that the task is assigned, not completed; only claim completion after the teammate's result has actually arrived.",
         "You may assign work to more than one teammate when the request genuinely benefits. Stay responsive while they work, then combine their returned results when the user asks for a synthesis.",
+        "Before asking the user to repeat something, or redoing work a teammate may already have finished, call session_search: it reads your own past conversations and those of the teammates you can reach, and returns dated excerpts. Prefer recalling over re-asking.",
       ].join(" ")
     : "Your current engine cannot contact teammates. Be honest about that limitation and ask the user to choose a delegation-compatible engine before promising coordinated work.";
 

@@ -360,6 +360,28 @@ const TOOLS = [
     },
   },
   {
+    name: "session_search",
+    description:
+      "Search past conversations — your own and those of the teammates you can reach — before asking the user to repeat something. Use it when a question refers to earlier work (\"what did we decide about X\", \"did anyone already audit Y\", \"what were last week's numbers\"), or before redoing research a teammate may have finished. Returns dated excerpts with the bot that said them; read those before answering. It cannot see bots outside your section or ones you are not allowed to contact.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description: "What to look for, in plain words. Any term may match; you do not need search syntax.",
+        },
+        scope: {
+          type: "string",
+          enum: ["team", "self"],
+          description: "team (default) searches you and your reachable teammates; self searches only your own threads.",
+        },
+        limit: { type: "number", description: "Maximum excerpts to return, 1-50. Default 20." },
+      },
+      required: ["query"],
+    },
+  },
+  {
     name: "skills_list",
     description:
       "List this bot's imported skills (enabled and disabled) and any staged skill writes waiting for the user to confirm. Use this before skill_manage to avoid duplicate names. Listing does not enable anything.",
@@ -677,6 +699,36 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       body: JSON.stringify(body),
     });
     return confirmationResult(r, `${action.replace("_", " ")} on routine ${routineId}`);
+  }
+  if (name === "session_search") {
+    const query = String((args as Json).query ?? "").trim();
+    if (!query) return { text: "session_search needs a query." };
+    const params = new URLSearchParams({ self: BOT_ID, q: query });
+    if ((args as Json).scope === "self") params.set("scope", "self");
+    const limit = Number((args as Json).limit);
+    if (Number.isFinite(limit)) params.set("limit", String(limit));
+    const r = await api(`/api/internal/session-search?${params.toString()}`);
+    const hits = Array.isArray(r.hits) ? (r.hits as Json[]) : [];
+    const searched = (r.searched ?? {}) as Json;
+    if (!hits.length) {
+      // Say what was covered. "Nothing found" across 40 threads is evidence;
+      // the same words across 1 thread usually means the scope was wrong.
+      return {
+        text:
+          `No earlier mention of "${query}" in ${searched.threads ?? 0} conversation(s) across ` +
+          `${searched.bots ?? 0} bot(s). Ask the user rather than guessing.`,
+      };
+    }
+    const lines = hits.map((hit) => {
+      const who = hit.from ? `${hit.bot} · ${hit.from}` : String(hit.bot);
+      return `- [${String(hit.at).slice(0, 16).replace("T", " ")}] ${who}: ${hit.text}`;
+    });
+    return {
+      text:
+        `${hits.length} excerpt(s) for "${query}" from ${searched.threads ?? 0} conversation(s):\n` +
+        `${lines.join("\n")}\n\n` +
+        "These are excerpts, not the whole exchange. Treat them as recall to build on, and say which bot and date a fact came from when it matters.",
+    };
   }
   if (name === "skills_list") {
     const query = new URLSearchParams({ fromBotId: BOT_ID, fromThreadId: THREAD_ID });

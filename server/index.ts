@@ -140,7 +140,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { searchMessages } from "./message-db.ts";
+import { searchMessages, sessionSearch } from "./message-db.ts";
 import { promptWithReply, transcriptText } from "./replies.ts";
 import { _loadPending, buildDelegationFailurePrompt, buildDelegationRevivalPrompt, DelegationWakeBudget, discardDelegations, drainDelegations, findDelegationReceipt, pendingDelegationInfo, pendingDelegationSnapshot, pendingThreads, queueDelegation, recordDelegationReceipt, releaseDelegationsWaitingOn, summarizeDelegatedActivity, type QueueResult } from "./delegations.ts";
 import {
@@ -5841,6 +5841,13 @@ async function localVmPayload(target: LocalVmTarget) {
   };
 }
 
+/** Every thread that belongs to one bot: its main conversation plus each
+ * task thread. Recall is scoped by thread id, so this is the unit of "what
+ * this bot has said". */
+function botThreadIds(bot: { threadId: string; tasks?: Array<{ threadId: string }> }): string[] {
+  return [...new Set([bot.threadId, ...(bot.tasks ?? []).map((task) => task.threadId)])];
+}
+
 async function existingPerBotLocalVmCount(runtime: Runtime) {
   return (await discoverExistingPerBotLocalVms(store.bots, runtime)).length;
 }
@@ -6154,6 +6161,47 @@ const server = createServer(async (req, res) => {
             description: b.description || undefined,
           }));
         return json(res, 200, { bots });
+      }
+      if (method === "GET" && path === "/api/internal/session-search") {
+        const self = url.searchParams.get("self");
+        const sender = self ? store.bot(self) : null;
+        if (!sender) return json(res, 403, { error: "unknown sender" });
+        const query = String(url.searchParams.get("q") ?? "").trim();
+        if (!query) return json(res, 400, { error: "q is required" });
+        const scope = url.searchParams.get("scope") === "self" ? "self" : "team";
+
+        // Reach decides recall. A bot may read the transcripts of the bots it
+        // can already contact — the same set `list_bots` shows and
+        // `delegate_bot` accepts — plus its own. Anything it cannot address it
+        // cannot read, so recall never becomes a way around the roster.
+        const owners = scope === "self" ? [sender] : [sender, ...reachablePeers(store.bots, sender)];
+        const threadOwner = new Map<string, { id: string; name: string }>();
+        for (const owner of owners) {
+          for (const threadId of botThreadIds(owner)) {
+            threadOwner.set(threadId, { id: owner.id, name: owner.name });
+          }
+        }
+
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 20) || 20, 1), 50);
+        const hits = sessionSearch(query, [...threadOwner.keys()], { limit });
+        return json(res, 200, {
+          query,
+          scope,
+          searched: { bots: owners.length, threads: threadOwner.size },
+          // The model gets who said it and when, not raw ids to guess with.
+          hits: hits.map((hit) => {
+            const owner = threadOwner.get(hit.threadId);
+            return {
+              bot: owner?.name ?? "unknown",
+              botId: owner?.id,
+              threadId: hit.threadId,
+              at: new Date(hit.at).toISOString(),
+              role: hit.role,
+              ...(hit.from ? { from: hit.from } : {}),
+              text: hit.snippet,
+            };
+          }),
+        });
       }
       if (method === "GET" && path === "/api/internal/routines") {
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");

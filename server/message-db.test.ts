@@ -10,7 +10,9 @@ import {
   deleteThread,
   insertMessage,
   readThread,
+  messageIndexReady,
   searchMessages,
+  sessionSearch,
   setActiveLeaf,
   updateMessage,
 } from "./message-db.ts";
@@ -157,5 +159,79 @@ describe("message-db", () => {
     expect(path.at(-1)?.text).toBe("edited");
     // both branches survive in the tree
     expect(reloaded.messagesFor(bot.threadId).filter((m) => m.parentId === first.parentId)).toHaveLength(2);
+  });
+});
+
+// sessionSearch backs the session_search agent tool. It runs on two very
+// different SQLite builds — Electron's Node 24 has FTS5, the Node that runs
+// this suite may not — so every case below must hold on either path. The
+// suite asserts behaviour, never which index answered.
+describe("sessionSearch", () => {
+  const seed = () => {
+    insertMessage("t-cia", msg("c1", "The idle timer removes the Local VM container after eight hours."));
+    insertMessage("t-cia", msg("c2", "Podman machine memory raised from 2 GiB to 4 GiB."));
+    insertMessage("t-seo", msg("s1", "Search Console shows /screener is not indexed."));
+    insertMessage("t-seo", msg("s2", "Competitor SSR comparison across three finance sites."));
+    insertMessage("t-private", msg("p1", "A container question in a thread the caller cannot reach."));
+  };
+
+  it("finds a hit only inside the threads it was given", () => {
+    seed();
+    const hits = sessionSearch("container", ["t-cia", "t-seo"]);
+
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.every((hit) => hit.threadId !== "t-private")).toBe(true);
+  });
+
+  it("matches any term of a prose query, not the literal phrase", () => {
+    // "Search Console indexed" appears as three words, never as a substring.
+    // The FTS path ORs terms; the fallback has to agree, or the tool would
+    // mean different things on different runtimes.
+    seed();
+    const hits = sessionSearch("Search Console indexed", ["t-seo"]);
+
+    expect(hits.some((hit) => hit.snippet.includes("Search Console"))).toBe(true);
+  });
+
+  it("survives prose punctuation a model will actually type", () => {
+    seed();
+    expect(() => sessionSearch("what about /screener? (any update)", ["t-seo"])).not.toThrow();
+    expect(sessionSearch("what about /screener?", ["t-seo"]).length).toBeGreaterThan(0);
+  });
+
+  it("returns nothing for a blank query or an empty scope", () => {
+    seed();
+    expect(sessionSearch("   ", ["t-cia"])).toEqual([]);
+    expect(sessionSearch("container", [])).toEqual([]);
+  });
+
+  it("caps hits per thread so one busy conversation cannot crowd out the rest", () => {
+    for (let i = 0; i < 8; i++) insertMessage("t-loud", msg(`l${i}`, `container note number ${i}`));
+    insertMessage("t-quiet", msg("q1", "container note from the quiet thread"));
+
+    const hits = sessionSearch("container", ["t-loud", "t-quiet"], { limit: 10, perThread: 2 });
+
+    expect(hits.filter((hit) => hit.threadId === "t-loud").length).toBeLessThanOrEqual(2);
+    expect(hits.some((hit) => hit.threadId === "t-quiet")).toBe(true);
+  });
+
+  it("honours the overall limit", () => {
+    for (let i = 0; i < 12; i++) insertMessage(`t-${i}`, msg(`m${i}`, `container ${i}`));
+    const threads = Array.from({ length: 12 }, (_, i) => `t-${i}`);
+
+    expect(sessionSearch("container", threads, { limit: 5 }).length).toBeLessThanOrEqual(5);
+  });
+
+  it("indexes an activity chip by its tool name, like the sidebar search does", () => {
+    insertMessage(
+      "t-tools",
+      msg("a1", "", { kind: "activity", tool: { name: "browser_navigate", ok: true } } as Partial<Message>),
+    );
+
+    expect(sessionSearch("browser_navigate", ["t-tools"]).length).toBeGreaterThan(0);
+  });
+
+  it("reports which index answered, so a runtime without FTS5 is visible", () => {
+    expect(typeof messageIndexReady()).toBe("boolean");
   });
 });

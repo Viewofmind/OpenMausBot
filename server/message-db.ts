@@ -51,7 +51,74 @@ function open(): DatabaseSync {
       active_leaf_id TEXT
     );
   `);
+  ftsReady = installFts(db);
   return db;
+}
+
+/** Whether this runtime's SQLite has FTS5, decided once per handle.
+ *
+ * It is not a given. Electron's Node 24 ships it; the Node that runs `vitest`
+ * on a contributor's machine may not, and `CREATE VIRTUAL TABLE … USING fts5`
+ * throws "no such module: fts5" there. So the index is an accelerator, never a
+ * requirement: `sessionSearch` falls back to the same LIKE scan the sidebar has
+ * always used, which is correct — only slower — on a local transcript. */
+let ftsReady = false;
+
+export function messageIndexReady(): boolean {
+  return ftsReady;
+}
+
+/** An external-content FTS5 index over the searchable part of a message.
+ *
+ * External content keeps one copy of the text: the index stores terms, the row
+ * stays in `messages`. Triggers mirror every write, so nothing in the existing
+ * write paths has to remember the index exists.
+ *
+ * The content source is a VIEW, not `messages` itself. FTS5 resolves external
+ * content by column name, and a searchable "body" is not a column here — it is
+ * a text message's body OR an activity chip's tool name, the same two fields
+ * `searchMessages` scans. Pointing `content` straight at `messages` compiles
+ * and then fails every read with "no such column: T.body"; the view supplies
+ * the column FTS5 is looking for. */
+function installFts(db: DatabaseSync): boolean {
+  try {
+    db.exec(`
+      CREATE VIEW IF NOT EXISTS messages_body AS
+        SELECT rowid AS rowid, coalesce(text, json_extract(json, '$.tool.name'), '') AS body
+        FROM messages;
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        body,
+        content = 'messages_body',
+        content_rowid = 'rowid',
+        tokenize = 'porter unicode61'
+      );
+      CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts (rowid, body)
+        VALUES (new.rowid, coalesce(new.text, json_extract(new.json, '$.tool.name'), ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, body)
+        VALUES ('delete', old.rowid, coalesce(old.text, json_extract(old.json, '$.tool.name'), ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, body)
+        VALUES ('delete', old.rowid, coalesce(old.text, json_extract(old.json, '$.tool.name'), ''));
+        INSERT INTO messages_fts (rowid, body)
+        VALUES (new.rowid, coalesce(new.text, json_extract(new.json, '$.tool.name'), ''));
+      END;
+    `);
+    // Backfill once, for transcripts written before the index existed. The
+    // rebuild command reads straight from the content table, so it costs one
+    // pass over rows that are already on disk.
+    const indexed = db.prepare("SELECT count(*) AS n FROM messages_fts").get() as { n: number };
+    const stored = db.prepare("SELECT count(*) AS n FROM messages").get() as { n: number };
+    if (indexed.n !== stored.n) {
+      db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')");
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The live handle — reopened when the file was removed out from under us
@@ -249,6 +316,132 @@ export function searchMessages(query: string, limit = 40, threadId?: string): Se
       ...(row.from_name ? { from: row.from_name } : {}),
     };
   });
+}
+
+export interface SessionSearchHit extends SearchHit {
+  /** Which bot's conversation this came from, resolved by the caller. */
+  botId?: string;
+}
+
+/** Recall across a named set of threads, for the `session_search` tool.
+ *
+ * Differs from `searchMessages` in three ways, all because the reader is a
+ * model rather than a person scrolling a sidebar:
+ *
+ *  - the caller passes the exact threads it may see, so scoping is decided by
+ *    the harness (which knows who can reach whom) and never by this file
+ *  - ranked by relevance when FTS5 is present, not by recency, because a model
+ *    asking "what did we conclude about X" wants the best hit, not the newest
+ *  - capped per thread, so one chatty conversation cannot crowd out the rest
+ *
+ * With no FTS5 it degrades to the same LIKE scan `searchMessages` uses. Same
+ * results, same shape, slower on a large transcript — which beats the tool not
+ * existing on that runtime.
+ */
+export function sessionSearch(
+  query: string,
+  threadIds: readonly string[],
+  { limit = 20, perThread = 4 }: { limit?: number; perThread?: number } = {},
+): SessionSearchHit[] {
+  const needle = query.trim();
+  if (!needle || threadIds.length === 0) return [];
+
+  const slots = threadIds.map(() => "?").join(",");
+  const rows = ftsReady
+    ? ftsRows(needle, threadIds, slots, limit)
+    : likeRows(needle, threadIds, slots, limit);
+
+  const perThreadCount = new Map<string, number>();
+  const hits: SessionSearchHit[] = [];
+  for (const row of rows) {
+    const seen = perThreadCount.get(row.thread_id) ?? 0;
+    if (seen >= perThread) continue;
+    perThreadCount.set(row.thread_id, seen + 1);
+    hits.push(rowToHit(row, needle));
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+interface SearchRow {
+  thread_id: string;
+  id: string;
+  at: number;
+  role: string;
+  kind: string;
+  text: string | null;
+  tool_name: string | null;
+  from_name: string | null;
+}
+
+const SELECT_COLUMNS =
+  "m.thread_id AS thread_id, m.id AS id, m.at AS at, m.role AS role, m.kind AS kind, m.text AS text, " +
+  "json_extract(m.json, '$.tool.name') AS tool_name, json_extract(m.json, '$.from.name') AS from_name";
+
+function ftsRows(needle: string, threadIds: readonly string[], slots: string, limit: number): SearchRow[] {
+  // Quote every term and OR them: a model writes prose, not FTS syntax, and an
+  // unquoted apostrophe or hyphen is a syntax error rather than zero results.
+  const terms = queryTerms(needle);
+  if (terms.length === 0) return [];
+  const match = terms.map((term) => `"${term}"`).join(" OR ");
+  return db()
+    .prepare(
+      `SELECT ${SELECT_COLUMNS} FROM messages_fts f JOIN messages m ON m.rowid = f.rowid ` +
+        `WHERE messages_fts MATCH ? AND m.thread_id IN (${slots}) ` +
+        "ORDER BY f.rank LIMIT ?",
+    )
+    .all(match, ...threadIds, limit * 4) as unknown as SearchRow[];
+}
+
+/** Terms of a prose query, deduped and bounded.
+ *
+ * Both paths match ANY term rather than the literal phrase. Without this the
+ * fallback answers a different question from the index — "Search Console
+ * indexed" finds nothing as a substring but three rows as terms — and a tool
+ * whose meaning depends on the runtime is worse than a slow one. */
+function queryTerms(needle: string): string[] {
+  const terms = needle.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  return [...new Set(terms)].slice(0, 8);
+}
+
+function likeRows(needle: string, threadIds: readonly string[], slots: string, limit: number): SearchRow[] {
+  const terms = queryTerms(needle);
+  if (terms.length === 0) return [];
+  const patterns = terms.map((term) => `%${term.replace(/([\\%_])/g, "\\$1")}%`);
+  const anyTerm = (column: string) =>
+    patterns.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" OR ");
+  return db()
+    .prepare(
+      `SELECT ${SELECT_COLUMNS} FROM messages m ` +
+        `WHERE m.thread_id IN (${slots}) AND ` +
+        `((m.kind = 'text' AND m.text IS NOT NULL AND (${anyTerm("lower(m.text)")})) ` +
+        " OR (m.kind = 'activity' AND json_extract(m.json, '$.tool.name') IS NOT NULL " +
+        `     AND (${anyTerm("lower(json_extract(m.json, '$.tool.name'))")}))) ` +
+        "ORDER BY m.at DESC LIMIT ?",
+    )
+    .all(...threadIds, ...patterns, ...patterns, limit * 4) as unknown as SearchRow[];
+}
+
+function rowToHit(row: SearchRow, needle: string): SessionSearchHit {
+  const haystack = row.kind === "activity" ? (row.tool_name ?? "") : (row.text ?? "");
+  const first = needle.match(/[\p{L}\p{N}_]+/u)?.[0]?.toLowerCase() ?? needle.toLowerCase();
+  const hitAt = Math.max(0, haystack.toLowerCase().indexOf(first));
+  const start = Math.max(0, hitAt - 80);
+  const end = Math.min(haystack.length, hitAt + 200);
+  const head = start > 0 ? "…" : "";
+  const body = haystack.slice(start, end).replace(/\s+/g, " ").trim();
+  const matchStart = body.toLowerCase().indexOf(first);
+  return {
+    threadId: row.thread_id,
+    messageId: row.id,
+    at: row.at,
+    role: row.role,
+    kind: row.kind,
+    snippet: head + body + (end < haystack.length ? "…" : ""),
+    matchStart: matchStart < 0 ? head.length : matchStart + head.length,
+    matchLength: matchStart < 0 ? 0 : first.length,
+    ...(row.from_name ? { from: row.from_name } : {}),
+  };
 }
 
 /** Test/shutdown hook — closes the handle so a wiped DATA_DIR starts clean. */
