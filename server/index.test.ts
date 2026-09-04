@@ -735,6 +735,41 @@ describe("harness HTTP API", () => {
     expect(body.static).toBe(true);
   });
 
+  it("refuses a second live server that shares the same data directory", async () => {
+    const contenderPort = await freePortBlock([0]);
+    let contenderStderr = "";
+    const contender = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
+      cwd: ROOT,
+      env: {
+        ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+        OMB_DATA_DIR: join(home, ".openmausbot"),
+        OMB_PORT: String(contenderPort),
+        OMB_STATIC_DIR: staticDir,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    contender.stderr!.on("data", (chunk) => (contenderStderr += chunk));
+
+    try {
+      const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("competing server did not exit")), 5_000);
+        timer.unref?.();
+        contender.once("close", (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal });
+        });
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.signal).toBeNull();
+      expect(contenderStderr).toMatch(/already using this data directory.*close the other instance first/i);
+      // The rejected contender must not disturb the original owner.
+      expect((await api("GET", "/api/health")).status).toBe(200);
+    } finally {
+      await waitForExit(contender, { signal: "SIGTERM", graceMs: 1_000 });
+    }
+  });
+
   it("serves packaged UI assets and preserves API 404s", async () => {
     const root = await fetch(`${BASE}/`);
     expect(root.status).toBe(200);

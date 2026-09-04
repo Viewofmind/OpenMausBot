@@ -272,6 +272,7 @@ import {
   isTurnEventQuarantined,
 } from "./turn-dispatch-guard.ts";
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
+import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
 import { environmentDescriptor, loadEnvironmentId } from "./environment.ts";
 import {
@@ -303,6 +304,23 @@ const MIME: Record<string, string> = {
 };
 
 ensureDirs();
+// The desktop parent owns the primary lease and delegates one private child
+// claim; a standalone/headless server owns the primary lease itself. Acquire
+// before any durable identity, sessions, config, or Store state is loaded.
+const dataDirLease = acquireDataDirLeaseForProcess(DATA_DIR);
+let dataDirLeaseReleaseAttempted = false;
+function releaseDataDirLeaseAtExit(): void {
+  if (dataDirLeaseReleaseAttempted) return;
+  dataDirLeaseReleaseAttempted = true;
+  try {
+    dataDirLease.release();
+  } catch (error) {
+    // A failed release deliberately leaves a stale, owner-token-protected
+    // lease. The next process can recover it only after this PID is dead.
+    console.error(`[data-directory] lease release failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+process.once("exit", releaseDataDirLeaseAtExit);
 // Only after ensureDirs(): it performs the one-time rename of the legacy data
 // dir, which must not find a freshly created ~/.openmausbot already there.
 // Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
@@ -10956,7 +10974,13 @@ const gracefulShutdown = createGracefulShutdown({
     () => releaseAllBrowserCapabilities(),
     () => registry.disposeAll(),
   ],
-  exit: (code) => process.exit(code),
+  // Cleanup jobs run concurrently. Release only after they settle (or reach
+  // the shutdown deadline), immediately before the process exits, so no new
+  // server can overlap with a still-mutating old one.
+  exit: (code) => {
+    releaseDataDirLeaseAtExit();
+    process.exit(code);
+  },
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
