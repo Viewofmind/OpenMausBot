@@ -67,18 +67,15 @@ async function sealPhoneSecretForTest(
     Buffer.from(PHONE_SECRET_TEST_IDENTITY.privateKey.x, "base64url"),
     Buffer.from(PHONE_SECRET_TEST_IDENTITY.privateKey.y, "base64url"),
   ]));
-  const encrypted = await phoneSecretTestSuite.seal(
-    {
-      recipientPublicKey: publicKey,
-      info: new TextEncoder().encode(PHONE_SECRET_INFO),
-    },
-    new TextEncoder().encode(value),
-    phoneSecretAAD(context),
-  );
+  const sender = await phoneSecretTestSuite.createSenderContext({
+    recipientPublicKey: publicKey,
+    info: new TextEncoder().encode(PHONE_SECRET_INFO),
+  });
+  const ciphertext = await sender.seal(new TextEncoder().encode(value), phoneSecretAAD(context));
   return {
     ...context,
-    encapsulatedKey: Buffer.from(encrypted.enc).toString("base64url"),
-    ciphertext: Buffer.from(encrypted.ct).toString("base64url"),
+    encapsulatedKey: Buffer.from(sender.enc).toString("base64url"),
+    ciphertext: Buffer.from(ciphertext).toString("base64url"),
   };
 }
 

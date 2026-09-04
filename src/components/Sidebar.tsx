@@ -765,7 +765,7 @@ export function BotListItem({
                 if (remoteClient) {
                   void api(`/api/bots/${bot.id}/profile`, { method: "PATCH", body: JSON.stringify({ name }) })
                     .then(({ bot: updated }) => dispatch({ type: "botPatched", bot: updated }))
-                    .catch(() => {});
+                    .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
                 } else {
                   dispatch({ type: "updateBot", botId: bot.id, patch: { name } });
                 }
@@ -810,6 +810,7 @@ export function BotListItem({
     onMenu({ botId: bot.id, x: event.clientX, y: event.clientY });
   };
   const onSelect = (event: React.MouseEvent) => {
+    if (renaming) return;
     const insideRenameInput = event.target instanceof HTMLInputElement;
     if (botListItemPointerIntent(event.type, insideRenameInput) === "select") {
       dispatch({ type: "select", id: bot.id });
