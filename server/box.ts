@@ -10,7 +10,10 @@
 //   - stop→archived ~5s, resume→idle ~8s; disk persists, tmux does not.
 //   - X11 desktop with Chrome + Ghostty; passwordless sudo; node 24.
 //   - the dedicated IP rotates across archive/resume — never persist it.
-import type { AppConfig } from "./config.ts";
+import { createHash } from "node:crypto";
+
+import { DATA_DIR, type AppConfig } from "./config.ts";
+import { loadEnvironmentId } from "./environment.ts";
 import {
   beginBoxCreate,
   discardBoxCreate,
@@ -35,7 +38,8 @@ const BOX_INVENTORY_PAGE_SIZE = 200;
 // Current self-serve accounts top out below 2,000 boxes. Keep the walk
 // bounded anyway: a broken or adversarial cursor must not hold Settings open.
 const MAX_BOX_INVENTORY_PAGES = 10;
-const MANAGED_BOX_NAME = /^ogb-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
+const LEGACY_MANAGED_BOX_NAME = /^ogb-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
+const SCOPED_MANAGED_BOX_NAME = /^ogb-[a-f0-9]{12}-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
 const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const BOX_STATES = new Set([
   "init",
@@ -52,6 +56,15 @@ const BOX_STATES = new Set([
   "starting",
   "error",
 ]);
+// Provider listings are account-wide. Hash the durable local environment id
+// into every new name so another OpenMausBot installation using the same Box
+// account cannot mistake this installation's computers for abandoned ones.
+// The environment UUID itself never leaves the local data directory.
+const BOX_ENVIRONMENT_SCOPE = createHash("sha256")
+  .update(loadEnvironmentId(DATA_DIR))
+  .digest("hex")
+  .slice(0, 12);
+const SCOPED_BOX_PREFIX = `ogb-${BOX_ENVIRONMENT_SCOPE}-`;
 
 export interface ManagedBoxOwner {
   botId: string;
@@ -116,14 +129,22 @@ async function boxJson(cfg: AppConfig, path: string, opts: RequestInit = {}) {
   return { ok: res.ok && body?.ok !== false, status: res.status, body };
 }
 
-// deterministic per-bot name; the hash kills truncated-uuid collisions
+function boxBotNameParts(botId: string): { prefix: string; hash: string } {
+  const prefix = botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "") || "bot";
+  const hash = createHash("sha256").update(botId).digest("hex").slice(0, 6);
+  return { prefix, hash };
+}
+
+function legacyBoxNameFor(botId: string): string {
+  const { prefix, hash } = boxBotNameParts(botId);
+  return `ogb-${prefix}-${hash}`;
+}
+
+// Deterministic per installation and bot. The bot hash kills truncated-id
+// collisions; the environment scope prevents cross-install ownership claims.
 export async function boxNameFor(botId: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(botId));
-  const hash = [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 6);
-  return `ogb-${botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "")}-${hash}`;
+  const { prefix, hash } = boxBotNameParts(botId);
+  return `${SCOPED_BOX_PREFIX}${prefix}-${hash}`;
 }
 
 export async function runCommand(cfg: AppConfig, boxId: string, command: string, { timeoutMs = 120_000 } = {}) {
@@ -234,8 +255,10 @@ async function listBoxPages(
  * One read-only account listing for Settings and deletion guards. Only boxes
  * carrying OpenMausBot's exact deterministic name shape leave this boundary;
  * provider desktop links, IPs, environment details and other raw fields never
- * reach the renderer. An unmatched managed name is an orphan left by a bot
- * that no longer exists.
+ * reach the renderer. Only names scoped to this installation may become
+ * ownerless rows. Legacy names are accepted solely when a current bot proves
+ * ownership; foreign-install and ownerless legacy rows remain invisible and
+ * therefore cannot become deletion targets.
  */
 export async function listManagedBoxes(
   cfg: AppConfig,
@@ -255,17 +278,36 @@ export async function listManagedBoxes(
     };
   }
 
-  const namedOwners = await Promise.all(owners.map(async (owner) => [await boxNameFor(owner.botId), owner] as const));
-  const ownerByName = new Map<string, ManagedBoxOwner>(namedOwners);
+  const namedOwners = await Promise.all(owners.map(async (owner) => ({
+    currentName: await boxNameFor(owner.botId),
+    legacyName: legacyBoxNameFor(owner.botId),
+    owner,
+  })));
+  const ownerByCurrentName = new Map(namedOwners.map(({ currentName, owner }) => [currentName, owner] as const));
+  const ownerByLegacyName = new Map(namedOwners.map(({ legacyName, owner }) => [legacyName, owner] as const));
   const instances: ManagedBoxInventoryInstance[] = [];
   const seenBoxIds = new Set<string>();
   for (const candidate of listed.boxes) {
     if (!candidate || typeof candidate !== "object") continue;
     const boxId = typeof candidate.id === "string" ? candidate.id : "";
     const name = typeof candidate.name === "string" ? candidate.name : "";
-    if (!BOX_ID.test(boxId) || !MANAGED_BOX_NAME.test(name) || seenBoxIds.has(boxId)) continue;
+    if (!BOX_ID.test(boxId) || seenBoxIds.has(boxId)) continue;
+    let owner: ManagedBoxOwner | null = null;
+    if (SCOPED_MANAGED_BOX_NAME.test(name)) {
+      // A valid OMB name for another environment is account-visible but not
+      // ours to display or mutate.
+      if (!name.startsWith(SCOPED_BOX_PREFIX)) continue;
+      owner = ownerByCurrentName.get(name) ?? null;
+    } else if (LEGACY_MANAGED_BOX_NAME.test(name)) {
+      // Pre-scope names have no installation provenance. A live local bot is
+      // the only safe ownership proof; unmatched legacy rows stay provider-
+      // managed until the person handles them in ascii.dev directly.
+      owner = ownerByLegacyName.get(name) ?? null;
+      if (!owner) continue;
+    } else {
+      continue;
+    }
     seenBoxIds.add(boxId);
-    const owner = ownerByName.get(name) ?? null;
     instances.push({
       boxId,
       name,
@@ -399,11 +441,16 @@ export async function findBox(cfg: AppConfig, botId: string) {
     boxIdCache.delete(botId); // gone or broken — fall back to the listing
   }
   const name = await boxNameFor(botId);
+  const legacyName = legacyBoxNameFor(botId);
   const listed = await listBoxPages(cfg);
   if (!listed.ok) {
     throw Object.assign(new Error(listed.problem), { status: 503 });
   }
-  const found = listed.boxes.find((candidate: any) => candidate?.name === name && candidate.state !== "error") ?? null;
+  // Prefer the installation-scoped identity. A legacy name remains
+  // discoverable only for this exact local bot id.
+  const found = listed.boxes.find((candidate: any) => candidate?.name === name && candidate.state !== "error")
+    ?? listed.boxes.find((candidate: any) => candidate?.name === legacyName && candidate.state !== "error")
+    ?? null;
   if (found?.id) boxIdCache.set(botId, found.id);
   return found;
 }

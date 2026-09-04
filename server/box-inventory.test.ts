@@ -6,7 +6,7 @@ type ProviderBox = Record<string, unknown> & { id: string; name: string; state: 
 type RequestRecord = { method: string; path: string; search: string; headers: IncomingMessage["headers"] };
 type PageResponse = { boxes: ProviderBox[]; nextCursor: string | null };
 
-const nameFor = (botId: string) => {
+const legacyNameFor = (botId: string) => {
   const prefix = botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "");
   const hash = createHash("sha256").update(botId).digest("hex").slice(0, 6);
   return `ogb-${prefix}-${hash}`;
@@ -84,12 +84,12 @@ describe("OpenMaus-managed Box inventory", () => {
     await new Promise<void>((resolve) => api.close(() => resolve()));
   });
 
-  it("lists only sanitized managed boxes and identifies current and orphaned owners", async () => {
+  it("lists only sanitized managed boxes and keeps an owned legacy Box discoverable", async () => {
     const botId = "current-bot-123";
     boxes = [
       {
         id: "bx_23456789",
-        name: nameFor(botId),
+        name: legacyNameFor(botId),
         state: "READY",
         desktopUrl: "https://secret.example/?token=do-not-leak",
         dedicatedIp: "203.0.113.8",
@@ -109,21 +109,12 @@ describe("OpenMaus-managed Box inventory", () => {
       instances: [
         {
           boxId: "bx_23456789",
-          name: nameFor(botId),
+          name: legacyNameFor(botId),
           state: "ready",
           ownerBotId: botId,
           ownerName: "Research",
           orphaned: false,
           inUse: true,
-        },
-        {
-          boxId: "bx_abcdefgh",
-          name: "ogb-orphaned-abcdef",
-          state: "archived",
-          ownerBotId: null,
-          ownerName: null,
-          orphaned: true,
-          inUse: false,
         },
       ],
     });
@@ -135,11 +126,52 @@ describe("OpenMaus-managed Box inventory", () => {
     })]);
   });
 
+  it("shows current-install orphans but hides foreign and ownerless legacy Boxes", async () => {
+    const currentBotId = "scoped-owner";
+    const legacyBotId = "legacy-owner";
+    const currentName = await box.boxNameFor(currentBotId);
+    const orphanName = await box.boxNameFor("deleted-local-bot");
+    const currentScope = currentName.match(/^ogb-([a-f0-9]{12})-/)?.[1];
+    expect(currentScope).toBeTruthy();
+    const foreignScope = currentScope === "000000000000" ? "111111111111" : "000000000000";
+    const foreignName = currentName.replace(/^ogb-[a-f0-9]{12}-/, `ogb-${foreignScope}-`);
+    const ownerlessLegacyName = "ogb-orphaned-abcdef";
+    boxes = [
+      { id: "bx_23456789", name: currentName, state: "ready" },
+      { id: "bx_abcdefgh", name: legacyNameFor(legacyBotId), state: "archived" },
+      { id: "bx_jkmnpqrs", name: orphanName, state: "idle" },
+      { id: "bx_mnpqrstu", name: foreignName, state: "running" },
+      { id: "bx_npqrstuv", name: ownerlessLegacyName, state: "archived" },
+    ];
+    const owners = [
+      { botId: currentBotId, name: "Current", inUse: false },
+      { botId: legacyBotId, name: "Legacy", inUse: false },
+    ];
+
+    const inventory = await box.listManagedBoxes(cfg, owners);
+
+    expect(inventory.instances).toHaveLength(3);
+    expect(inventory.instances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ boxId: "bx_23456789", ownerBotId: currentBotId, orphaned: false }),
+      expect.objectContaining({ boxId: "bx_abcdefgh", ownerBotId: legacyBotId, orphaned: false }),
+      expect.objectContaining({ boxId: "bx_jkmnpqrs", ownerBotId: null, orphaned: true }),
+    ]));
+    expect(inventory.instances.some((instance) => instance.name === foreignName)).toBe(false);
+    expect(inventory.instances.some((instance) => instance.name === ownerlessLegacyName)).toBe(false);
+
+    requests.length = 0;
+    await expect(box.deleteManagedBox(cfg, owners, "bx_mnpqrstu", foreignName)).rejects.toThrow(/no longer exists/);
+    await expect(
+      box.deleteManagedBox(cfg, owners, "bx_npqrstuv", ownerlessLegacyName),
+    ).rejects.toThrow(/no longer exists/);
+    expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
   it("walks cursor pages once and refuses a repeated cursor instead of looping", async () => {
     const botId = "second-page-owner";
     pageResponses = new Map([
       ["", { boxes: [{ id: "foreign", name: "unmanaged", state: "ready" }], nextCursor: "page two/?=" }],
-      ["page two/?=", { boxes: [{ id: "bx_mnpqrstu", name: nameFor(botId), state: "idle" }], nextCursor: null }],
+      ["page two/?=", { boxes: [{ id: "bx_mnpqrstu", name: legacyNameFor(botId), state: "idle" }], nextCursor: null }],
     ]);
 
     const inventory = await box.listManagedBoxes(cfg, [{ botId, name: "Page two", inUse: false }]);
@@ -180,7 +212,7 @@ describe("OpenMaus-managed Box inventory", () => {
 
   it("revalidates ownership before sleep and surfaces a provider refusal", async () => {
     const botId = "sleeping-owner";
-    boxes = [{ id: "bx_tuvwxyz2", name: nameFor(botId), state: "ready" }];
+    boxes = [{ id: "bx_tuvwxyz2", name: legacyNameFor(botId), state: "ready" }];
     const owners = [{ botId, name: "Sleeper", inUse: false }];
 
     await box.sleepManagedBox(cfg, owners, "bx_tuvwxyz2");
@@ -196,7 +228,7 @@ describe("OpenMaus-managed Box inventory", () => {
     expect(requests.some((request) => request.path.endsWith("/resume"))).toBe(false);
     expect(requests.some((request) => request.path.endsWith("/desktop"))).toBe(false);
 
-    boxes = [{ id: "bx_tuvwxyz2", name: nameFor(botId), state: "provisioning" }];
+    boxes = [{ id: "bx_tuvwxyz2", name: legacyNameFor(botId), state: "provisioning" }];
     requests.length = 0;
     await expect(box.sleepManagedBox(cfg, owners, "bx_tuvwxyz2")).rejects.toThrow(/cannot sleep while it is provisioning/);
     expect(requests.every((request) => request.method === "GET")).toBe(true);
@@ -204,7 +236,7 @@ describe("OpenMaus-managed Box inventory", () => {
 
   it("requires fresh exact confirmation for deletion and clears a cached owner id", async () => {
     const botId = "delete-owner";
-    const managedName = nameFor(botId);
+    const managedName = legacyNameFor(botId);
     boxes = [{ id: "bx_3456789a", name: managedName, state: "archived" }];
     const owners = [{ botId, name: "Disposable", inUse: false }];
 
@@ -236,7 +268,7 @@ describe("OpenMaus-managed Box inventory", () => {
     pageResponses = new Map([
       ["", { boxes: [], nextCursor: "next" }],
       ["next", {
-        boxes: [{ id: "bx_npqrstuv", name: nameFor(secondPageBot), state: "ready" }],
+        boxes: [{ id: "bx_npqrstuv", name: legacyNameFor(secondPageBot), state: "ready" }],
         nextCursor: null,
       }],
     ]);
@@ -258,7 +290,7 @@ describe("OpenMaus-managed Box inventory", () => {
 
   it("does not mutate a missing or busy managed box and reports delete failures", async () => {
     const botId = "busy-owner";
-    const managedName = nameFor(botId);
+    const managedName = legacyNameFor(botId);
     const owners = [{ botId, name: "Busy", inUse: true }];
 
     await expect(box.deleteManagedBox(cfg, owners, "bx_456789ab", managedName)).rejects.toThrow(/no longer exists/);
