@@ -12,6 +12,12 @@
 //   - the dedicated IP rotates across archive/resume — never persist it.
 import type { AppConfig } from "./config.ts";
 import {
+  beginBoxCreate,
+  discardBoxCreate,
+  rememberCreatedBox,
+  type BoxCreateRequest,
+} from "./box-create-idempotency.ts";
+import {
   ensureRemoteCuaCommand,
   isolatedRemoteCommand,
   MAX_REMOTE_COMMAND_LENGTH,
@@ -464,19 +470,71 @@ function trialBoxTtlSeconds(body: any): number | null {
   return TRIAL_BOX_TTL_SECONDS;
 }
 
-async function createBox(cfg: AppConfig) {
-  const request = (ttlSeconds: number) =>
-    boxJson(cfg, "/boxes", {
-      method: "POST",
-      // The computer needs the user's desktop session, not the account
-      // owner's host credentials. Keep provider-side env injection off so
-      // API keys cannot silently appear inside the guest.
-      body: JSON.stringify({ ttlSeconds, noEnv: true }),
+type BoxCreateResult = Awaited<ReturnType<typeof boxJson>> & { request: BoxCreateRequest };
+
+function createStillInProgress(result: Awaited<ReturnType<typeof boxJson>>): boolean {
+  const code = result.body?.error?.code ?? result.body?.code;
+  return result.status >= 500 || (result.status === 409 && code === "idempotency_in_progress");
+}
+
+async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: number): Promise<BoxCreateResult> {
+  // The computer needs the user's desktop session, not the account owner's
+  // host credentials. Keep provider-side env injection off so API keys cannot
+  // silently appear inside the guest. The exact serialized body is also the
+  // idempotency identity: a trial-TTL retry must receive a different key.
+  const body = JSON.stringify({ ttlSeconds, noEnv: true });
+  let request = beginBoxCreate(botId, body);
+
+  // A previous process received the Box but died before naming it. Resolve
+  // the durable identity directly; never issue a second create first.
+  if (request.boxId) {
+    const recovered = await boxJson(cfg, `/boxes/${request.boxId}`, {
+      signal: AbortSignal.timeout(20_000),
     });
-  const first = await request(DEFAULT_BOX_TTL_SECONDS);
+    if (recovered.ok && recovered.body?.box?.id === request.boxId) {
+      return { ...recovered, request };
+    }
+    if (recovered.status !== 404 && recovered.status !== 410) {
+      return { ...recovered, request };
+    }
+    discardBoxCreate(request);
+    request = beginBoxCreate(botId, body);
+  }
+
+  let last: Awaited<ReturnType<typeof boxJson>> | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      last = await boxJson(cfg, "/boxes", {
+        method: "POST",
+        headers: { "Idempotency-Key": request.idempotencyKey },
+        signal: AbortSignal.timeout(45_000),
+        body,
+      });
+    } catch (error) {
+      // A dropped response is ambiguous: ascii.dev may already have created
+      // the Box. One retry with the same key recovers it safely.
+      if (attempt === 0) continue;
+      throw error;
+    }
+    const boxId = last.body?.box?.id;
+    if (last.ok && typeof boxId === "string" && boxId) {
+      request = rememberCreatedBox(request, boxId);
+      return { ...last, request };
+    }
+    if ((createStillInProgress(last) || last.ok) && attempt === 0) continue;
+    if (!createStillInProgress(last) && !last.ok) discardBoxCreate(request);
+    return { ...last, request };
+  }
+  // The loop returns or throws on every attempt; this is only a type-system
+  // guard if that bound changes later.
+  return { ...(last ?? { ok: false, status: 503, body: null }), request };
+}
+
+async function createBox(cfg: AppConfig, botId: string) {
+  const first = await requestBoxCreate(cfg, botId, DEFAULT_BOX_TTL_SECONDS);
   if (first.ok) return first;
   const trialTtl = trialBoxTtlSeconds(first.body);
-  return trialTtl === null ? first : request(trialTtl);
+  return trialTtl === null ? first : requestBoxCreate(cfg, botId, trialTtl);
 }
 
 /** Box state for the Computer panel. */
@@ -501,16 +559,18 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
   const vmName = await boxNameFor(botId);
   let box = await findBox(cfg, botId);
   let created = false;
+  let createRequest: BoxCreateRequest | null = null;
   try {
     if (!box) {
       // Provider-side backstop: archives itself (billing pauses, disk
       // survives) if every stop path dies. Trial accounts get one narrower
       // retry when ascii.dev reports their shorter TTL ceiling.
-      const createRes = await createBox(cfg);
+      const createRes = await createBox(cfg, botId);
       if (!createRes.ok || !createRes.body?.box?.id) {
         throw new Error(boxErrorMessage(createRes.status, "box create", createRes.body));
       }
       box = createRes.body.box;
+      createRequest = createRes.request;
       created = true;
       const rename = await boxJson(cfg, `/boxes/${box.id}`, {
         method: "PATCH",
@@ -545,7 +605,18 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
       headers: { "X-Ascii-Confirm-Delete": box.id },
     }).catch(() => null);
     boxIdCache.delete(botId);
-    if (cleanup?.ok) throw error;
+    if (cleanup?.ok) {
+      if (createRequest) {
+        // A stale record is safe (the next retry verifies its Box ID), so a
+        // cleanup-journal write failure must not hide the original error.
+        try {
+          discardBoxCreate(createRequest);
+        } catch {
+          /* verified absent before any future create */
+        }
+      }
+      throw error;
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${message}. The new computer could not be removed automatically; delete box ${box.id} in ascii.dev.`);
   }

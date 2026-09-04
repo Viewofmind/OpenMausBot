@@ -6,6 +6,7 @@ describe("Box trial provisioning", () => {
   let api: Server;
   let provisionBox: typeof import("./box.ts").provisionBox;
   const createBodies: Array<{ ttlSeconds: number; noEnv: boolean }> = [];
+  const createKeys: string[] = [];
 
   beforeAll(async () => {
     api = createServer((req, res) => {
@@ -20,6 +21,7 @@ describe("Box trial provisioning", () => {
         if (url.pathname === "/api/box/v1/boxes" && req.method === "POST") {
           const body = JSON.parse(raw);
           createBodies.push(body);
+          createKeys.push(String(req.headers["idempotency-key"] ?? ""));
           if (createBodies.length === 1) {
             res.writeHead(400);
             return res.end(JSON.stringify({
@@ -67,5 +69,8 @@ describe("Box trial provisioning", () => {
       { ttlSeconds: 8 * 60 * 60, noEnv: true },
       { ttlSeconds: 2 * 60 * 60, noEnv: true },
     ]);
+    expect(createKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(createKeys[1]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(createKeys[1]).not.toBe(createKeys[0]);
   });
 });
