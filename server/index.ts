@@ -63,7 +63,7 @@ import { parseBotProfilePatch } from "./bot-profile.ts";
 import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as box from "./box.ts";
-import { boxCreateRecoverySnapshot } from "./box-create-idempotency.ts";
+import { boxCreateRecoverySnapshot, retireDeletedBoxCreate } from "./box-create-idempotency.ts";
 import {
   boxAccountResourceChangeError,
   cloudBackendChangeError,
@@ -228,6 +228,7 @@ import { readCuaConnection } from "./local-computer.ts";
 import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
+  shouldArmLocalVmIdle,
 } from "./local-vm-inventory.ts";
 import { LocalVmIdleTimer } from "./local-vm-idle.ts";
 import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
@@ -2076,7 +2077,7 @@ function releaseLocalVmThread(threadId: string): void {
 void (async () => {
   if (localVmMode(cfg) !== "per-bot") {
     const status = await containerComputerStatus(undefined, undefined, SHARED_LOCAL_VM_TARGET).catch(() => null);
-    if (status?.container === "running") localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
+    if (shouldArmLocalVmIdle(status)) localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
     return;
   }
   const runtime = await containerRuntimeStatus().catch(() => null);
@@ -2086,7 +2087,7 @@ void (async () => {
     containerComputerStatus(undefined, undefined, target).catch(() => null),
   ));
   existing.forEach(({ target }, index) => {
-    if (statuses[index]?.container === "running") localVmIdleFor(target).touch();
+    if (shouldArmLocalVmIdle(statuses[index])) localVmIdleFor(target).touch();
   });
 })().catch(() => {
   // Startup inspection is a backstop, not a reason to keep the app offline.
@@ -3454,7 +3455,7 @@ async function startTurn(
         localVmIdleFor(localVmTarget).touch();
         const localVm = await containerComputerStatus(undefined, undefined, localVmTarget);
         if (!localVm.ready || !localVm.runtime) {
-          throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Local VM)`);
+          throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
         }
         integrations.localComputer = containerComputerMcp(
           localVm.runtime,
@@ -9053,7 +9054,8 @@ const server = createServer(async (req, res) => {
       if ((box.boxConfigured(cfg) || vpsSshAlias(cfg)) && (bot.busy || directTurnDispatchClaims.has(bot.id))) {
         return json(res, 409, { error: "stop this bot's work before checking and deleting its cloud computer" });
       }
-      if (box.hasUnresolvedBoxCreate(bot.id)) {
+      const botBoxRecovery = boxCreateRecoverySnapshot().filter((entry) => entry.botId === bot.id);
+      if (botBoxRecovery.some((entry) => !entry.resolved)) {
         return json(res, 409, {
           error: "finish reconciling this bot's pending cloud computer creation before deleting it — check ascii.dev, then retry Box setup",
         });
@@ -9088,6 +9090,33 @@ const server = createServer(async (req, res) => {
           return json(res, 409, {
             error: "remove this bot's VPS computer from Settings → Computers before deleting the bot",
           });
+        }
+        // LIST is eventually consistent, and a remembered Box may also have
+        // been renamed outside OpenMausBot. The create journal is stronger
+        // ownership evidence: inspect every durable id directly before the bot
+        // record that makes it discoverable can be removed. Missing credentials
+        // or an unavailable provider must fail closed.
+        for (const recovery of botBoxRecovery) {
+          if (!recovery.boxId) {
+            return json(res, 409, {
+              error: "finish reconciling this bot's pending cloud computer creation before deleting it",
+            });
+          }
+          const inspected = await box.inspectBoxIdentity(cfg, recovery.boxId);
+          if (!inspected.available) {
+            return json(res, 503, {
+              error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Restore its Box account before deleting this bot`,
+            });
+          }
+          if (inspected.identity) {
+            return json(res, 409, {
+              error: "delete this bot's remembered cloud computer from Settings → Computers before deleting the bot",
+            });
+          }
+          // A direct 404/410 is authoritative even while account LIST catches
+          // up. Retire only this exact provider identity, then continue looking
+          // for any older name-based resource the journal never recorded.
+          retireDeletedBoxCreate(recovery.boxId);
         }
         // A Box survives destination/backend changes and contains browser
         // sessions and files. Resolve ownership from a fresh provider listing;
@@ -9878,10 +9907,13 @@ const server = createServer(async (req, res) => {
       }
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
+      if (boxLifecycleBusyBots.has(bot.id)) {
+        return json(res, 409, { error: "this bot's computer is being changed or deleted — wait for it to finish" });
+      }
       const action = z.enum(["run", "stop", "remove"]).parse(m[2]);
       const target = localVmTargetForBot(bot.id);
       if (target.key === SHARED_LOCAL_VM_TARGET.key) {
-        return json(res, 409, { error: "Shared mode manages this desktop in App Settings → Local VM" });
+        return json(res, 409, { error: "Shared mode manages this desktop in App Settings → Computers" });
       }
       if (localVmImageBusy || localVmModeChangeBusy || localVmLifecycleBusy.has(target.key)) {
         return json(res, 409, { error: "this bot's Local VM setup action is still running" });
@@ -10340,7 +10372,13 @@ const server = createServer(async (req, res) => {
                 error: `${inspected.problem ?? "a remembered cloud computer could not be verified"}. Keep the current Box account and retry`,
               });
             }
-            if (!inspected.identity) continue; // provider proved the stale journal id is gone
+            if (!inspected.identity) {
+              // Reconcile exact stale receipts while the current credential is
+              // still available. Leaving one behind would make a later token
+              // addition demand access to a Box the provider proved is gone.
+              retireDeletedBoxCreate(recovery.boxId);
+              continue;
+            }
             const listed = currentById.get(inspected.identity.boxId);
             if (listed && listed.name !== inspected.identity.name) {
               return json(res, 503, { error: "ascii.dev returned conflicting cloud computer identities; keep the current Box account and retry" });
@@ -10419,6 +10457,7 @@ const server = createServer(async (req, res) => {
           const replacementInventory = await box.listManagedBoxes(
             { box: { token: nextBoxToken } },
             managedBoxOwners(),
+            { adoptLegacy: false },
           );
           if (!replacementInventory.available) {
             return json(res, 503, {

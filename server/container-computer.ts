@@ -940,6 +940,14 @@ export async function containerComputerAction(
     throw Object.assign(new Error("The Local VM is not running"), { status: 409 });
   }
   if (action === "remove" && before.container === "missing") return before;
+  if (action === "remove" && !before.managed) {
+    throw Object.assign(
+      new Error(
+        `The existing container named ${target.containerName} was not created by OpenMausBot; remove it manually in ${runtime}`,
+      ),
+      { status: 409 },
+    );
+  }
 
   if (action === "pull") {
     await prepareManagedImage(runtime, runner);

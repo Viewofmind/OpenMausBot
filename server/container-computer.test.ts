@@ -646,6 +646,23 @@ describe("Cua integration", () => {
 });
 
 describe("containerComputerAction", () => {
+  it("never removes an exact-name container without OpenMausBot ownership labels", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": "docker\n",
+      "/usr/bin/which podman": new Error("missing"),
+      "docker info --format {{.ServerVersion}}": "29\n",
+      [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`docker inspect ${CONTAINER}`]: readyInspect({
+        Config: { Image: IMAGE, Labels: {}, Env: [] },
+      }),
+    });
+
+    await expect(containerComputerAction("remove", fake.run, "linux")).rejects.toThrow(
+      /not created by OpenMausBot.*remove it manually/i,
+    );
+    expect(fake.calls).not.toContain(`docker rm -f ${CONTAINER}`);
+  });
+
   it("fails closed instead of giving Apple container an invalid dynamic-port spec", async () => {
     const target = perBotLocalVmTarget("bot-a");
     const fake = runner({

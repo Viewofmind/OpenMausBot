@@ -5,6 +5,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 type ProviderBox = Record<string, unknown> & { id: string; name: string; state: string };
 type RequestRecord = { method: string; path: string; search: string; headers: IncomingMessage["headers"] };
 type PageResponse = { boxes: ProviderBox[]; nextCursor: string | null };
+type DeletionStatus = "pending" | "processing" | "blocked" | "completed";
+
+const DELETION_OPERATION_ID = "bdop_0123456789abcdef0123456789abcdef";
 
 const legacyNameFor = (botId: string) => {
   const prefix = botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -19,9 +22,13 @@ describe("OpenMaus-managed Box inventory", () => {
   let listBody: Record<string, unknown> | null = null;
   let pageResponses: Map<string, PageResponse> | null = null;
   let stopStatus = 200;
-  let deleteStatus = 200;
+  let deleteStatus = 202;
+  let deletionStatuses: DeletionStatus[] = ["completed"];
+  let lastDeletionStatus: DeletionStatus = "completed";
+  let deletionTargetId = "";
   const requests: RequestRecord[] = [];
   let box: typeof import("./box.ts");
+  let journal: typeof import("./box-create-idempotency.ts");
   const cfg = { box: { token: "box_test" } } as any;
 
   beforeAll(async () => {
@@ -49,9 +56,38 @@ describe("OpenMaus-managed Box inventory", () => {
         ));
         return;
       }
+      if (url.pathname === `/api/box/v1/deletion-operations/${DELETION_OPERATION_ID}` && req.method === "GET") {
+        lastDeletionStatus = deletionStatuses.shift() ?? lastDeletionStatus;
+        res.writeHead(200).end(JSON.stringify({
+          ok: true,
+          type: "deletion.operation",
+          operation: {
+            id: DELETION_OPERATION_ID,
+            kind: "box",
+            targetId: deletionTargetId,
+            status: lastDeletionStatus,
+          },
+        }));
+        return;
+      }
       if (req.method === "DELETE") {
+        const boxId = url.pathname.split("/").at(-1) ?? "";
+        deletionTargetId = boxId;
+        lastDeletionStatus = deletionStatuses.shift() ?? "completed";
+        if (deleteStatus < 400) boxes = boxes.filter((candidate) => candidate.id !== boxId);
         res.writeHead(deleteStatus).end(JSON.stringify(
-          deleteStatus < 400 ? { ok: true } : { ok: false, message: "delete refused" },
+          deleteStatus < 400
+            ? {
+                ok: true,
+                type: "deletion.operation",
+                operation: {
+                  id: DELETION_OPERATION_ID,
+                  kind: "box",
+                  targetId: boxId,
+                  status: lastDeletionStatus,
+                },
+              }
+            : { ok: false, message: "delete refused" },
         ));
         return;
       }
@@ -67,6 +103,7 @@ describe("OpenMaus-managed Box inventory", () => {
     vi.stubEnv("OMB_BOX_API", `http://127.0.0.1:${port}/api/box/v1`);
     vi.resetModules();
     box = await import("./box.ts");
+    journal = await import("./box-create-idempotency.ts");
   });
 
   beforeEach(() => {
@@ -75,8 +112,14 @@ describe("OpenMaus-managed Box inventory", () => {
     listBody = null;
     pageResponses = null;
     stopStatus = 200;
-    deleteStatus = 200;
+    deleteStatus = 202;
+    deletionStatuses = ["completed"];
+    lastDeletionStatus = "completed";
+    deletionTargetId = "";
     requests.length = 0;
+    for (const record of journal.boxCreateRecoverySnapshot()) {
+      if (record.boxId) journal.retireDeletedBoxCreate(record.boxId);
+    }
   });
 
   afterAll(async () => {
@@ -124,6 +167,67 @@ describe("OpenMaus-managed Box inventory", () => {
       path: "/api/box/v1/boxes",
       search: "?limit=200",
     })]);
+  });
+
+  it("durably adopts an observed legacy Box before a later listing can omit it", async () => {
+    const botId = "legacy-adoption";
+    const boxId = "bx_3456789a";
+    boxes = [{ id: boxId, name: legacyNameFor(botId), state: "ready" }];
+
+    expect((await box.listManagedBoxes(cfg, [{ botId, name: "Legacy", inUse: false }])).available).toBe(true);
+    // Refreshing the same provider row must not grow the ownership journal.
+    expect((await box.listManagedBoxes(cfg, [{ botId, name: "Legacy", inUse: false }])).available).toBe(true);
+    expect(journal.boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+      { botId, boxId, resolved: true },
+    ]);
+
+    boxes = [];
+    expect((await box.listManagedBoxes(cfg, [{ botId, name: "Legacy", inUse: false }])).instances).toEqual([]);
+    expect(journal.boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+      { botId, boxId, resolved: true },
+    ]);
+  });
+
+  it("can compare a replacement account without adopting its legacy identities", async () => {
+    const botId = "replacement-probe";
+    boxes = [{ id: "bx_789abcde", name: legacyNameFor(botId), state: "ready" }];
+
+    const inventory = await box.listManagedBoxes(
+      cfg,
+      [{ botId, name: "Replacement", inUse: false }],
+      { adoptLegacy: false },
+    );
+
+    expect(inventory.available).toBe(true);
+    expect(inventory.instances).toEqual([
+      expect.objectContaining({ boxId: "bx_789abcde", ownerBotId: botId }),
+    ]);
+    expect(journal.boxCreateRecoverySnapshot().some((record) => record.botId === botId)).toBe(false);
+  });
+
+  it("fails closed for malformed or conflicting identities that name this installation", async () => {
+    const botId = "invalid-owned";
+    const currentName = await box.boxNameFor(botId);
+    boxes = [{ id: "bad/id", name: currentName, state: "ready" }];
+
+    const malformed = await box.listManagedBoxes(cfg, [{ botId, name: "Invalid", inUse: false }]);
+    expect(malformed).toMatchObject({ configured: true, available: false, instances: [] });
+    expect(malformed.problem).toMatch(/invalid id/i);
+
+    boxes = [
+      { id: "bx_456789ab", name: currentName, state: "ready" },
+      { id: "bx_456789ab", name: "provider-duplicate", state: "ready" },
+    ];
+    const conflicting = await box.listManagedBoxes(cfg, [{ botId, name: "Invalid", inUse: false }]);
+    expect(conflicting).toMatchObject({ configured: true, available: false, instances: [] });
+    expect(conflicting.problem).toMatch(/conflicting id/i);
+  });
+
+  it("does not cache or use a malformed exact-name Box identity", async () => {
+    const botId = "invalid-find";
+    boxes = [{ id: "not-a-box", name: await box.boxNameFor(botId), state: "ready" }];
+
+    await expect(box.findBox(cfg, botId)).rejects.toThrow(/invalid cloud computer identity/i);
   });
 
   it("shows current-install orphans but hides foreign and ownerless legacy Boxes", async () => {
@@ -262,13 +366,15 @@ describe("OpenMaus-managed Box inventory", () => {
       boxId: "bx_3456789a",
       resolved: true,
     });
-    deleteStatus = 200;
+    deleteStatus = 202;
 
     requests.length = 0;
+    deletionStatuses = ["pending", "processing", "completed"];
     await box.deleteManagedBox(cfg, owners, "bx_3456789a", managedName);
     const removal = requests.find((request) => request.method === "DELETE");
     expect(removal?.path).toBe("/api/box/v1/boxes/bx_3456789a");
     expect(removal?.headers["x-ascii-confirm-delete"]).toBe("bx_3456789a");
+    expect(requests.filter((request) => request.path.includes("/deletion-operations/"))).toHaveLength(2);
     expect(journal.boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
 
     boxes = [];
@@ -279,6 +385,36 @@ describe("OpenMaus-managed Box inventory", () => {
       path: "/api/box/v1/boxes",
       search: "?limit=200",
     });
+  });
+
+  it("keeps the durable Box receipt when background deletion becomes blocked", async () => {
+    const botId = "blocked-delete-owner";
+    const managedName = legacyNameFor(botId);
+    const boxId = "bx_456789ab";
+    boxes = [{ id: boxId, name: managedName, state: "archived" }];
+    const owners = [{ botId, name: "Blocked", inUse: false }];
+    const journal = await import("./box-create-idempotency.ts");
+    const attempt = journal.beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+    journal.resolveBoxCreate(journal.rememberCreatedBox(attempt.request, boxId));
+    deletionStatuses = ["pending", "blocked"];
+
+    await expect(box.deleteManagedBox(cfg, owners, boxId, managedName)).rejects.toThrow(/deletion operation is blocked/i);
+    expect(journal.boxCreateRecoverySnapshot()).toContainEqual({ botId, boxId, resolved: true });
+  });
+
+  it("retires the exact receipt when the Box disappears between revalidation and DELETE", async () => {
+    const botId = "already-gone-owner";
+    const managedName = legacyNameFor(botId);
+    const boxId = "bx_56789abc";
+    boxes = [{ id: boxId, name: managedName, state: "archived" }];
+    const owners = [{ botId, name: "Gone", inUse: false }];
+    const journal = await import("./box-create-idempotency.ts");
+    const attempt = journal.beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+    journal.resolveBoxCreate(journal.rememberCreatedBox(attempt.request, boxId));
+    deleteStatus = 404;
+
+    await expect(box.deleteManagedBox(cfg, owners, boxId, managedName)).resolves.toEqual({ ok: true });
+    expect(journal.boxCreateRecoverySnapshot().some((entry) => entry.botId === botId)).toBe(false);
   });
 
   it("finds an existing box on a later page and fails closed when listing is unavailable", async () => {

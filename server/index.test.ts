@@ -35,6 +35,7 @@ let boxStubPort = 0;
 const boxRouteCalls: Array<{ method: string; path: string }> = [];
 let boxSlowRequestCount = 0;
 let managedBoxRows: Array<Record<string, unknown>> = [];
+let managedBoxListRowsOverride: Array<Record<string, unknown>> | null = null;
 let managedBoxListStatus = 200;
 let managedBoxStopDelayMs = 0;
 let managedBoxRenameDelayMs = 0;
@@ -56,6 +57,8 @@ const managedBoxDeleteConfirmations: Array<{ boxId: string; confirmation?: strin
 let home: string;
 let staticDir: string;
 let fakeClaudeDump: string;
+let fakeDockerFixture: string;
+let fakeDockerLog: string;
 let stderr = "";
 const browserCapabilityCalls: Array<{ operation: string; authorization?: string; body: any }> = [];
 let browserRevokeFailuresRemaining = 0;
@@ -181,9 +184,24 @@ beforeAll(async () => {
   fakeClaudeDump = join(home, "fake-claude-dump.json");
   const fakeDockerDir = join(home, "fake-docker-bin");
   const fakeDockerProgram = join(fakeDockerDir, "docker-empty.mjs");
+  fakeDockerFixture = join(home, ".openmausbot", "fake-unmanaged-container");
+  fakeDockerLog = join(home, ".openmausbot", "fake-docker-calls.log");
   mkdirSync(fakeDockerDir, { recursive: true });
   writeFileSync(fakeDockerProgram, [
+    'import { appendFileSync, existsSync, readFileSync } from "node:fs";',
     'const args = process.argv.slice(2);',
+    `const fixture = ${JSON.stringify(fakeDockerFixture)};`,
+    `const log = ${JSON.stringify(fakeDockerLog)};`,
+    'if (existsSync(fixture)) {',
+    '  appendFileSync(log, `${args.join(" ")}\\n`);',
+    '  const expected = readFileSync(fixture, "utf8").trim();',
+    '  if (args[0] === "info") { process.stdout.write("29\\n"); process.exit(0); }',
+    '  if (args[0] === "inspect" && args[1] === expected) {',
+    '    process.stdout.write(JSON.stringify([{ Config: { Image: "unmanaged", Labels: {} }, State: { Running: true } }]));',
+    '    process.exit(0);',
+    '  }',
+    '  process.exit(127);',
+    '}',
     'if (args[0] === "-H" && args[2] === "container" && args[3] === "ls") process.exit(0);',
     'process.stderr.write("fixture docker is unavailable for this command\\n");',
     'process.exit(127);',
@@ -538,7 +556,7 @@ beforeAll(async () => {
         res.writeHead(managedBoxListStatus, { "content-type": "application/json" });
         return res.end(JSON.stringify(
           managedBoxListStatus === 200
-            ? { ok: true, boxes: managedBoxRows, pageInfo: { nextCursor: null } }
+            ? { ok: true, boxes: managedBoxListRowsOverride ?? managedBoxRows, pageInfo: { nextCursor: null } }
             : { ok: false, message: "fixture list unavailable" },
         ));
       }
@@ -2008,6 +2026,9 @@ describe("harness HTTP API", () => {
       expect((await api("PATCH", `/api/groups/${room.id}`, {
         defaultResponder: { kind: "mentions" },
       })).status).toBe(200);
+      expect((await api("PATCH", "/api/config", {
+        localVm: { mode: "per-bot", maxInstances: 2 },
+      })).status).toBe(200);
       const listGate = deferredGate();
       managedBoxListGate = listGate;
       boxRouteCalls.length = 0;
@@ -2018,6 +2039,9 @@ describe("harness HTTP API", () => {
       const racedTurn = await api("POST", `/api/bots/${bot.id}/messages`, { text: "do not provision during deletion" });
       expect(racedTurn.status).toBe(409);
       expect(racedTurn.body.error).toMatch(/cloud computer is being changed/i);
+      const racedLocalVm = await api("POST", `/api/bots/${bot.id}/local-computer/run`, {});
+      expect(racedLocalVm.status).toBe(409);
+      expect(racedLocalVm.body.error).toMatch(/computer is being changed or deleted/i);
       expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Target do not race deletion" })).status).toBe(202);
       await expect.poll(async () => {
         const snapshot = (await api("GET", "/api/bots?messages=30")).body;
@@ -2038,6 +2062,7 @@ describe("harness HTTP API", () => {
       if (roomId) await api("DELETE", `/api/groups/${roomId}`).catch(() => undefined);
       if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
       if (guardBotId) await api("DELETE", `/api/bots/${guardBotId}`).catch(() => undefined);
+      await api("PATCH", "/api/config", { localVm: { mode: "shared", maxInstances: 2 } }).catch(() => undefined);
       await api("PUT", "/api/config", { box: { token: "" } });
       boxRouteCalls.length = 0;
     }
@@ -2108,6 +2133,45 @@ describe("harness HTTP API", () => {
       managedBoxCreateId = "bx_cdefghjk";
       managedBoxCreateName = "";
       await api("PUT", "/api/config", { box: { token: "" } });
+      boxRouteCalls.length = 0;
+    }
+  });
+
+  it("keeps a bot owner when a resolved journal Box is missing from an eventually-consistent LIST", async () => {
+    let botId = "";
+    try {
+      managedBoxRows = [];
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", cloudBackend: "box" })).status).toBe(200);
+      managedBoxCreateMode = "success";
+      managedBoxCreateId = "bx_ghjkmnpq";
+      managedBoxCreateName = managedBoxNameForFixture(bot.id);
+      expect((await api("POST", `/api/bots/${bot.id}/computer/provision`, {})).status).toBe(200);
+
+      managedBoxListRowsOverride = [];
+      boxRouteCalls.length = 0;
+      const deletion = await api("DELETE", `/api/bots/${bot.id}`);
+      expect(deletion.status).toBe(409);
+      expect(deletion.body.error).toMatch(/remembered cloud computer.*Settings.*Computers/i);
+      expect(boxRouteCalls).toContainEqual({ method: "GET", path: `/boxes/${managedBoxCreateId}` });
+
+      managedBoxListRowsOverride = null;
+      expect((await api("POST", `/api/computers/boxes/${managedBoxCreateId}/delete`, {
+        confirmName: managedBoxCreateName,
+      })).status).toBe(202);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+    } finally {
+      managedBoxListRowsOverride = null;
+      managedBoxCreateMode = "refuse";
+      managedBoxCreateId = "bx_cdefghjk";
+      managedBoxCreateName = "";
+      managedBoxRows = [];
+      managedBoxCreatedIds.clear();
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
       boxRouteCalls.length = 0;
     }
   });
@@ -3919,6 +3983,44 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("retires a journaled Box proven gone before clearing and later restoring credentials", async () => {
+    let botId = "";
+    try {
+      managedBoxRows = [];
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud", cloudBackend: "box" })).status).toBe(200);
+      managedBoxCreateMode = "success";
+      managedBoxCreateId = "bx_hjkmnpqr";
+      managedBoxCreateName = managedBoxNameForFixture(bot.id);
+      expect((await api("POST", `/api/bots/${bot.id}/computer/provision`, {})).status).toBe(200);
+
+      // The person removed it in ascii.dev. LIST and direct GET now both prove
+      // absence while the owning credential is still active.
+      managedBoxRows = [];
+      managedBoxCreatedIds.delete(managedBoxCreateId);
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const journal = JSON.parse(readFileSync(join(home, ".openmausbot", "box-create-requests.json"), "utf8"));
+      expect(journal.requests.some((entry: { botId?: string }) => entry.botId === bot.id)).toBe(false);
+
+      // A stale receipt used to make this impossible: the new token was asked
+      // to expose an already-deleted Box forever.
+      expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
+      expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
+      botId = "";
+    } finally {
+      managedBoxCreateMode = "refuse";
+      managedBoxCreateId = "bx_cdefghjk";
+      managedBoxCreateName = "";
+      managedBoxRows = [];
+      managedBoxCreatedIds.clear();
+      if (botId) await api("DELETE", `/api/bots/${botId}`).catch(() => undefined);
+      await api("PUT", "/api/config", { box: { token: "" } }).catch(() => undefined);
+      boxRouteCalls.length = 0;
+    }
+  });
+
   it("excludes new Box turns, lifecycle actions, and bot deletion while a token change validates", async () => {
     let botId = "";
     try {
@@ -5301,6 +5403,7 @@ describe("harness HTTP API", () => {
         "container",
         "destination",
         "inUse",
+        "managed",
         "name",
         "problem",
         "ready",
@@ -5315,6 +5418,38 @@ describe("harness HTTP API", () => {
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     expect(disk.localVm).toEqual({ mode: "per-bot", maxInstances: 3 });
     await api("PATCH", "/api/config", { localVm: { mode: "shared", maxInstances: 2 } });
+  });
+
+  it("never removes an unmanaged container that squats on a bot's exact Local VM name", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    try {
+      expect((await api("PATCH", "/api/config", {
+        localVm: { mode: "per-bot", maxInstances: 2 },
+      })).status).toBe(200);
+      const status = await api("GET", `/api/bots/${bot.id}/local-computer`);
+      expect(status.status).toBe(200);
+      writeFileSync(fakeDockerFixture, status.body.container_name);
+      rmSync(fakeDockerLog, { force: true });
+
+      const inventory = await api("GET", "/api/local-computer/instances");
+      expect(inventory.status).toBe(200);
+      expect(inventory.body.instances).toContainEqual(expect.objectContaining({
+        botId: bot.id,
+        managed: false,
+      }));
+
+      const removed = await api("POST", `/api/bots/${bot.id}/local-computer/remove`, {});
+      expect(removed.status).toBe(409);
+      expect(removed.body.error).toMatch(/not created by OpenMausBot.*remove it manually/i);
+      expect(readFileSync(fakeDockerLog, "utf8").split("\n")).not.toContain(
+        `rm -f ${status.body.container_name}`,
+      );
+    } finally {
+      rmSync(fakeDockerFixture, { force: true });
+      rmSync(fakeDockerLog, { force: true });
+      await api("PATCH", "/api/config", { localVm: { mode: "shared", maxInstances: 2 } }).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
+    }
   });
 
   it("keeps an active turn alive when only the room timeout changes", async () => {

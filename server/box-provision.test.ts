@@ -5,9 +5,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 type RequestRecord = { method: string; path: string; headers: IncomingMessage["headers"]; body: string };
 
 describe("cloud computer provisioning cleanup", () => {
+  const deletionOperationId = "bdop_0123456789abcdef0123456789abcdef";
   let api: Server;
   let provisionBox: typeof import("./box.ts").provisionBox;
-  let scenario: "rename-failure" | "existing-desktop-failure" = "rename-failure";
+  let scenario: "rename-failure" | "rename-failure-delete-gone" | "existing-desktop-failure" = "rename-failure";
   let mutateConfigAfterCreate: (() => void) | null = null;
   const requests: RequestRecord[] = [];
 
@@ -38,7 +39,31 @@ describe("cloud computer provisioning cleanup", () => {
         } else if (url.pathname === "/api/box/v1/boxes/bx_3456789a" && req.method === "PATCH") {
           res.writeHead(500).end(JSON.stringify({ ok: false, message: "rename rejected" }));
         } else if (url.pathname === "/api/box/v1/boxes/bx_3456789a" && req.method === "DELETE") {
-          res.writeHead(202).end(JSON.stringify({ ok: true, operationId: "delete-1" }));
+          if (scenario === "rename-failure-delete-gone") {
+            res.writeHead(404).end(JSON.stringify({ ok: false, message: "not found" }));
+            return;
+          }
+          res.writeHead(202).end(JSON.stringify({
+            ok: true,
+            type: "box.deleting",
+            operation: {
+              id: deletionOperationId,
+              kind: "box",
+              targetId: "bx_3456789a",
+              status: "pending",
+            },
+          }));
+        } else if (url.pathname === `/api/box/v1/deletion-operations/${deletionOperationId}` && req.method === "GET") {
+          res.writeHead(200).end(JSON.stringify({
+            ok: true,
+            type: "deletion.operation",
+            operation: {
+              id: deletionOperationId,
+              kind: "box",
+              targetId: "bx_3456789a",
+              status: "completed",
+            },
+          }));
         } else if (url.pathname === "/api/box/v1/boxes/bx_456789ab" && req.method === "GET") {
           res.writeHead(200).end(
             JSON.stringify({ ok: true, box: { id: "bx_456789ab", name: nameFor("existing-bot"), state: "ready" } }),
@@ -77,6 +102,10 @@ describe("cloud computer provisioning cleanup", () => {
     expect(JSON.parse(creation?.body ?? "{}")).toMatchObject({ noEnv: true });
     expect(removal?.path).toBe("/api/box/v1/boxes/bx_3456789a");
     expect(removal?.headers["x-ascii-confirm-delete"]).toBe("bx_3456789a");
+    expect(requests).toContainEqual(expect.objectContaining({
+      method: "GET",
+      path: `/api/box/v1/deletion-operations/${deletionOperationId}`,
+    }));
   });
 
   it("never deletes a pre-existing box when a later step fails", async () => {
@@ -88,6 +117,19 @@ describe("cloud computer provisioning cleanup", () => {
     ).rejects.toThrow(/desktop link could not be created/);
 
     expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+  });
+
+  it("retires a new-Box create receipt when cleanup DELETE proves it already gone", async () => {
+    scenario = "rename-failure-delete-gone";
+    requests.length = 0;
+    const botId = "gone-during-cleanup";
+
+    await expect(provisionBox({ box: { token: "box_test" } } as any, botId, "Gone Cleanup")).rejects.toThrow(
+      /box naming failed: rename rejected/,
+    );
+
+    const journal = await import("./box-create-idempotency.ts");
+    expect(journal.boxCreateRecoverySnapshot().some((entry) => entry.botId === botId)).toBe(false);
   });
 
   it("keeps create, rename, and cleanup on the token captured at operation start", async () => {

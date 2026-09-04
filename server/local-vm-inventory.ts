@@ -24,9 +24,18 @@ export interface LocalVmInventoryEntry {
   name: string;
   destination: LocalVmDestination;
   container: "running" | "stopped";
+  managed: boolean;
   ready: boolean;
   problem: string | null;
   inUse: boolean;
+}
+
+/** Idle cleanup is destructive. An exact derived name alone is not ownership:
+ * a pre-existing container must also carry OpenMausBot's verified labels. */
+export function shouldArmLocalVmIdle(
+  status: Pick<ContainerComputerStatus, "container" | "managed"> | null,
+): boolean {
+  return status?.container === "running" && status.managed;
 }
 
 /** Discover only exact, bot-derived container identities. Bot destination is
@@ -64,6 +73,7 @@ export function localVmInventoryEntry(
     name: bot.name,
     destination: bot.computer ?? "auto",
     container: status.container,
+    managed: status.managed,
     ready: status.ready,
     problem: status.problem,
     inUse,

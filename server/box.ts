@@ -15,9 +15,9 @@ import { createHash } from "node:crypto";
 import { DATA_DIR, type AppConfig } from "./config.ts";
 import { loadEnvironmentId } from "./environment.ts";
 import {
+  adoptResolvedBox,
   beginBoxCreate,
   discardBoxCreate,
-  hasUnresolvedBoxCreate,
   rememberCreatedBox,
   resolveBoxCreate,
   retireDeletedBoxCreate,
@@ -37,6 +37,7 @@ const SLEEPING = new Set(["archived", "archiving", "stopped", "stopping"]);
 const DEFAULT_BOX_TTL_SECONDS = 8 * 60 * 60;
 const TRIAL_BOX_TTL_SECONDS = 2 * 60 * 60;
 const BOX_CREATE_IN_PROGRESS_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
+const BOX_DELETE_OPERATION_POLL_DELAYS_MS = [0, 100, 250, 500, 1_000, 2_000] as const;
 const BOX_INVENTORY_PAGE_SIZE = 200;
 // Current self-serve accounts top out below 2,000 boxes. Keep the walk
 // bounded anyway: a broken or adversarial cursor must not hold Settings open.
@@ -44,6 +45,8 @@ const MAX_BOX_INVENTORY_PAGES = 10;
 const LEGACY_MANAGED_BOX_NAME = /^ogb-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
 const SCOPED_MANAGED_BOX_NAME = /^ogb-[a-f0-9]{12}-[a-z0-9]{1,8}-[a-f0-9]{6}$/;
 const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const BOX_DELETE_OPERATION_ID = /^bdop_[a-f0-9]{32}$/;
+const BOX_DELETE_OPERATION_STATES = new Set(["pending", "processing", "blocked", "completed"]);
 const BOX_STATES = new Set([
   "init",
   "idle",
@@ -153,6 +156,86 @@ async function boxJson(cfg: AppConfig, path: string, opts: RequestInit = {}) {
   const res = await boxFetch(cfg, path, opts);
   const body: any = await res.json().catch(() => null);
   return { ok: res.ok && body?.ok !== false, status: res.status, body };
+}
+
+interface BoxDeletionOperation {
+  id: string;
+  status: "pending" | "processing" | "blocked" | "completed";
+}
+
+/** Accept only the immutable identity fields needed to follow a delete. Any
+ * malformed success envelope falls back to a direct Box read instead of
+ * authorizing journal retirement. */
+function boxDeletionOperation(
+  body: any,
+  boxId: string,
+  expectedOperationId?: string,
+): BoxDeletionOperation | null {
+  const operation = body?.operation;
+  const id = typeof operation?.id === "string" ? operation.id : "";
+  const status = typeof operation?.status === "string" ? operation.status : "";
+  if (
+    !BOX_DELETE_OPERATION_ID.test(id)
+    || (expectedOperationId !== undefined && id !== expectedOperationId)
+    || operation?.kind !== "box"
+    || operation?.targetId !== boxId
+    || !BOX_DELETE_OPERATION_STATES.has(status)
+  ) return null;
+  return { id, status: status as BoxDeletionOperation["status"] };
+}
+
+function deletionBlockedError(boxId: string): Error & { status: number } {
+  return Object.assign(
+    new Error(`ascii.dev accepted deletion of ${boxId}, but the deletion operation is blocked — check ascii.dev and retry`),
+    { status: 409 },
+  );
+}
+
+function boxDeleteProvedAbsent(result: Awaited<ReturnType<typeof boxJson>>): boolean {
+  return result.status === 404 || result.status === 410;
+}
+
+/** DELETE /boxes only accepts background deletion. Keep the durable create
+ * receipt until its operation completes. If operation polling is unavailable,
+ * a direct 404/410 is the only alternate proof that this Box identity is gone. */
+async function confirmAcceptedBoxDeletion(cfg: AppConfig, boxId: string, acceptedBody: any): Promise<void> {
+  let operation = boxDeletionOperation(acceptedBody, boxId);
+  if (operation?.status === "completed") return;
+  if (operation?.status === "blocked") throw deletionBlockedError(boxId);
+
+  if (operation) {
+    for (const delayMs of BOX_DELETE_OPERATION_POLL_DELAYS_MS) {
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      let polled: Awaited<ReturnType<typeof boxJson>>;
+      try {
+        polled = await boxJson(cfg, `/deletion-operations/${operation.id}`, {
+          signal: AbortSignal.timeout(20_000),
+        });
+      } catch {
+        break;
+      }
+      if (!polled.ok) break;
+      const current = boxDeletionOperation(polled.body, boxId, operation.id);
+      if (!current) break;
+      operation = current;
+      if (operation.status === "completed") return;
+      if (operation.status === "blocked") throw deletionBlockedError(boxId);
+    }
+  }
+
+  const inspected = await inspectBoxIdentity(cfg, boxId);
+  if (!inspected.available) {
+    throw Object.assign(
+      new Error(`${inspected.problem ?? "the cloud computer deletion could not be verified"}; its recovery record was kept`),
+      { status: 503 },
+    );
+  }
+  if (inspected.identity) {
+    throw Object.assign(
+      new Error(`ascii.dev accepted deletion of ${boxId}, but it is not confirmed yet — retry after it finishes`),
+      { status: 503 },
+    );
+  }
 }
 
 function boxBotNameParts(botId: string): { prefix: string; hash: string } {
@@ -278,7 +361,7 @@ async function listBoxPages(
 }
 
 /**
- * One read-only account listing for Settings and deletion guards. Only boxes
+ * One account listing for Settings and deletion guards. Only boxes
  * carrying OpenMausBot's exact deterministic name shape leave this boundary;
  * provider desktop links, IPs, environment details and other raw fields never
  * reach the renderer. Only names scoped to this installation may become
@@ -289,6 +372,7 @@ async function listBoxPages(
 export async function listManagedBoxes(
   cfg: AppConfig,
   owners: ManagedBoxOwner[],
+  options: { adoptLegacy?: boolean } = {},
 ): Promise<ManagedBoxInventory> {
   cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) {
@@ -312,6 +396,34 @@ export async function listManagedBoxes(
   })));
   const ownerByCurrentName = new Map(namedOwners.map(({ currentName, owner }) => [currentName, owner] as const));
   const ownerByLegacyName = new Map(namedOwners.map(({ legacyName, owner }) => [legacyName, owner] as const));
+  const boxIdCounts = new Map<string, number>();
+  for (const candidate of listed.boxes) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const boxId = typeof candidate.id === "string" ? candidate.id : "";
+    if (BOX_ID.test(boxId)) boxIdCounts.set(boxId, (boxIdCounts.get(boxId) ?? 0) + 1);
+  }
+  const invalidInventory = (problem: string): ManagedBoxInventory => ({
+    configured: true,
+    available: false,
+    problem,
+    instances: [],
+  });
+  const ownedBoxByBot = new Map<string, string>();
+  for (const candidate of listed.boxes) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const name = typeof candidate.name === "string" ? candidate.name : "";
+    const owner = ownerByCurrentName.get(name) ?? ownerByLegacyName.get(name) ?? null;
+    if (!owner) continue;
+    const boxId = typeof candidate.id === "string" ? candidate.id : "";
+    if (!BOX_ID.test(boxId)) {
+      return invalidInventory("ascii.dev returned an invalid id for an OpenMaus-managed cloud computer — refresh or repair it in ascii.dev");
+    }
+    const existing = ownedBoxByBot.get(owner.botId);
+    if (existing && existing !== boxId) {
+      return invalidInventory("ascii.dev returned conflicting cloud computers for one OpenMaus bot — repair them in ascii.dev before continuing");
+    }
+    ownedBoxByBot.set(owner.botId, boxId);
+  }
   const instances: ManagedBoxInventoryInstance[] = [];
   const seenBoxIds = new Set<string>();
   const scopedPrefix = scopedBoxPrefix();
@@ -319,8 +431,8 @@ export async function listManagedBoxes(
     if (!candidate || typeof candidate !== "object") continue;
     const boxId = typeof candidate.id === "string" ? candidate.id : "";
     const name = typeof candidate.name === "string" ? candidate.name : "";
-    if (!BOX_ID.test(boxId) || seenBoxIds.has(boxId)) continue;
     let owner: ManagedBoxOwner | null = null;
+    let legacyOwner = false;
     if (SCOPED_MANAGED_BOX_NAME.test(name)) {
       // A valid OMB name for another environment is account-visible but not
       // ours to display or mutate.
@@ -332,8 +444,25 @@ export async function listManagedBoxes(
       // managed until the person handles them in ascii.dev directly.
       owner = ownerByLegacyName.get(name) ?? null;
       if (!owner) continue;
+      legacyOwner = true;
     } else {
       continue;
+    }
+    // Once a row names this installation (or a live bot through its legacy
+    // deterministic name), silently skipping a malformed/duplicated identity
+    // could let bot deletion mistake provider corruption for absence.
+    if (!BOX_ID.test(boxId)) {
+      return invalidInventory("ascii.dev returned an invalid id for an OpenMaus-managed cloud computer — refresh or repair it in ascii.dev");
+    }
+    if ((boxIdCounts.get(boxId) ?? 0) !== 1 || seenBoxIds.has(boxId)) {
+      return invalidInventory("ascii.dev returned a conflicting id for an OpenMaus-managed cloud computer — refresh or repair it in ascii.dev");
+    }
+    if (legacyOwner && owner && options.adoptLegacy !== false) {
+      try {
+        adoptResolvedBox(owner.botId, boxId);
+      } catch {
+        return invalidInventory("OpenMausBot could not safely remember this legacy cloud computer's owner — repair it in ascii.dev before continuing");
+      }
     }
     seenBoxIds.add(boxId);
     instances.push({
@@ -480,9 +609,10 @@ export async function deleteManagedBox(
       method: "DELETE",
       headers: { "X-Ascii-Confirm-Delete": instance.boxId },
     });
-    if (!removed.ok) {
+    if (!removed.ok && !boxDeleteProvedAbsent(removed)) {
       throw Object.assign(new Error(boxErrorMessage(removed.status, "box delete", removed.body)), { status: removed.status });
     }
+    if (removed.ok) await confirmAcceptedBoxDeletion(cfg, instance.boxId, removed.body);
     retireDeletedBoxCreate(instance.boxId);
     forgetBoxId(instance.boxId);
     return { ok: true };
@@ -495,13 +625,17 @@ export async function findBox(cfg: AppConfig, botId: string) {
   cfg = snapshotBoxConfig(cfg);
   const cachedId = boxIdCache.get(botId);
   if (cachedId) {
+    let direct: Awaited<ReturnType<typeof boxJson>> | null = null;
     try {
-      const { ok, body } = await boxJson(cfg, `/boxes/${cachedId}`);
-      const box = body?.box;
-      if (ok && box?.id && box.state !== "error") return box;
+      direct = await boxJson(cfg, `/boxes/${cachedId}`);
     } catch {
       // A direct read can fail while the account listing still succeeds.
       // Fall through to the authoritative paginated lookup before deciding.
+    }
+    const directBox = direct?.body?.box;
+    if (direct?.ok && directBox?.id === cachedId && directBox.state !== "error") return directBox;
+    if (direct?.ok && directBox?.id !== cachedId) {
+      throw Object.assign(new Error("ascii.dev returned an invalid cloud computer identity"), { status: 503 });
     }
     boxIdCache.delete(botId); // gone or broken — fall back to the listing
   }
@@ -513,10 +647,21 @@ export async function findBox(cfg: AppConfig, botId: string) {
   }
   // Prefer the installation-scoped identity. A legacy name remains
   // discoverable only for this exact local bot id.
-  const found = listed.boxes.find((candidate: any) => candidate?.name === name && candidate.state !== "error")
-    ?? listed.boxes.find((candidate: any) => candidate?.name === legacyName && candidate.state !== "error")
+  const expected = listed.boxes.filter((candidate: any) => candidate?.name === name || candidate?.name === legacyName);
+  if (expected.some((candidate: any) => !BOX_ID.test(candidate?.id))) {
+    throw Object.assign(new Error("ascii.dev returned an invalid cloud computer identity"), { status: 503 });
+  }
+  const found = expected.find((candidate: any) => candidate.name === name && candidate.state !== "error")
+    ?? expected.find((candidate: any) => candidate.name === legacyName && candidate.state !== "error")
     ?? null;
-  if (found?.id) boxIdCache.set(botId, found.id);
+  if (found) {
+    const duplicateId = listed.boxes.filter((candidate: any) => candidate?.id === found.id).length !== 1;
+    if (duplicateId) {
+      throw Object.assign(new Error("ascii.dev returned a conflicting cloud computer identity"), { status: 503 });
+    }
+    if (found.name === legacyName) adoptResolvedBox(botId, found.id);
+    boxIdCache.set(botId, found.id);
+  }
   return found;
 }
 
@@ -532,8 +677,6 @@ export async function readyBox(cfg: AppConfig, botId: string, budgetMs = 60_000)
 export function boxConfigured(cfg: AppConfig) {
   return Boolean(cfg.box?.token);
 }
-
-export { hasUnresolvedBoxCreate };
 
 /** Ask the provider whether a token is real, before we let someone save
  * it. Without this the paste "succeeds", and the first sign of trouble is
@@ -751,8 +894,17 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
       method: "DELETE",
       headers: { "X-Ascii-Confirm-Delete": box.id },
     }).catch(() => null);
-    boxIdCache.delete(botId);
-    if (cleanup?.ok) {
+    if (cleanup && (cleanup.ok || boxDeleteProvedAbsent(cleanup))) {
+      if (cleanup.ok) {
+        try {
+          await confirmAcceptedBoxDeletion(cfg, box.id, cleanup.body);
+        } catch (cleanupError) {
+          const message = error instanceof Error ? error.message : String(error);
+          const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+          throw new Error(`${message}. The new computer's deletion was not confirmed: ${cleanupMessage}. Check box ${box.id} in ascii.dev.`);
+        }
+      }
+      boxIdCache.delete(botId);
       if (createRequest) {
         // A stale record is safe (the next retry verifies its Box ID), so a
         // cleanup-journal write failure must not hide the original error.
@@ -764,6 +916,7 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
       }
       throw error;
     }
+    boxIdCache.delete(botId);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${message}. The new computer could not be removed automatically; delete box ${box.id} in ascii.dev.`);
   }

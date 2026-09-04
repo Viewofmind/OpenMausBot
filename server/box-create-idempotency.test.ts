@@ -285,6 +285,41 @@ describe("Box create idempotency", () => {
     expect(boxCreateRecoverySnapshot().find((record) => record.botId === botId)).toBeUndefined();
   });
 
+  it("adopts the same legacy Box once, supersedes pending state, and refuses conflicting ownership", async () => {
+    vi.resetModules();
+    const {
+      adoptResolvedBox,
+      beginBoxCreate,
+      boxCreateRecoverySnapshot,
+      hasUnresolvedBoxCreate,
+      retireDeletedBoxCreate,
+    } = await import("./box-create-idempotency.ts");
+    const boxId = "bx_56789abc";
+    const botId = "legacy-journal-owner";
+    try {
+      beginBoxCreate(botId, JSON.stringify({ ttlSeconds: 7_200, noEnv: true }));
+      expect(hasUnresolvedBoxCreate(botId)).toBe(true);
+      adoptResolvedBox(botId, boxId);
+      adoptResolvedBox(botId, boxId);
+      expect(hasUnresolvedBoxCreate(botId)).toBe(false);
+      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+        { botId, boxId, resolved: true },
+      ]);
+
+      adoptResolvedBox(botId, "bx_6789abcd");
+      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+        { botId, boxId: "bx_6789abcd", resolved: true },
+      ]);
+      expect(() => adoptResolvedBox("other-legacy-owner", "bx_6789abcd")).toThrow(/another bot/i);
+      expect(boxCreateRecoverySnapshot().filter((record) => record.botId === botId)).toEqual([
+        { botId, boxId: "bx_6789abcd", resolved: true },
+      ]);
+    } finally {
+      retireDeletedBoxCreate(boxId);
+      retireDeletedBoxCreate("bx_6789abcd");
+    }
+  });
+
   it("serializes two processes that primed independent journal caches", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-processes-"));
     const requestBody = JSON.stringify({ ttlSeconds: 7_200, noEnv: true });

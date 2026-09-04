@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
+  shouldArmLocalVmIdle,
 } from "./local-vm-inventory.ts";
 import {
   perBotLocalVmTarget,
@@ -32,6 +33,7 @@ describe("Local VM inventory", () => {
   it("publishes only the safe allow-listed fields and omits missing VMs", () => {
     const status = {
       container: "running",
+      managed: true,
       ready: true,
       problem: null,
       viewer_url: "http://127.0.0.1:5000/vnc.html#password=secret",
@@ -50,6 +52,7 @@ describe("Local VM inventory", () => {
       name: "Research",
       destination: "cloud",
       container: "running",
+      managed: true,
       ready: true,
       problem: null,
       inUse: true,
@@ -60,5 +63,12 @@ describe("Local VM inventory", () => {
       { ...status, container: "missing" } as ContainerComputerStatus,
       false,
     )).toBeNull();
+  });
+
+  it("arms idle cleanup only for a running container with verified ownership", () => {
+    expect(shouldArmLocalVmIdle({ container: "running", managed: true })).toBe(true);
+    expect(shouldArmLocalVmIdle({ container: "running", managed: false })).toBe(false);
+    expect(shouldArmLocalVmIdle({ container: "stopped", managed: true })).toBe(false);
+    expect(shouldArmLocalVmIdle(null)).toBe(false);
   });
 });

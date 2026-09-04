@@ -448,6 +448,43 @@ export function boxCreateRecoverySnapshot(): BoxCreateRecoverySnapshot[] {
   })));
 }
 
+/** Persist ownership discovered from a pre-journal deterministic Box name.
+ * The provider listing proves which live bot owns the exact immutable id, but
+ * it must never steal an identity remembered for another bot. It supersedes
+ * stale attempts for the same bot, is idempotent, and fails closed on a true
+ * cross-bot conflict. */
+export function adoptResolvedBox(botId: string, boxId: string): void {
+  if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer ownership");
+  if (!BOX_ID.test(boxId)) throw new Error("invalid cloud computer id for ownership");
+  withJournalLock((requests) => {
+    const sameBox = requests.find((request) => request.boxId === boxId);
+    if (sameBox && sameBox.botId !== botId) {
+      throw recoveryStateError("conflicted with another bot's remembered cloud computer");
+    }
+    const adopted: BoxCreateRequest = sameBox
+      ? { ...sameBox, resolved: true }
+      : {
+          botId,
+          requestBody: JSON.stringify({ adopted: "legacy-name", boxId }),
+          idempotencyKey: randomUUID(),
+          createdAt: Date.now(),
+          boxId,
+          resolved: true,
+        };
+    const retained = requests.filter((request) => request.botId !== botId);
+    if (retained.length >= MAX_REQUESTS) throw recoveryStateError("full");
+    if (
+      requests.filter((request) => request.botId === botId).length === 1
+      && sameBox?.resolved === true
+      && sameBox.botId === botId
+    ) return;
+    // A successfully listed deterministic legacy name resolves any older
+    // key-only/remembered attempt for this bot. Keeping those stale rows would
+    // leave deletion permanently blocked after the adopted Box is removed.
+    save([...retained, adopted]);
+  });
+}
+
 /** Retire only the durable identity for a Box the provider has confirmed was
  * deleted. Callers must never use this for a failed or ambiguous deletion. */
 export function retireDeletedBoxCreate(boxId: string): void {
