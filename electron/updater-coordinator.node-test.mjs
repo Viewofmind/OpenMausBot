@@ -402,3 +402,87 @@ test("without a hand-off the install still quits and installs", async () => {
   assert.equal(called, 1);
   assert.equal(h.getState().status, "installing");
 });
+
+test("a staged update survives hourly checks until the user explicitly checks again", async () => {
+  const h = harness();
+  let checks = 0;
+  h.updater.checkForUpdates = async () => {
+    checks += 1;
+    h.updater.emit("checking-for-update");
+    h.updater.emit("update-available", { version: "2.1.0" });
+  };
+  await downloadInto(h);
+  const staged = h.getState();
+
+  await h.coordinator.check();
+  assert.equal(checks, 0);
+  assert.deepEqual(h.getState(), staged);
+
+  await h.coordinator.check(true);
+  assert.equal(checks, 1);
+  assert.equal(h.getState().status, "available");
+  assert.equal(h.getState().version, "2.1.0");
+});
+
+test("a superseded check error event cannot invalidate a completed download", async () => {
+  const h = harness();
+  const pending = deferred();
+  h.updater.checkForUpdates = () => pending.promise;
+  const check = h.coordinator.check();
+  await downloadInto(h);
+
+  const error = new Error("the earlier feed request failed");
+  h.updater.emit("error", error);
+  pending.reject(error);
+  await check;
+
+  assert.equal(h.getState().status, "downloaded");
+  assert.equal(h.getState().version, "2.0.0");
+});
+
+test("checks cannot replace an install in progress or its completed hand-off", async () => {
+  const pending = deferred();
+  const h = harness({ handOffInstall: () => pending.promise });
+  h.updater.checkForUpdates = () => assert.fail("installation owns the updater");
+  await downloadInto(h);
+  h.coordinator.install();
+
+  await h.coordinator.check();
+  await h.coordinator.check(true);
+  assert.equal(h.getState().status, "installing");
+
+  pending.resolve({ command: "install the staged package", terminalOpened: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  const handedOff = h.getState();
+  await h.coordinator.check();
+  assert.equal(h.getState().status, "handed-off");
+  assert.deepEqual(h.getState(), handedOff);
+});
+
+test("failed download and hand-off actions survive automatic checks but remain retryable", async () => {
+  for (const failure of ["download", "hand-off"]) {
+    const h = harness({ handOffInstall: () => Promise.reject(new Error("hand-off failed")) });
+    if (failure === "download") {
+      h.updater.downloadUpdate = () => Promise.reject(new Error("download failed"));
+      await h.coordinator.download();
+    } else {
+      await downloadInto(h);
+      h.coordinator.install();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    let checks = 0;
+    h.updater.checkForUpdates = async () => {
+      checks += 1;
+      h.updater.emit("checking-for-update");
+      h.updater.emit("update-available", { version: "2.0.0" });
+    };
+    const failed = h.getState();
+    assert.equal(failed.status, "error");
+    await h.coordinator.check();
+    assert.equal(checks, 0);
+    assert.deepEqual(h.getState(), failed);
+    await h.coordinator.check(true);
+    assert.equal(checks, 1);
+    assert.equal(h.getState().status, "available");
+  }
+});

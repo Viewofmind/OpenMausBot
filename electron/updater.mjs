@@ -78,8 +78,14 @@ export function registerUpdaterIpc() {
   ipcMain.handle("update:install", () => updaterCoordinator?.install());
 }
 
-export function startUpdater(mainWindow) {
+// macOS keeps the process (and updater) alive after its window closes.
+// Retarget broadcasts on every window creation without adding more timers
+// or event listeners to the process-wide updater.
+export function attachUpdaterWindow(mainWindow) {
   win = mainWindow;
+}
+
+export function startUpdater() {
   // dev / unsigned builds can't auto-update — leave the banner dormant
   if (!app.isPackaged) {
     updaterCoordinator = null;

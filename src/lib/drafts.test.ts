@@ -1,14 +1,24 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   appendDraftAttachments,
   changeDraftAttachmentPending,
+  draftRevision,
+  failedComposerSends,
   getDraft,
   getDraftAttachments,
+  getDraftChannelMode,
   isDraftAttachmentPending,
+  markDraftEdited,
+  recoverFailedComposerSend,
   replaceDraftAttachment,
+  restoredSendId,
   setDraft,
   setDraftAttachments,
+  setDraftChannelMode,
+  useComposerChannelMode,
 } from "./drafts";
 
 function memoryStorage(): Storage {
@@ -25,6 +35,114 @@ function memoryStorage(): Storage {
 
 afterEach(() => {
   Reflect.deleteProperty(globalThis, "localStorage");
+});
+
+function renderedChannelMode(id: string): string {
+  function Mode() {
+    const [mode] = useComposerChannelMode(id);
+    return createElement("span", null, mode);
+  }
+  // A fresh render initializes the actual composer hook from its keyed draft.
+  return renderToStaticMarkup(createElement(Mode));
+}
+
+describe("channel draft delivery mode", () => {
+  it("restores goal intent on remount and from persisted storage after restart", () => {
+    const store = memoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "group:goal:task-a";
+    setDraft(store, draftId, "Finish the release");
+    setDraftChannelMode(store, draftId, "goal");
+
+    expect(renderedChannelMode(draftId)).toBe("<span>goal</span>");
+    expect(renderedChannelMode("group:goal:task-b")).toBe("<span>chat</span>");
+    expect(renderedChannelMode(draftId)).toBe("<span>goal</span>");
+
+    const restarted = memoryStorage();
+    for (let index = 0; index < store.length; index += 1) {
+      const key = store.key(index)!;
+      restarted.setItem(key, store.getItem(key)!);
+    }
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: restarted });
+    expect(renderedChannelMode(draftId)).toBe("<span>goal</span>");
+    expect(getDraft(restarted, draftId)).toBe("Finish the release");
+  });
+
+  it("keeps legacy drafts intact and defaults missing or invalid modes to chat", () => {
+    const store = memoryStorage();
+    const draftId = "group:legacy:task";
+    store.setItem("omb-drafts", JSON.stringify({ [draftId]: "/goal existing typed goal" }));
+    store.setItem("omb-draft-channel-modes", JSON.stringify({ "group:invalid:task": "unexpected" }));
+    expect(getDraftChannelMode(store, draftId)).toBe("chat");
+    expect(getDraftChannelMode(store, "group:invalid:task")).toBe("chat");
+    expect(getDraft(store, draftId)).toBe("/goal existing typed goal");
+  });
+
+  it("restores a failed goal send after its original composer unmounted", () => {
+    const store = memoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "group:failed-goal:task";
+    setDraft(store, draftId, "Finish the release");
+    setDraftChannelMode(store, draftId, "goal");
+    const sent = {
+      draftId,
+      revision: draftRevision(draftId),
+      sendId: "failed-goal-send",
+      threadId: "task",
+      text: "Finish the release",
+      requestText: "Finish the release",
+      attachments: [],
+      channelMode: "goal" as const,
+    };
+    // Send consumes the one-shot mode before its network result arrives.
+    setDraft(store, draftId, "");
+    setDraftChannelMode(store, draftId, "chat");
+    expect(renderedChannelMode(draftId)).toBe("<span>chat</span>");
+
+    expect(recoverFailedComposerSend(sent)).toBe("restored");
+    expect(renderedChannelMode(draftId)).toBe("<span>goal</span>");
+    expect(getDraft(store, draftId)).toBe(sent.text);
+    expect(restoredSendId(draftId)).toBe(sent.sendId);
+  });
+
+  it("keeps a newer chat draft when an older goal send fails", () => {
+    const store = memoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "group:older-goal:task";
+    const revision = draftRevision(draftId);
+    markDraftEdited(draftId);
+    setDraft(store, draftId, "Just discuss it first");
+    setDraftChannelMode(store, draftId, "chat");
+
+    expect(recoverFailedComposerSend({
+      draftId,
+      revision,
+      sendId: "older-goal-send",
+      threadId: "task",
+      text: "Finish the release",
+      requestText: "Finish the release",
+      attachments: [],
+      channelMode: "goal",
+    })).toBe("outbox");
+    expect(renderedChannelMode(draftId)).toBe("<span>chat</span>");
+    expect(getDraft(store, draftId)).toBe("Just discuss it first");
+    expect(failedComposerSends(draftId)).toEqual([
+      expect.objectContaining({ channelMode: "goal", sendId: "older-goal-send" }),
+    ]);
+  });
+
+  it("keeps mode in memory when storage rejects writes and clears it after send", () => {
+    const store: Storage = {
+      ...memoryStorage(),
+      setItem: () => { throw new DOMException("quota exceeded", "QuotaExceededError"); },
+    };
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: store });
+    const draftId = "group:quota-mode:task";
+    setDraftChannelMode(store, draftId, "goal");
+    expect(renderedChannelMode(draftId)).toBe("<span>goal</span>");
+    setDraftChannelMode(store, draftId, "chat");
+    expect(renderedChannelMode(draftId)).toBe("<span>chat</span>");
+  });
 });
 
 describe("durable attachment completion", () => {

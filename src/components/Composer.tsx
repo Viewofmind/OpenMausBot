@@ -14,6 +14,7 @@ import {
   replaceDraftAttachment,
   restoredSendId,
   useComposerDraft,
+  useComposerChannelMode,
   useDraftAttachmentPending,
   useFailedComposerSends,
   type ComposerSendSnapshot,
@@ -238,7 +239,7 @@ export function Composer({
   const failedSends = useFailedComposerSends(draftId);
   // Goal mode is opt-in and one-shot so the next ordinary channel message
   // cannot accidentally start another multi-turn team run.
-  const [channelMode, setChannelMode] = useState<"chat" | "goal">("chat");
+  const [channelMode, setChannelMode] = useComposerChannelMode(draftId);
   const editText = useCallback(
     (next: string) => {
       markDraftEdited(draftId);
@@ -258,7 +259,6 @@ export function Composer({
       // Shared recovery reaches a newly mounted view after navigation and
       // falls back to a separate retry item when a newer draft already exists.
       if (recoverFailedComposerSend(sent) === "restored") {
-        setChannelMode(sent.channelMode ?? "chat");
         if (sent.reply) onRestoreReply?.(sent.reply, sent.threadId);
       }
     },

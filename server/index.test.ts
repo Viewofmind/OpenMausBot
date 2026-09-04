@@ -5,6 +5,7 @@
 // the shadow-instance behavior end to end while it's at it.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { createServer, request, type Server } from "node:http";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -181,6 +182,44 @@ const api = async (method: string, path: string, body?: unknown): Promise<{ stat
     body: body ? JSON.stringify(body) : undefined,
   });
   return { status: res.status, body: await res.json() };
+};
+
+/** Wait until the server accepts the headers, then let the test complete
+ * the body only after another request changes the conversation's state. */
+const delayedJsonBody = async (method: string, path: string, body: unknown) => {
+  const raw = JSON.stringify(body);
+  const req = request(`${BASE}${path}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(raw),
+      expect: "100-continue",
+    },
+  });
+  const response = new Promise<{ status: number; body: any }>((resolve, reject) => {
+    req.on("error", reject);
+    req.on("response", (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("error", reject);
+      res.on("end", () => {
+        try {
+          resolve({ status: res.statusCode ?? 0, body: JSON.parse(data) });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  });
+  // A failed assertion may destroy the held request before finish is called.
+  void response.catch(() => {});
+  const accepted = once(req, "continue");
+  req.flushHeaders();
+  await accepted;
+  return {
+    finish: () => { req.end(raw); return response; },
+    close: () => req.destroy(),
+  };
 };
 
 const readJsonFileWhenReady = async <T = unknown>(file: string, timeout = 5_000): Promise<T> => {
@@ -4044,6 +4083,82 @@ describe("harness HTTP API", () => {
       expect(current.threadId).toBe(runningTask);
     } finally {
       await api("POST", `/api/bots/${bot.id}/interrupt`, {});
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it.each(["tasks", "active-branch"])("rechecks bot state after a delayed body for %s", async (operation) => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    const claude = (await api("GET", "/api/instances")).body.instances.find(
+      (instance: { instanceId: string }) => instance.instanceId === "claude",
+    );
+    expect((await api("PATCH", `/api/bots/${bot.id}`, {
+      modelSelection: { instanceId: "claude", model: claude.models.default },
+    })).status).toBe(200);
+    const before = (await api("GET", "/api/bots")).body.bots.find(
+      (candidate: { id: string }) => candidate.id === bot.id,
+    );
+    const held = await delayedJsonBody("POST", `/api/bots/${bot.id}/${operation}`,
+      operation === "tasks" ? { title: "Delayed task" } : { messageId: before.messages[0].id });
+    try {
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "keep running" })).status).toBe(202);
+      await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      )?.busy).toBe(true);
+      const rejected = await held.finish();
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.error).toMatch(/working/i);
+      const current = (await api("GET", "/api/bots")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(current.threadId).toBe(before.threadId);
+      expect(current.tasks).toHaveLength(before.tasks.length);
+      expect(current.activeLeafId).not.toBe(before.messages[0].id);
+      expect(current.messages.some((message: { text?: string }) => message.text === "keep running")).toBe(true);
+    } finally {
+      held.close();
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {});
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it.each(["POST", "PATCH"])("rechecks channel state after a delayed body for %s tasks", async (method) => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    const claude = (await api("GET", "/api/instances")).body.instances.find(
+      (instance: { instanceId: string }) => instance.instanceId === "claude",
+    );
+    expect((await api("PATCH", `/api/bots/${bot.id}`, {
+      modelSelection: { instanceId: "claude", model: claude.models.default },
+    })).status).toBe(200);
+    const room = (await api("POST", "/api/groups", {
+      name: "Delayed task changes",
+      memberIds: [bot.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: bot.id } },
+    })).body.group;
+    const held = await delayedJsonBody(method,
+      `/api/groups/${room.id}/tasks${method === "PATCH" ? `/${room.threadId}` : ""}`,
+      { title: "Delayed task" });
+    try {
+      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "keep running" })).status).toBe(202);
+      await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.groups.find(
+        (candidate: { id: string }) => candidate.id === room.id,
+      )?.working).toBe(true);
+      const rejected = await held.finish();
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.error).toMatch(/working/i);
+      const current = (await api("GET", "/api/bots?messages=0")).body.groups.find(
+        (candidate: { id: string }) => candidate.id === room.id,
+      );
+      expect(current.threadId).toBe(room.threadId);
+      expect(current.tasks).toHaveLength(1);
+      expect(current.tasks[0].title).not.toBe("Delayed task");
+    } finally {
+      held.close();
+      await api("POST", `/api/groups/${room.id}/interrupt`, {});
+      await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.groups.find(
+        (candidate: { id: string }) => candidate.id === room.id,
+      )?.working, { timeout: 5_000 }).toBe(false);
+      await api("DELETE", `/api/groups/${room.id}`);
       await api("DELETE", `/api/bots/${bot.id}`);
     }
   });

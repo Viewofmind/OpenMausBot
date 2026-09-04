@@ -80,6 +80,7 @@ import {
   containerComputerScreenshot,
   containerComputerStatus,
   containerRuntimeStatus,
+  localVmRecreatableOnDemand,
   perBotLocalVmTarget,
   SHARED_LOCAL_VM_TARGET,
   setupCommands,
@@ -1933,6 +1934,10 @@ const computerProviderConfigTransitions = new Set<RemoteComputerProvider>();
 // entire async Git operation so a turn cannot start in that folder midway.
 const checkpointRestoreLeases = new Set<string>();
 const LOCAL_VM_IDLE_MS = 8 * 60 * 60_000;
+/** How long a turn waits for Cua Driver after starting the container itself.
+ * A cold XFCE desktop needs some seconds; past this the turn reports the
+ * status it has rather than hanging on a container that will not come up. */
+const LOCAL_VM_DESKTOP_WAIT_MS = 90_000;
 const localVmIdles = new Map<string, LocalVmIdleTimer>();
 
 function managedBoxOwners(): box.ManagedBoxOwner[] {
@@ -3479,7 +3484,7 @@ async function startTurn(
         localVmThreadTargets.set(threadId, localVmTarget);
         localVmActiveThreads.set(localVmTarget.key, threadId);
         localVmIdleFor(localVmTarget).touch();
-        const localVm = await containerComputerStatus(undefined, undefined, localVmTarget);
+        const localVm = await readyLocalVmForTurn(bot.id, localVmTarget);
         if (!localVm.ready || !localVm.runtime) {
           throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
         }
@@ -6314,6 +6319,63 @@ async function localVmPayload(target: LocalVmTarget) {
   };
 }
 
+/** The Local VM a turn is about to use, recreated if the idle timer took it.
+ *
+ * `LocalVmIdleTimer` REMOVES an unused Local VM rather than pausing it. The
+ * turn then failed with "Create the Local VM (App Settings → Local VM)" —
+ * which reads like a fault the person must repair by hand, for a container the
+ * app itself deleted eight hours earlier. Someone who steps away overnight
+ * comes back to an error on their first message.
+ *
+ * The cloud branch below already does the opposite: an absent box is
+ * provisioned on first use behind a `provisioning` broadcast. This gives the
+ * Local VM the same lifecycle for the same reason.
+ *
+ * Only `missing` is recovered, and only when a fresh `run` is all it takes.
+ * Every other problem still surfaces: no runtime installed, no image pulled,
+ * `create_supported` false, or an existing container that is stale, unmanaged
+ * or unsafe. Those need a decision — install podman, download 1.4 GB, replace
+ * a container someone else made — and a stopped container is deliberately not
+ * resumed here, because `localVmProblem` says this desktop image cannot safely
+ * resume and asks for a recreate rather than a start. Per-bot mode keeps its
+ * instance cap; creating past it would quietly do what the lifecycle route
+ * refuses.
+ */
+async function readyLocalVmForTurn(botId: string, target: LocalVmTarget) {
+  let status = await containerComputerStatus(undefined, undefined, target);
+  if (status.ready || !localVmRecreatableOnDemand(status)) return status;
+
+  if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
+    const count = await existingPerBotLocalVmCount(status.runtime);
+    if (count >= localVmMaxInstances(cfg)) return status;
+  }
+
+  broadcast({ kind: "computer", botId, state: "provisioning" });
+  localVmLifecycleBusy.add(target.key);
+  localVmProvisionBusy = true;
+  try {
+    status = await containerComputerAction("run", undefined, undefined, target);
+  } catch {
+    // Keep the inspected status: its `problem` names the real obstacle, which
+    // is more use to the person than "podman run exited non-zero".
+    return status;
+  } finally {
+    localVmProvisionBusy = false;
+    localVmLifecycleBusy.delete(target.key);
+  }
+  localVmIdleFor(target).touch();
+
+  // The container is up before Cua Driver is. Waiting here rather than failing
+  // the turn is the whole point: a person who has been away eight hours should
+  // not have to send their message twice.
+  const deadline = Date.now() + LOCAL_VM_DESKTOP_WAIT_MS;
+  while (!status.ready && status.container === "running" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    status = await containerComputerStatus(undefined, undefined, target);
+  }
+  return status;
+}
+
 async function existingPerBotLocalVmCount(runtime: Runtime) {
   return (await discoverExistingPerBotLocalVms(store.bots, runtime)).length;
 }
@@ -8394,13 +8456,13 @@ const server = createServer(async (req, res) => {
 
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
       if (channelTaskBlocked(group)) {
         return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
       }
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasGroup(group.id)) {
         return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
       }
@@ -8437,13 +8499,13 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { group: responseGroup });
     }
     if (m && method === "PATCH") {
+      const body = await readBody(req);
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
       if (channelTaskBlocked(group)) {
         return json(res, 409, { error: "this channel is working or waiting on you — finish that turn first" });
       }
-      const body = await readBody(req);
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
       }
@@ -9742,10 +9804,10 @@ const server = createServer(async (req, res) => {
     // switch which fork of the conversation is visible (no new turn)
     m = path.match(/^\/api\/bots\/([\w-]+)\/active-branch$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       if (bot.busy) return json(res, 409, { error: "the bot is working — stop it before switching versions" });
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasThread(bot.threadId)) {
         return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
       }
@@ -9920,10 +9982,10 @@ const server = createServer(async (req, res) => {
 
     m = path.match(/^\/api\/bots\/([\w-]+)\/tasks$/);
     if (m && method === "POST") {
+      const body = await readBody(req);
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       if (bot.busy) return json(res, 409, { error: "this bot is working — let it finish before starting a task" });
-      const body = await readBody(req);
       if (phoneSecretSubmissions.hasBot(bot.id)) {
         return json(res, 409, { error: "this bot is securely saving a credential — try again when it finishes" });
       }
