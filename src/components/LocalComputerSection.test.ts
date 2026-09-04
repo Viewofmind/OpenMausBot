@@ -8,6 +8,7 @@ import {
   VpsComputersCard,
   cloudComputerInventoryState,
   localVmInventoryState,
+  reconcileCloudInventorySnapshot,
   vpsComputerInventoryState,
   vpsComputerShortId,
   type CloudComputerInventoryInstance,
@@ -189,6 +190,54 @@ describe("cloud computer inventory UI", () => {
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "provisioning" })).toBe("Starting");
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, state: "unknown" })).toBe("Needs attention");
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, inUse: true })).toBe("In use");
+  });
+
+  it("does not let an eventually-consistent list resurrect a deleted computer", () => {
+    const first = reconcileCloudInventorySnapshot(
+      [ownedCloudComputer],
+      [ownedCloudComputer],
+      { [ownedCloudComputer.boxId]: "deleted" },
+    );
+    expect(first.instances).toEqual([]);
+    expect(first.overrides).toEqual({ [ownedCloudComputer.boxId]: "deleted" });
+
+    const later = reconcileCloudInventorySnapshot(
+      [ownedCloudComputer],
+      first.instances,
+      first.overrides,
+    );
+    expect(later.instances).toEqual([]);
+  });
+
+  it("keeps a successful sleep visible until LIST reaches a sleeping state", () => {
+    const stale = reconcileCloudInventorySnapshot(
+      [{ ...ownedCloudComputer, state: "running" }],
+      [ownedCloudComputer],
+      { [ownedCloudComputer.boxId]: "sleeping" },
+    );
+    expect(stale.instances[0]?.state).toBe("archived");
+    expect(stale.overrides).toEqual({ [ownedCloudComputer.boxId]: "sleeping" });
+
+    const missing = reconcileCloudInventorySnapshot([], stale.instances, stale.overrides);
+    expect(missing.instances[0]?.state).toBe("archived");
+    expect(missing.overrides).toEqual(stale.overrides);
+
+    const settled = reconcileCloudInventorySnapshot(
+      [{ ...ownedCloudComputer, state: "stopped" }],
+      missing.instances,
+      missing.overrides,
+    );
+    expect(settled.instances[0]?.state).toBe("stopped");
+    expect(settled.overrides).toEqual({});
+  });
+
+  it("announces cloud loading and action errors", () => {
+    const loading = renderCard({ loading: true });
+    expect(loading).toContain('role="status"');
+    expect(loading).toContain('aria-busy="true"');
+
+    const failed = renderCard({ error: "Could not delete this computer" });
+    expect(failed).toContain('role="alert"');
   });
 });
 

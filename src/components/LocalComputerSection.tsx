@@ -1,5 +1,5 @@
 // One-place setup for the isolated Local VM image and its shared/per-bot policy.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -92,6 +92,8 @@ interface CloudComputerInventoryPayload {
 
 type CloudAction = "sleep" | "delete";
 type PendingCloudAction = { boxId: string; action: CloudAction } | null;
+export type CloudPostActionOverride = "deleted" | "sleeping";
+export type CloudPostActionOverrides = Record<string, CloudPostActionOverride>;
 
 export interface VpsComputerInventoryInstance {
   name: string;
@@ -133,6 +135,36 @@ export function cloudComputerInventoryState(instance: CloudComputerInventoryInst
   if (["idle", "ready", "running"].includes(instance.state)) return "Running";
   if (["init", "provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "Starting";
   return "Needs attention";
+}
+
+/** Box's account LIST is eventually consistent. Preserve the result of an
+ * action the person just completed instead of letting an older provider
+ * snapshot make a deleted computer reappear or a sleeping one look awake. */
+export function reconcileCloudInventorySnapshot(
+  incoming: CloudComputerInventoryInstance[],
+  previous: CloudComputerInventoryInstance[],
+  overrides: CloudPostActionOverrides,
+): { instances: CloudComputerInventoryInstance[]; overrides: CloudPostActionOverrides } {
+  const nextOverrides = { ...overrides };
+  const incomingIds = new Set(incoming.map((instance) => instance.boxId));
+  const instances = incoming.flatMap((instance) => {
+    const override = overrides[instance.boxId];
+    if (override === "deleted") return [];
+    if (override !== "sleeping") return [instance];
+    if (["archived", "stopped"].includes(instance.state)) {
+      delete nextOverrides[instance.boxId];
+      return [instance];
+    }
+    return [{ ...instance, state: "archived" }];
+  });
+
+  // A transitioning Box can briefly disappear from LIST. Keep the last safe
+  // row until LIST returns the terminal sleeping state.
+  for (const instance of previous) {
+    if (overrides[instance.boxId] !== "sleeping" || incomingIds.has(instance.boxId)) continue;
+    instances.push({ ...instance, state: "archived" });
+  }
+  return { instances, overrides: nextOverrides };
 }
 
 function cloudComputerCanSleep(instance: CloudComputerInventoryInstance): boolean {
@@ -199,9 +231,22 @@ export function VpsComputersCard({
         </button>
       </div>
 
-      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+      {error && <div role="alert" className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
 
-      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {loading
+          ? "Checking VPS computers."
+          : unavailableReason
+            ? `VPS computer inventory unavailable: ${unavailableReason}`
+            : configured === false
+              ? "VPS is not configured."
+              : `${instances.length} VPS computer${instances.length === 1 ? "" : "s"} found.`}
+      </p>
+
+      <div
+        aria-busy={loading || removingName !== null}
+        className="mt-3 overflow-hidden rounded-xl border border-hairline/40"
+      >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
             <Loader2 size={13} className="animate-spin" /> Checking VPS computers…
@@ -257,6 +302,7 @@ export function VpsComputersCard({
                 type="button"
                 onClick={() => onRemove(instance)}
                 disabled={loading || instance.inUse || removingName !== null}
+                aria-busy={removing || undefined}
                 title="Permanently remove this VPS computer"
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -316,9 +362,22 @@ export function CloudComputersCard({
         </button>
       </div>
 
-      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+      {error && <div role="alert" className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
 
-      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {loading
+          ? "Checking cloud computers."
+          : unavailableReason
+            ? `Cloud computer inventory unavailable: ${unavailableReason}`
+            : configured === false
+              ? "Box is not connected."
+              : `${instances.length} cloud computer${instances.length === 1 ? "" : "s"} found.`}
+      </p>
+
+      <div
+        aria-busy={loading || pending !== null}
+        className="mt-3 overflow-hidden rounded-xl border border-hairline/40"
+      >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
             <Loader2 size={13} className="animate-spin" /> Checking cloud computers…
@@ -375,6 +434,7 @@ export function CloudComputersCard({
                   type="button"
                   onClick={() => onSleep(instance)}
                   disabled={loading || instance.inUse || pending !== null || !canSleep}
+                  aria-busy={isPending && pending?.action === "sleep" ? true : undefined}
                   title={canSleep ? "Put this cloud computer to sleep" : `This cloud computer is ${state.toLowerCase()}`}
                   className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -385,6 +445,7 @@ export function CloudComputersCard({
                   type="button"
                   onClick={() => onDelete(instance)}
                   disabled={loading || instance.inUse || pending !== null}
+                  aria-busy={isPending && pending?.action === "delete" ? true : undefined}
                   title="Permanently delete this cloud computer"
                   className="flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -439,9 +500,20 @@ export function LocalVmInventoryCard({
         </button>
       </div>
 
-      {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+      {error && <div role="alert" className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
 
-      <div className="mt-3 overflow-hidden rounded-xl border border-hairline/40">
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {loading
+          ? "Checking existing Local VM desktops."
+          : unavailableReason
+            ? `Local VM inventory unavailable: ${unavailableReason}`
+            : `${instances.length} per-bot desktop${instances.length === 1 ? "" : "s"} found.`}
+      </p>
+
+      <div
+        aria-busy={loading || deletingBotId !== null}
+        className="mt-3 overflow-hidden rounded-xl border border-hairline/40"
+      >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
             <Loader2 size={13} className="animate-spin" /> Checking existing desktops…
@@ -493,6 +565,7 @@ export function LocalVmInventoryCard({
                 type="button"
                 onClick={() => onDelete(instance)}
                 disabled={loading || instance.inUse || deletingBotId !== null}
+                aria-busy={deleting || undefined}
                 title={instance.inUse ? "Stop this bot's turn before deleting its Local VM" : `Delete ${instance.name}'s Local VM`}
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -575,6 +648,8 @@ export function LocalComputerSection() {
   const [cloudUnavailableReason, setCloudUnavailableReason] = useState<string | null>(null);
   const [cloudPending, setCloudPending] = useState<PendingCloudAction>(null);
   const [cloudRefreshKey, setCloudRefreshKey] = useState(0);
+  const cloudInventoryRef = useRef<CloudComputerInventoryInstance[]>([]);
+  const cloudOverridesRef = useRef<CloudPostActionOverrides>({});
   const [vpsInventory, setVpsInventory] = useState<VpsComputerInventoryInstance[]>([]);
   const [vpsConfigured, setVpsConfigured] = useState<boolean | null>(null);
   const [vpsSshAlias, setVpsSshAlias] = useState<string | null>(null);
@@ -583,6 +658,7 @@ export function LocalComputerSection() {
   const [vpsUnavailableReason, setVpsUnavailableReason] = useState<string | null>(null);
   const [vpsRemovingName, setVpsRemovingName] = useState<string | null>(null);
   const [vpsRefreshKey, setVpsRefreshKey] = useState(0);
+  const [announcement, setAnnouncement] = useState("");
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/local-computer", { signal });
@@ -608,7 +684,14 @@ export function LocalComputerSection() {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error ?? `Cloud inventory request failed (${response.status})`);
     const payload = body as CloudComputerInventoryPayload;
-    setCloudInventory(Array.isArray(payload.instances) ? payload.instances : []);
+    const reconciled = reconcileCloudInventorySnapshot(
+      Array.isArray(payload.instances) ? payload.instances : [],
+      cloudInventoryRef.current,
+      cloudOverridesRef.current,
+    );
+    cloudOverridesRef.current = reconciled.overrides;
+    cloudInventoryRef.current = reconciled.instances;
+    setCloudInventory(reconciled.instances);
     setCloudConfigured(payload.configured === true);
     setCloudUnavailableReason(
       payload.available || !payload.configured
@@ -751,6 +834,7 @@ export function LocalComputerSection() {
       // The desktop starts after the container process; keep the progress
       // state honest and let the regular poll mark it Ready a few seconds on.
       await refresh();
+      setAnnouncement(`Local VM ${action === "remove" ? "deleted" : action === "stop" ? "stopped" : "updated"}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -791,6 +875,7 @@ export function LocalComputerSection() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? "Could not delete this Local VM");
       await refreshInventory();
+      setAnnouncement(`Deleted ${instance.name}'s Local VM.`);
     } catch (e) {
       setInventoryError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -807,6 +892,7 @@ export function LocalComputerSection() {
     ) return;
     setCloudPending({ boxId: instance.boxId, action });
     setCloudError(null);
+    setAnnouncement("");
     try {
       const response = await fetch(`/api/computers/boxes/${encodeURIComponent(instance.boxId)}/${action}`, {
         method: "POST",
@@ -815,7 +901,26 @@ export function LocalComputerSection() {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? `Could not ${action} this cloud computer`);
-      await refreshCloudInventory();
+      cloudOverridesRef.current = {
+        ...cloudOverridesRef.current,
+        [instance.boxId]: action === "delete" ? "deleted" : "sleeping",
+      };
+      const reconciled = reconcileCloudInventorySnapshot(
+        cloudInventoryRef.current,
+        cloudInventoryRef.current,
+        cloudOverridesRef.current,
+      );
+      cloudOverridesRef.current = reconciled.overrides;
+      cloudInventoryRef.current = reconciled.instances;
+      setCloudInventory(reconciled.instances);
+      const subject = instance.orphaned ? "Orphaned cloud computer" : `${instance.ownerName}'s cloud computer`;
+      setAnnouncement(action === "delete" ? `${subject} deleted.` : `${subject} is sleeping.`);
+      try {
+        await refreshCloudInventory();
+      } catch (refreshError) {
+        const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        setCloudError(`${subject} was ${action === "delete" ? "deleted" : "put to sleep"}, but the list could not refresh: ${detail}`);
+      }
     } catch (e) {
       setCloudError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -841,6 +946,7 @@ export function LocalComputerSection() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error ?? "Could not remove this VPS computer");
       await refreshVpsInventory();
+      setAnnouncement(`${instance.orphaned ? `Orphaned VPS computer ${shortId}` : `${instance.ownerName}'s VPS computer`} removed.`);
     } catch (e) {
       setVpsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -868,6 +974,7 @@ export function LocalComputerSection() {
 
   return (
     <>
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</p>
       <CloudComputersCard
         instances={cloudInventory}
         configured={cloudConfigured}
@@ -900,6 +1007,7 @@ export function LocalComputerSection() {
       >
         <div className="flex flex-wrap items-center gap-2">
           <span
+            aria-live="polite"
             className={cn(
               "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px]",
               headerReady ? "bg-success/15 text-success" : "bg-control text-ink-secondary",
@@ -940,7 +1048,7 @@ export function LocalComputerSection() {
             </a>
           )}
         </div>
-        {error && <div className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+        {error && <div role="alert" className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
       </Card>
 
       <Card

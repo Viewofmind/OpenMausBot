@@ -79,6 +79,22 @@ describe("server-authoritative bot deletion", () => {
     expect(onConfirmed).toHaveBeenCalledTimes(1);
     expect(onConfirmed).toHaveBeenCalledWith(bot.id);
   });
+
+  it("keeps a visible pending marker until deletion settles or fails", () => {
+    const state = stateWithQueuedWork();
+    const pending = reducer(state, { type: "botDeletionPending", botId: bot.id, on: true });
+
+    expect(pending.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(pending.deletingBots).toEqual({ [bot.id]: true });
+
+    const failed = reducer(pending, { type: "botDeletionPending", botId: bot.id, on: false });
+    expect(failed.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(failed.deletingBots).toEqual({});
+
+    const removed = reducer(pending, { type: "deleteBot", botId: bot.id });
+    expect(removed.bots).toHaveLength(0);
+    expect(removed.deletingBots).toEqual({});
+  });
 });
 
 type SnapshotFrame =

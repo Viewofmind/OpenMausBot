@@ -465,6 +465,9 @@ export interface AppState {
   screens: Record<string, { png: string; mime: string }>;
   /** bots whose cloud computer is being provisioned */
   provisioning: Record<string, boolean>;
+  /** Bot removals waiting for the server to verify that no persistent
+   * computer would be orphaned. The bot stays visible until that succeeds. */
+  deletingBots: Record<string, true>;
   /** who is driving each bot's computer: held = the person has the wheel
    * (the bot's hands are refused server-side); helpReason = the bot's open
    * plea for the person to take over */
@@ -631,6 +634,7 @@ export type Action =
   | { type: "newBot" }
   | { type: "botAdded"; bot: Bot }
   | { type: "deleteBot"; botId: string }
+  | { type: "botDeletionPending"; botId: string; on: boolean }
   | { type: "duplicateBot"; botId: string }
   | { type: "markUnread"; botId: string }
   | { type: "botPatched"; bot: BotAnnouncement }
@@ -937,7 +941,17 @@ export function reducer(state: AppState, action: Action): AppState {
       const bots = state.bots.filter((b) => b.id !== action.botId);
       const selectedId =
         state.selectedId === action.botId ? (bots.find((b) => !b.hidden)?.id ?? bots[0]?.id ?? "") : state.selectedId;
-      return { ...state, bots, selectedId };
+      const { [action.botId]: _deleted, ...deletingBots } = state.deletingBots;
+      return { ...state, bots, selectedId, deletingBots };
+    }
+    case "botDeletionPending": {
+      if (action.on) {
+        if (state.deletingBots[action.botId]) return state;
+        return { ...state, deletingBots: { ...state.deletingBots, [action.botId]: true } };
+      }
+      if (!state.deletingBots[action.botId]) return state;
+      const { [action.botId]: _settled, ...deletingBots } = state.deletingBots;
+      return { ...state, deletingBots };
     }
     case "markUnread":
       return updateBot(withMascotMotion(state, action.botId, "surprise"), action.botId, (b) => ({ ...b, unread: true }));
@@ -1442,6 +1456,7 @@ export const initialState: AppState = {
   appSettingsSection: "general",
   screens: {},
   provisioning: {},
+  deletingBots: {},
   computerControl: {},
   focusMessage: null,
   connected: false,
@@ -1854,6 +1869,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         }
         case "deleteBot":
+          rawDispatch({ type: "botDeletionPending", botId: action.botId, on: true });
           void requestConfirmedBotDeletion(
             action.botId,
             async (botId) => {
@@ -1868,7 +1884,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               rawDispatch({ type: "deleteBot", botId });
             },
           )
-            .catch(showError);
+            .catch(showError)
+            .finally(() => rawDispatch({ type: "botDeletionPending", botId: action.botId, on: false }));
           break;
         case "markUnread":
           api(`/api/bots/${action.botId}`, { method: "PATCH", body: JSON.stringify({ unread: true }) }).catch(
