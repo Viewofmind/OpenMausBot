@@ -1,8 +1,54 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Scenario = "lost-response" | "restart-after-5xx" | "in-progress" | "recovered-box";
+
+const JOURNAL_MODULE_URL = pathToFileURL(join(process.cwd(), "server", "box-create-idempotency.ts")).href;
+
+function journalWorker(dataDir: string, source: string) {
+  const child = spawn(process.execPath, [
+    "--no-warnings",
+    "--experimental-strip-types",
+    "--input-type=module",
+    "--eval",
+    source,
+  ], {
+    env: { ...process.env, OMB_DATA_DIR: dataDir },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => (stderr += chunk));
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  const exited = once(child, "exit");
+  return { child, lines, exited, stderr: () => stderr };
+}
+
+async function workerLine(
+  worker: ReturnType<typeof journalWorker>,
+  label: string,
+): Promise<string> {
+  const line = await worker.lines.next();
+  if (line.done) throw new Error(`${label} exited before replying: ${worker.stderr()}`);
+  return line.value;
+}
+
+async function expectCleanWorkerExit(
+  worker: ReturnType<typeof journalWorker>,
+  label: string,
+): Promise<void> {
+  const [code, signal] = await worker.exited;
+  expect({ code, signal, stderr: worker.stderr() }, label).toEqual({ code: 0, signal: null, stderr: "" });
+}
 
 describe("Box create idempotency", () => {
   let api: Server;
@@ -218,5 +264,114 @@ describe("Box create idempotency", () => {
 
     resolveBoxCreate(remembered);
     expect(hasUnresolvedBoxCreate(botId)).toBe(false);
+  });
+
+  it("serializes two processes that primed independent journal caches", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-processes-"));
+    const requestBody = JSON.stringify({ ttlSeconds: 7_200, noEnv: true });
+    const source = `
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      journal.hasUnresolvedBoxCreate("multiprocess-primer");
+      process.stdout.write("ready\\n");
+      process.stdin.once("data", () => {
+        const result = journal.beginBoxCreate("multiprocess-bot", ${JSON.stringify(requestBody)});
+        process.stdout.write(JSON.stringify(result) + "\\n");
+      });
+    `;
+    const first = journalWorker(dataDir, source);
+    const second = journalWorker(dataDir, source);
+    try {
+      expect(await workerLine(first, "first journal worker")).toBe("ready");
+      expect(await workerLine(second, "second journal worker")).toBe("ready");
+
+      // Both long-lived processes loaded the empty journal before either
+      // mutation. The old in-memory cache deterministically minted two keys.
+      first.child.stdin.end("begin\n");
+      second.child.stdin.end("begin\n");
+      const [firstResult, secondResult] = await Promise.all([
+        workerLine(first, "first journal worker"),
+        workerLine(second, "second journal worker"),
+      ]).then((lines) => lines.map((line) => JSON.parse(line) as {
+        request: { idempotencyKey: string };
+        startedNow: boolean;
+      }));
+      await Promise.all([
+        expectCleanWorkerExit(first, "first journal worker"),
+        expectCleanWorkerExit(second, "second journal worker"),
+      ]);
+
+      expect(firstResult.request.idempotencyKey).toBe(secondResult.request.idempotencyKey);
+      expect([firstResult.startedNow, secondResult.startedNow].sort()).toEqual([false, true]);
+      const state = JSON.parse(readFileSync(join(dataDir, "box-create-requests.json"), "utf8")) as {
+        requests: Array<{ botId: string; requestBody: string; idempotencyKey: string }>;
+      };
+      expect(state.requests).toEqual([{
+        botId: "multiprocess-bot",
+        requestBody,
+        idempotencyKey: firstResult.request.idempotencyKey,
+        createdAt: expect.any(Number),
+      }]);
+    } finally {
+      if (first.child.exitCode === null) first.child.kill("SIGKILL");
+      if (second.child.exitCode === null) second.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("safely retires a complete lock left by an exited process", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-stale-"));
+    const exited = spawn(process.execPath, ["--eval", ""], { stdio: "ignore" });
+    const exitedPid = exited.pid;
+    expect(exitedPid).toBeTypeOf("number");
+    await once(exited, "exit");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, "box-create-requests.lock"), JSON.stringify({
+      version: 1,
+      pid: exitedPid,
+      token: randomUUID(),
+      createdAt: Date.now(),
+    }));
+    const source = `
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      process.stdout.write(JSON.stringify(journal.beginBoxCreate(
+        "stale-lock-bot",
+        JSON.stringify({ ttlSeconds: 7200, noEnv: true }),
+      )) + "\\n");
+    `;
+    const worker = journalWorker(dataDir, source);
+    try {
+      const result = JSON.parse(await workerLine(worker, "stale-lock worker"));
+      await expectCleanWorkerExit(worker, "stale-lock worker");
+      expect(result).toMatchObject({ startedNow: true, request: { botId: "stale-lock-bot" } });
+      expect(JSON.parse(readFileSync(join(dataDir, "box-create-requests.json"), "utf8")).requests).toHaveLength(1);
+    } finally {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed instead of replacing an ownerless or corrupt lock", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "omb-box-journal-corrupt-lock-"));
+    writeFileSync(join(dataDir, "box-create-requests.lock"), "not-json\n");
+    const source = `
+      const journal = await import(${JSON.stringify(JOURNAL_MODULE_URL)});
+      try {
+        journal.beginBoxCreate("corrupt-lock-bot", JSON.stringify({ ttlSeconds: 7200, noEnv: true }));
+        process.stdout.write(JSON.stringify({ unexpected: true }) + "\\n");
+      } catch (error) {
+        process.stdout.write(JSON.stringify({ error: String(error?.message ?? error) }) + "\\n");
+      }
+    `;
+    const worker = journalWorker(dataDir, source);
+    try {
+      const result = JSON.parse(await workerLine(worker, "corrupt-lock worker"));
+      await expectCleanWorkerExit(worker, "corrupt-lock worker");
+      expect(result.error).toMatch(/recovery state.*lock is invalid/i);
+      expect(() => readFileSync(join(dataDir, "box-create-requests.json"), "utf8")).toThrow();
+      expect(readFileSync(join(dataDir, "box-create-requests.lock"), "utf8")).toBe("not-json\n");
+    } finally {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });

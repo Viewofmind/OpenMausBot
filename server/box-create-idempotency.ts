@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
 const FILE = join(DATA_DIR, "box-create-requests.json");
+const LOCK_FILE = join(DATA_DIR, "box-create-requests.lock");
 const KEY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const MAX_REQUESTS = 4_096;
+const LOCK_WAIT_MS = 2_000;
+const LOCK_RETRY_MS = 20;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOT_ID = /^[A-Za-z0-9_-]{1,120}$/;
 const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -31,8 +34,14 @@ export interface BoxCreateAttempt {
   startedNow: boolean;
 }
 
-let loaded = false;
-let requests: BoxCreateRequest[] = [];
+interface JournalLockOwner {
+  version: 1;
+  pid: number;
+  token: string;
+  createdAt: number;
+}
+
+const lockWait = new Int32Array(new SharedArrayBuffer(4));
 
 function isRequest(value: unknown): value is BoxCreateRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -63,16 +72,12 @@ function recoveryStateError(detail: string, cause?: unknown): Error & { status: 
   );
 }
 
-function load(): void {
-  if (loaded) return;
+function loadFresh(): BoxCreateRequest[] {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(FILE, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-      loaded = true;
-      return;
-    }
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
     throw recoveryStateError("unreadable", error);
   }
   const file = raw as { version?: unknown; requests?: unknown };
@@ -98,8 +103,7 @@ function load(): void {
     keys.add(request.idempotencyKey);
     if (request.boxId) botsWithKnownBoxes.add(request.botId);
   }
-  requests = file.requests;
-  loaded = true;
+  return file.requests.map((request) => ({ ...request }));
 }
 
 function save(next: BoxCreateRequest[]): void {
@@ -109,7 +113,159 @@ function save(next: BoxCreateRequest[]): void {
   } catch (error) {
     throw recoveryStateError("unavailable", error);
   }
-  requests = next;
+}
+
+function isLockOwner(value: unknown): value is JournalLockOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const owner = value as Record<string, unknown>;
+  return owner.version === 1
+    && Number.isInteger(owner.pid)
+    && Number(owner.pid) > 0
+    && Number(owner.pid) <= 0x7fffffff
+    && typeof owner.token === "string"
+    && UUID.test(owner.token)
+    && typeof owner.createdAt === "number"
+    && Number.isFinite(owner.createdAt)
+    && owner.createdAt > 0;
+}
+
+function readLockOwner(): JournalLockOwner | null {
+  let raw: string;
+  try {
+    raw = readFileSync(LOCK_FILE, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw recoveryStateError("lock is unreadable", error);
+  }
+  let owner: unknown;
+  try {
+    owner = JSON.parse(raw);
+  } catch (error) {
+    throw recoveryStateError("lock is invalid", error);
+  }
+  if (!isLockOwner(owner)) throw recoveryStateError("lock is invalid");
+  return owner;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ESRCH") return false;
+    // EPERM proves a process owns the pid even though this account cannot
+    // signal it. Every other answer is ambiguous and must keep the lock.
+    if (code === "EPERM") return true;
+    throw recoveryStateError("lock owner could not be verified", error);
+  }
+}
+
+function unlinkCandidate(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      throw recoveryStateError("lock cleanup failed", error);
+    }
+  }
+}
+
+/** Elect exactly one stale-lock reaper for this immutable owner token. Other
+ * contenders never remove the reaper marker: if the elected reaper itself
+ * crashes, the state is ambiguous and callers fail closed instead of risking
+ * deletion of a replacement lock. */
+function reapDeadLock(expected: JournalLockOwner): boolean {
+  const reaper = `${LOCK_FILE}.reap-${expected.token}`;
+  try {
+    writeFileSync(reaper, `${process.pid}\n`, { flag: "wx", mode: 0o600, flush: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+    throw recoveryStateError("stale-lock recovery is unavailable", error);
+  }
+  try {
+    const current = readLockOwner();
+    if (!current || current.token !== expected.token) return true;
+    if (processIsAlive(current.pid)) return false;
+    try {
+      unlinkSync(LOCK_FILE);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        throw recoveryStateError("stale lock could not be retired", error);
+      }
+    }
+    return true;
+  } finally {
+    unlinkCandidate(reaper);
+  }
+}
+
+function acquireJournalLock(): JournalLockOwner {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    throw recoveryStateError("lock directory is unavailable", error);
+  }
+  const owner: JournalLockOwner = {
+    version: 1,
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  // The fully-written candidate exists before link(2) publishes it at the
+  // fixed lock path. Unlike open-then-write, contenders can never observe an
+  // ownerless lock after a crash between those two operations.
+  const candidate = `${LOCK_FILE}.candidate-${owner.pid}-${owner.token}`;
+  try {
+    writeFileSync(candidate, `${JSON.stringify(owner)}\n`, { flag: "wx", mode: 0o600, flush: true });
+  } catch (error) {
+    throw recoveryStateError("lock candidate is unavailable", error);
+  }
+
+  const deadline = performance.now() + LOCK_WAIT_MS;
+  try {
+    for (;;) {
+      try {
+        linkSync(candidate, LOCK_FILE);
+        return owner;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
+          throw recoveryStateError("lock could not be acquired", error);
+        }
+      }
+
+      const current = readLockOwner();
+      if (!current) continue;
+      if (!processIsAlive(current.pid) && reapDeadLock(current)) continue;
+      if (performance.now() >= deadline) {
+        throw recoveryStateError("locked by another OpenMausBot process");
+      }
+      Atomics.wait(lockWait, 0, 0, LOCK_RETRY_MS);
+    }
+  } finally {
+    unlinkCandidate(candidate);
+  }
+}
+
+function releaseJournalLock(owner: JournalLockOwner): void {
+  const current = readLockOwner();
+  if (!current || current.token !== owner.token || current.pid !== owner.pid) {
+    throw recoveryStateError("lock ownership changed unexpectedly");
+  }
+  try {
+    unlinkSync(LOCK_FILE);
+  } catch (error) {
+    throw recoveryStateError("lock could not be released", error);
+  }
+}
+
+function withJournalLock<T>(operation: (requests: BoxCreateRequest[]) => T): T {
+  const owner = acquireJournalLock();
+  try {
+    return operation(loadFresh());
+  } finally {
+    releaseJournalLock(owner);
+  }
 }
 
 /** Record the exact provider request before it leaves the process. A known
@@ -118,83 +274,87 @@ function save(next: BoxCreateRequest[]): void {
 export function beginBoxCreate(botId: string, requestBody: string): BoxCreateAttempt {
   if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer creation");
   if (!requestBody || requestBody.length > 1_024) throw new Error("invalid cloud computer create request");
-  load();
+  return withJournalLock((requests) => {
+    const known = requests.find((request) => request.botId === botId && request.boxId);
+    if (known) return { request: { ...known }, startedNow: false };
 
-  const known = requests.find((request) => request.botId === botId && request.boxId);
-  if (known) return { request: { ...known }, startedNow: false };
-
-  const now = Date.now();
-  const pending = requests.find((request) => request.botId === botId);
-  if (pending) {
-    if (pending.requestBody !== requestBody) {
-      throw recoveryStateError("waiting for an earlier cloud computer request to be reconciled");
+    const now = Date.now();
+    const pending = requests.find((request) => request.botId === botId);
+    if (pending) {
+      if (pending.requestBody !== requestBody) {
+        throw recoveryStateError("waiting for an earlier cloud computer request to be reconciled");
+      }
+      if (now - pending.createdAt >= KEY_RETENTION_MS) {
+        // Once the provider forgets the idempotency key, retrying it (or using
+        // a new key) may create a second billable Box. Absence cannot be
+        // inferred from a lost response, so stop for manual reconciliation.
+        throw recoveryStateError("older than ascii.dev's 24-hour retry window");
+      }
+      return { request: { ...pending }, startedNow: false };
     }
-    if (now - pending.createdAt >= KEY_RETENTION_MS) {
-      // Once the provider forgets the idempotency key, retrying it (or using a
-      // new key) may create a second billable Box. Absence cannot be inferred
-      // from a lost response, so stop until the person checks the provider.
-      throw recoveryStateError("older than ascii.dev's 24-hour retry window");
-    }
-    return { request: { ...pending }, startedNow: false };
-  }
 
-  const request: BoxCreateRequest = {
-    botId,
-    requestBody,
-    idempotencyKey: randomUUID(),
-    createdAt: now,
-  };
-  if (requests.length >= MAX_REQUESTS) {
-    throw recoveryStateError("full");
-  }
-  save([...requests, request]);
-  return { request: { ...request }, startedNow: true };
+    const request: BoxCreateRequest = {
+      botId,
+      requestBody,
+      idempotencyKey: randomUUID(),
+      createdAt: now,
+    };
+    if (requests.length >= MAX_REQUESTS) throw recoveryStateError("full");
+    save([...requests, request]);
+    return { request: { ...request }, startedNow: true };
+  });
 }
 
 /** Persist the returned identity before the caller attempts to rename it. */
 export function rememberCreatedBox(request: BoxCreateRequest, boxId: string): BoxCreateRequest {
   if (!BOX_ID.test(boxId)) throw new Error("ascii.dev returned an invalid cloud computer id");
-  load();
-  const current = requests.find((candidate) => (
-    candidate.botId === request.botId
-    && candidate.requestBody === request.requestBody
-    && candidate.idempotencyKey === request.idempotencyKey
-  ));
-  if (!current) throw recoveryStateError("out of date");
-  const completed = { ...current, boxId };
-  // There can be an older rejected-TTL request for this bot. Once a Box is
-  // known, it is the only recovery authority we need to retain.
-  save([...requests.filter((candidate) => candidate.botId !== request.botId), completed]);
-  return { ...completed };
+  return withJournalLock((requests) => {
+    const current = requests.find((candidate) => (
+      candidate.botId === request.botId
+      && candidate.requestBody === request.requestBody
+      && candidate.idempotencyKey === request.idempotencyKey
+    ));
+    if (!current || (current.boxId !== undefined && current.boxId !== boxId)) {
+      throw recoveryStateError("out of date");
+    }
+    const completed = { ...current, boxId };
+    // There can be an older rejected-TTL request for this bot. Once a Box is
+    // known, it is the only recovery authority we need to retain.
+    save([...requests.filter((candidate) => candidate.botId !== request.botId), completed]);
+    return { ...completed };
+  });
 }
 
 /** Mark the recovery record safe only after the deterministic provider rename
  * succeeds. Keeping the resolved Box ID still lets a later retry recover from
  * an eventually-consistent account listing without blocking bot deletion. */
 export function resolveBoxCreate(request: BoxCreateRequest): BoxCreateRequest {
-  load();
-  const current = requests.find((candidate) => (
-    candidate.botId === request.botId
-    && candidate.requestBody === request.requestBody
-    && candidate.idempotencyKey === request.idempotencyKey
-    && candidate.boxId === request.boxId
-  ));
-  if (!current?.boxId) throw recoveryStateError("out of date");
-  const resolved: BoxCreateRequest = { ...current, resolved: true };
-  save(requests.map((candidate) => candidate.idempotencyKey === current.idempotencyKey ? resolved : candidate));
-  return { ...resolved };
+  return withJournalLock((requests) => {
+    const current = requests.find((candidate) => (
+      candidate.botId === request.botId
+      && candidate.requestBody === request.requestBody
+      && candidate.idempotencyKey === request.idempotencyKey
+      && candidate.boxId === request.boxId
+    ));
+    if (!current?.boxId) throw recoveryStateError("out of date");
+    const resolved: BoxCreateRequest = { ...current, resolved: true };
+    save(requests.map((candidate) => candidate.idempotencyKey === current.idempotencyKey ? resolved : candidate));
+    return { ...resolved };
+  });
 }
 
 /** Read-only deletion guard. Both a key-only request with an ambiguous
  * provider outcome and a known-but-not-yet-named Box must keep its bot owner. */
 export function hasUnresolvedBoxCreate(botId: string): boolean {
   if (!BOT_ID.test(botId)) throw new Error("invalid bot id for cloud computer creation");
-  load();
-  return requests.some((request) => request.botId === botId && request.resolved !== true);
+  return withJournalLock((requests) => (
+    requests.some((request) => request.botId === botId && request.resolved !== true)
+  ));
 }
 
 export function discardBoxCreate(request: BoxCreateRequest): void {
-  load();
-  const next = requests.filter((candidate) => candidate.idempotencyKey !== request.idempotencyKey);
-  if (next.length !== requests.length) save(next);
+  withJournalLock((requests) => {
+    const next = requests.filter((candidate) => candidate.idempotencyKey !== request.idempotencyKey);
+    if (next.length !== requests.length) save(next);
+  });
 }
