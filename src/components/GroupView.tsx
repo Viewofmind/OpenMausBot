@@ -15,7 +15,7 @@ import {
   type GroupDefaultResponder,
   type Message,
 } from "@/state/store";
-import { MausAvatar } from "./Avatar";
+import { BotAvatar, MausAvatar } from "./Avatar";
 import { TurnPresence } from "./TurnPresence";
 import { showToolCallsEnabled } from "@/lib/feature-flags";
 import { roomActivityVisible } from "@/lib/room-activity";
@@ -1311,8 +1311,9 @@ export function GroupView({ group }: { group: Group }) {
           {(speaker || presenceVisible) && (
             <TurnPresence
               avatar={
-                <MausAvatar
-                  color={presenceSpeaker?.color ?? "green"}
+                // the speaker's real profile image when it has one, as in ChatView
+                <BotAvatar
+                  bot={presenceSpeaker ?? { color: "green" }}
                   state={toolInFlight && !awaited ? "working" : "thinking"}
                   size={36}
                   forward={false}
