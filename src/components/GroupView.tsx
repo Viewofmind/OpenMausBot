@@ -104,6 +104,7 @@ function ClusterLabel({ bot, name, color }: { bot?: Bot; name: string; color: st
 /** Pin toggle for one room message — one pin per room, patchGroup path. */
 function PinToggle({ group, message }: { group: Group; message: Message }) {
   const { dispatch } = useStore();
+  if (window.ogb?.remoteClient?.active) return null;
   const pinned = group.pinnedMessageId === message.id;
   return (
     <button
@@ -846,6 +847,7 @@ function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
 }
 export function GroupView({ group }: { group: Group }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const stream = useStreaming();
   const streaming = stream.streaming[group.threadId];
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -884,7 +886,7 @@ export function GroupView({ group }: { group: Group }) {
     [group.memberIds, state.bots],
   );
   const speaker = members.find((b) => b.id === group.busyBotId);
-  const setupPending = roomNeedsSetup(group);
+  const setupPending = !remoteClient && roomNeedsSetup(group);
 
   // Mascot stays while a member works; the finished reply pops in above it.
   const lastGroupMessage = group.messages.at(-1);
@@ -1056,7 +1058,7 @@ export function GroupView({ group }: { group: Group }) {
   return (
     <main className="relative flex h-full min-w-0 flex-1 flex-col bg-app">
       <GroupCallOverlay group={group} members={members} />
-      {membersOpen && !group.dm && (
+      {membersOpen && !remoteClient && !group.dm && (
         <ManageMembersPanel group={group} onClose={closeMembers} triggerRef={membersTriggerRef} />
       )}
       {/* Header: static member mauses; a ring + dot marks the working bot. */}
@@ -1086,9 +1088,9 @@ export function GroupView({ group }: { group: Group }) {
             <Search size={18} />
           </button>
           <GroupCallButton group={group} members={members} />
-          {!setupPending && !group.dm && <RoomWorkingFolderChip group={group} onToggle={() => setFolderOpen((open) => !open)} />}
-          {!setupPending && !group.dm && <DefaultResponderSelect group={group} members={members} />}
-          {group.dm ? (
+          {!remoteClient && !setupPending && !group.dm && <RoomWorkingFolderChip group={group} onToggle={() => setFolderOpen((open) => !open)} />}
+          {!remoteClient && !setupPending && !group.dm && <DefaultResponderSelect group={group} members={members} />}
+          {group.dm || remoteClient ? (
             memberMauses
           ) : (
             // The roster lives where you already look to see who is in the
@@ -1135,13 +1137,14 @@ export function GroupView({ group }: { group: Group }) {
           </div>
         ) : (
           <button
-            onClick={() => setBulletinOpen(true)}
-            className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-raised/40"
+            disabled={remoteClient}
+            onClick={() => { if (!remoteClient) setBulletinOpen(true); }}
+            className={cn("mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left", !remoteClient && "hover:bg-raised/40")}
             title="Channel bulletin — shared instructions for every bot here"
           >
             <Pin size={12} className="shrink-0 text-ink-secondary" />
             <span className={cn("truncate text-[12.5px]", group.bulletin ? "text-ink-secondary" : "text-ink-secondary/60")}>
-              {group.bulletin.split("\n")[0] || "Add channel instructions…"}
+              {group.bulletin.split("\n")[0] || (remoteClient ? "No channel instructions" : "Add channel instructions…")}
             </span>
           </button>
         )}
@@ -1178,7 +1181,7 @@ export function GroupView({ group }: { group: Group }) {
                 onClick={() => dispatch({ type: "patchGroup", groupId: group.id, patch: { pinnedMessageId: "" } })}
                 aria-label="Unpin message"
                 title="Unpin"
-                className="shrink-0 rounded p-0.5 text-ink-secondary hover:bg-raised hover:text-ink"
+                className={cn("shrink-0 rounded p-0.5 text-ink-secondary hover:bg-raised hover:text-ink", remoteClient && "hidden")}
               >
                 <X size={13} />
               </button>

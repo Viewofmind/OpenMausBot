@@ -75,7 +75,11 @@ beforeAll(async () => {
   mkdirSync(join(home, ".openmausbot"), { recursive: true });
   mkdirSync(join(staticDir, "assets"), { recursive: true });
   writeFileSync(join(staticDir, "index.html"), "<!doctype html><title>Served UI</title>");
-  writeFileSync(join(home, ".openmausbot", "config.json"), JSON.stringify({ instances: {} }));
+  // Avoid probing whatever agent CLIs happen to be installed on the test
+  // machine; remote-session behavior does not depend on an engine.
+  writeFileSync(join(home, ".openmausbot", "config.json"), JSON.stringify({
+    instances: { fixture: { driver: "remote-session-test-shadow" } },
+  }));
   child = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
     cwd: ROOT,
     env: {

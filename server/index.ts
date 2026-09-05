@@ -9548,7 +9548,6 @@ const server = createServer(async (req, res) => {
         return json(res, 400, { error: "name and one to 100 valid botIds are required" });
       }
       const name = parsed.data.name.trim();
-      if (!name) return json(res, 400, { error: "name is required" });
       if (name.length > 60) {
         return json(res, 400, { error: "name must be at most 60 characters" });
       }
@@ -10417,6 +10416,18 @@ const server = createServer(async (req, res) => {
         return json(res, 409, { error: "request cards must be answered through the approval endpoint" });
       }
       const body = await readBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return json(res, 400, { error: "body must be a JSON object" });
+      }
+      if (Object.keys(body).some((key) => key !== "answered" && key !== "dismissed")) {
+        return json(res, 400, { error: "only answered and dismissed may be changed" });
+      }
+      if (body.answered !== undefined && typeof body.answered !== "string") {
+        return json(res, 400, { error: "answered must be a string" });
+      }
+      if (body.dismissed !== undefined && typeof body.dismissed !== "boolean") {
+        return json(res, 400, { error: "dismissed must be true or false" });
+      }
       const patched = store.patchMessage(bot.threadId, m[2], {
         card: {
           ...existing.card,
@@ -12046,11 +12057,6 @@ const server = createServer(async (req, res) => {
             return json(res, 409, { error: "the VPS computer is being used by this bot — interrupt the turn first" });
           }
           if (m[2] === "join") {
-            if (req.headers["x-openmausbot-companion"] === "1") {
-              return json(res, 409, {
-                error: "VPS live desktop control is currently available in the desktop app; the SSH viewer is loopback-only",
-              });
-            }
             return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
           }
           if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
