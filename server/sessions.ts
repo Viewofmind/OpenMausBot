@@ -231,6 +231,12 @@ export class SessionRegistry {
     return this.pairings.length !== before;
   }
 
+  /** Sources with recent failures (for tests and diagnostics; never the codes). */
+  failureSources(): string[] {
+    this.prune();
+    return [...this.failures.keys()];
+  }
+
   private lockState(source: string): { locked: boolean; retryAfterMs: number } {
     const entry = this.failures.get(source);
     if (!entry) return { locked: false, retryAfterMs: 0 };
@@ -312,6 +318,12 @@ export class SessionRegistry {
       this.persist();
     }
     return record;
+  }
+
+  /** Still valid right now (prunes expiry first). */
+  isLive(sessionId: string): boolean {
+    this.prune();
+    return this.sessions.some((s) => s.id === sessionId);
   }
 
   list(): PublicSession[] {

@@ -288,6 +288,8 @@ import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterpris
 import { environmentDescriptor, loadEnvironmentId } from "./environment.ts";
 import {
   clearSessionCookie,
+  clientBotPatchViolation,
+  clientGroupPatchViolation,
   labelFromUserAgent,
   requestOrigin,
   requestSource,
@@ -1962,8 +1964,22 @@ interface SseClient {
    * while a bot works. A client that isn't showing the computer panel —
    * a phone on cellular, most of all — should not pay for them. */
   screens: boolean;
+  /** The paired session behind this stream, when there is one: revoking or
+   * expiring it must end the stream, not just future requests. */
+  sessionId?: string;
 }
 const sseClients = new Set<SseClient>();
+sessions.onSessionRevoked((sessionId) => {
+  for (const client of sseClients) {
+    if (client.sessionId !== sessionId) continue;
+    sseClients.delete(client);
+    try {
+      client.res.end();
+    } catch {
+      /* already gone */
+    }
+  }
+});
 
 /** Every frame is numbered, and the last few hundred are kept, so a client
  * whose connection dropped can ask for what it missed instead of
@@ -7203,11 +7219,18 @@ const server = createServer(async (req, res) => {
       return json(res, 200, environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED }));
     }
     if (method === "POST" && path === "/api/auth/pair") {
+      // JSON only: a cross-site HTML form cannot send this content type
+      // without a preflight, so a stray unused code cannot be planted as a
+      // session in someone else's browser.
+      if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
+        return json(res, 415, { error: "send the pairing code as JSON (content-type: application/json)" });
+      }
       const body = await readBody(req);
       const code = typeof body?.code === "string" ? body.code : "";
       const wantsCookie = body?.cookie === true;
       const label = typeof body?.label === "string" ? body.label : "";
-      const result = sessions.exchange({ code, label, source: requestSource(req), fallbackLabel: labelFromUserAgent(req.headers["user-agent"]) });
+      const attemptId = typeof body?.attemptId === "string" ? body.attemptId : undefined;
+      const result = sessions.exchange({ code, label, attemptId, source: requestSource(req), fallbackLabel: labelFromUserAgent(req.headers["user-agent"]) });
       if (!result.ok) {
         console.warn(`pairing refused from ${requestSource(req)}: ${result.error}`);
         return json(res, result.status, { error: result.error });
@@ -8324,6 +8347,7 @@ const server = createServer(async (req, res) => {
     // ── events stream ──
     if (method === "GET" && path === "/api/events") {
       const client: SseClient = { res, screens: url.searchParams.get("screens") !== "off" };
+      if (auth.kind === "session") client.sessionId = auth.session.id;
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -8374,6 +8398,11 @@ const server = createServer(async (req, res) => {
       // data frame is visible to EventSource clients and resets their own
       // liveness watchdog. Heartbeats carry no id and never advance replay.
       const keepalive = setInterval(() => {
+        // an expired session's stream ends at the next heartbeat
+        if (client.sessionId && !sessions.isLive(client.sessionId)) {
+          res.end();
+          return;
+        }
         try {
           res.write(`: keepalive\n\ndata: ${JSON.stringify({ kind: "ping" })}\n\n`);
         } catch {}
@@ -9257,6 +9286,10 @@ const server = createServer(async (req, res) => {
     m = path.match(/^\/api\/groups\/([\w-]+)$/);
     if (m && method === "PATCH") {
       const body = await readBody(req);
+      if (auth.kind === "session" && !auth.scopes.includes("admin")) {
+        const field = clientGroupPatchViolation(body);
+        if (field) return json(res, 403, { error: `forbidden: this session may rename or mark a room, not change "${field}" (needs the admin scope)` });
+      }
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
       }
@@ -9732,6 +9765,10 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
+      }
+      if (auth.kind === "session" && !auth.scopes.includes("admin")) {
+        const field = clientBotPatchViolation(body);
+        if (field) return json(res, 403, { error: `forbidden: this session may change how a bot looks, not "${field}" (needs the admin scope)` });
       }
       const existingBot = store.bot(m[1]);
       if (body.requireAvailableModel !== undefined && typeof body.requireAvailableModel !== "boolean") {
@@ -11353,7 +11390,18 @@ const server = createServer(async (req, res) => {
 
     // ── app config (API keys — never echoed back, booleans only) ──
     if (method === "GET" && path === "/api/config") {
-      return json(res, 200, configStatus());
+      const status = configStatus();
+      if (auth.kind === "session" && !auth.scopes.includes("admin")) {
+        // configured-or-not is fine; an SSH alias, an email, a browser
+        // partition id are not a client's business
+        return json(res, 200, {
+          ...status,
+          vps: { configured: status.vps.configured, sshAlias: "" },
+          profile: { name: status.profile.name, email: "" },
+          browserProfiles: status.browserProfiles.map((profile) => Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "partitionId"))),
+        });
+      }
+      return json(res, 200, status);
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
