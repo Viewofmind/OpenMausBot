@@ -7,10 +7,18 @@ import { describe, expect, it } from "vitest";
 import {
   approvalKey,
   autoDecision,
+  autoVerdict,
   looksDestructive,
   looksSensitive,
   rememberableApprovalKey,
 } from "./auto-approve.ts";
+
+describe("native permission decisions", () => {
+  it.each(["auto", "full"] as const)("does not override a native %s approval request, even with a remembered grant", (approvalMode) => {
+    expect(autoVerdict({ approvalMode, alwaysAllow: ["Read"] }, "Read", "README.md", { nativeApproval: true }))
+      .toEqual({ approve: null, source: "native-approval" });
+  });
+});
 
 describe("looksDestructive", () => {
   const dangerous = [

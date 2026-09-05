@@ -86,6 +86,7 @@ export type AutoVerdictSource =
   | "always-allow"
   | "auto-mode"
   | "full-access"
+  | "native-approval"
   | "explicit-approval-block"
   | "unattended-block"
   | "local-computer-block"
@@ -142,6 +143,8 @@ export function autoVerdict(
   context?: {
     /** the turn was started by an outside event, with nobody at the keyboard */
     unattended?: boolean;
+    /** Respect the native reviewer (including a provider with no Auto mode). */
+    nativeApproval?: boolean;
     /** the request controls the user's active desktop */
     scope?: "local-computer";
     /** The provider is asking to widen its configured sandbox rather than
@@ -150,6 +153,7 @@ export function autoVerdict(
   },
 ): AutoVerdict {
   const mode = approvalModeFor(bot);
+  if (context?.nativeApproval) return { approve: null, source: "native-approval" };
   // This branch intentionally precedes every guard. Entering Full access is
   // separately consent-gated by the bot PATCH endpoint, and its promise is
   // literal: even destructive, sensitive, unattended, and host-computer
