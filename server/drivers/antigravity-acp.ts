@@ -369,6 +369,50 @@ export async function probeAntigravityModels(input: {
   }
 }
 
+/**
+ * Validates whether an ACP initialization response matches an official Google Antigravity release.
+ *
+ * @param initialized - The raw initialization response payload returned by the ACP client.
+ * @param expectedVersion - The expected release version tag or semver string.
+ * @returns `true` if the initialize result satisfies protocol, agent identity, capability, and auth requirements.
+ */
+export function isValidAntigravityInitializeResult(
+  initialized: any,
+  expectedVersion: string,
+): boolean {
+  if (!initialized || initialized.protocolVersion !== 1) return false;
+  const name = initialized.agentInfo?.name;
+  if (name !== "antigravity-acp" && name !== "Google Antigravity") return false;
+  const actualVersion = initialized.agentInfo?.version;
+  if (typeof actualVersion !== "string") return false;
+  const normalizedActual = actualVersion.replace(/^agy_acp_server_/u, "").trim();
+  const normalizedExpected = expectedVersion.replace(/^agy_acp_server_/u, "").trim();
+  if (actualVersion !== expectedVersion && normalizedActual !== normalizedExpected) return false;
+  // ACP advertises these optional operations as capability objects (including
+  // empty objects). Keep accepting the boolean form used by older runtimes.
+  const advertised = (value: unknown) => value === true
+    || (typeof value === "object" && value !== null && !Array.isArray(value));
+  if (
+    initialized.agentCapabilities?.loadSession !== true ||
+    !advertised(initialized.agentCapabilities?.sessionCapabilities?.resume) ||
+    !advertised(initialized.agentCapabilities?.auth?.logout)
+  ) {
+    return false;
+  }
+  if (!Array.isArray(initialized.authMethods) || !initialized.authMethods.some((method: any) => method?.id === "oauth-personal")) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Starts a transient Antigravity ACP client against a temporary profile to verify
+ * that the downloaded runtime binary starts properly and identifies as the expected release.
+ *
+ * @param runtime - The resolved Antigravity executable and harness paths.
+ * @param expectedVersion - The expected version string or tag.
+ * @returns A promise that resolves when verification succeeds, or rejects if initialization fails.
+ */
 export async function validateAntigravityRuntime(runtime: AntigravityRuntime, expectedVersion: string): Promise<void> {
   const profileDirectory = await mkdtemp(join(tmpdir(), "openmaus-antigravity-verify-"));
   try {
@@ -380,15 +424,9 @@ export async function validateAntigravityRuntime(runtime: AntigravityRuntime, ex
     const client = new AntigravityAcpClient(runtime, profile, profileDirectory);
     try {
       const initialized = await client.initialize();
-      if (
-        initialized?.protocolVersion !== 1 ||
-        initialized?.agentInfo?.name !== "antigravity-acp" ||
-        initialized?.agentInfo?.version !== expectedVersion ||
-        initialized?.agentCapabilities?.loadSession !== true ||
-        initialized?.agentCapabilities?.sessionCapabilities?.resume !== true ||
-        initialized?.agentCapabilities?.auth?.logout !== true ||
-        !initialized?.authMethods?.some((method: any) => method?.id === "oauth-personal")
-      ) throw new Error("The download did not identify as the expected Google Antigravity ACP release.");
+      if (!isValidAntigravityInitializeResult(initialized, expectedVersion)) {
+        throw new Error("The download did not identify as the expected Google Antigravity ACP release.");
+      }
     } finally {
       client.close();
     }
