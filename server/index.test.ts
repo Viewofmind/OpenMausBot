@@ -3082,7 +3082,7 @@ describe("harness HTTP API", () => {
       for (const seeded of trustedBots) {
         const rejected = await isolatedApi("PATCH", `/api/bots/${seeded.id}/model`, targetSelection);
         expect(rejected.status, seeded.approvalMode).toBe(400);
-        expect(rejected.body.error).toMatch(/requires a Codex provider.*Ask or Auto first/i);
+        expect(rejected.body.error).toMatch(/requires choosing Ask or Auto first/i);
         const unchanged = (await isolatedApi("GET", "/api/bots?messages=0")).body.bots.find(
           (candidate: { id: string }) => candidate.id === seeded.id,
         );
@@ -4515,7 +4515,7 @@ describe("harness HTTP API", () => {
     }
   });
 
-  it("does not offer Full or Custom approval modes to non-Codex bots", async () => {
+  it("requires private desktop consent for Claude Full and rejects Codex-only Custom", async () => {
     const bot = (await api("POST", "/api/bots", {
       modelSelection: { instanceId: "claude", model: "fixture-claude-model" },
     })).body.bot;
@@ -4525,8 +4525,8 @@ describe("harness HTTP API", () => {
           approvalMode,
           acknowledgeFullAccess: true,
         });
-        expect(rejected.status, approvalMode).toBe(400);
-        expect(rejected.body.error).toMatch(/only for Codex/i);
+        expect(rejected.status, approvalMode).toBe(approvalMode === "full" ? 403 : 400);
+        expect(rejected.body.error).toMatch(approvalMode === "full" ? /desktop app/i : /does not support/i);
       }
       const stored = (await api("GET", "/api/bots")).body.bots.find(
         (candidate: { id: string }) => candidate.id === bot.id,

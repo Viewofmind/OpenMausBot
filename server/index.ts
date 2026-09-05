@@ -10,6 +10,8 @@ import { z } from "zod";
 import { botAvatarUrlFromStoredPath } from "../shared/bot-avatar.ts";
 import {
   approvalModeFor,
+  supportsApprovalMode,
+  requiresNativeApproval,
   isEmergencyApprovalDowngrade,
   isApprovalMode,
   type ApprovalMode,
@@ -1152,17 +1154,17 @@ const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) 
 };
 
 /** Defense in depth for hand-edited/corrupt durable records: elevated
- * approval semantics belong only to Codex. The trusted transition enforces
+ * approval semantics require an implemented provider mapping. The trusted transition enforces
  * this too, but no provider dispatch or later permission callback relies on
  * persistence having been produced exclusively by that route. */
 const approvalModeForTurn = (bot: BotRecord): ApprovalMode => {
   const mode = approvalModeFor(bot);
-  if (
-    (mode === "full" || mode === "custom") &&
-    registry.cliTarget(bot.modelSelection.instanceId)?.driverKind !== "codex"
-  ) {
+  if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
     return "ask";
   }
+  // Native reviewers can approve before a permission reaches this process.
+  // Unattended Auto must therefore downgrade before spawning the provider.
+  if (mode === "auto" && isUnattended(bot.id)) return "ask";
   return mode;
 };
 
@@ -1190,7 +1192,7 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
       bot.approvalGrant.phase === "committed" &&
       bot.approvalMode === mode &&
       !bot.busy &&
-      registry.cliTarget(bot.modelSelection.instanceId)?.driverKind === "codex"
+      supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)
     ) {
       store.patchBot(botId, { approvalGrant: undefined });
     } else if (bot?.approvalGrant?.requestId === requestId) {
@@ -1226,9 +1228,9 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
       bot.approvalGrant.phase === "prepared" &&
       bot.approvalMode === mode
     ) {
-      if (registry.cliTarget(bot.modelSelection.instanceId)?.driverKind !== "codex") {
+      if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
         store.patchBot(botId, { approvalMode: "ask", autoApprove: false, approvalGrant: undefined });
-        confirm(false, "Full and Custom approval levels require a Codex bot");
+        confirm(false, "This provider does not support the selected approval level");
         return true;
       }
       store.patchBot(botId, {
@@ -1273,11 +1275,11 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
       bot.approvalGrant.phase === "confirmed" &&
       bot.approvalMode === mode
     ) {
-      if (bot.busy || registry.cliTarget(bot.modelSelection.instanceId)?.driverKind !== "codex") {
+      if (bot.busy || !supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
         store.patchBot(botId, { approvalMode: "ask", autoApprove: false, approvalGrant: undefined });
         activate(false, bot.busy
           ? "Stop this bot's turn before changing its approval level"
-          : "Full and Custom approval levels require a Codex bot");
+          : "This provider does not support the selected approval level");
         return true;
       }
       // Still inert: Electron must receive this acknowledgement and request
@@ -1320,7 +1322,7 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
       bot.approvalGrant.phase === "activated" &&
       bot.approvalMode === mode &&
       !bot.busy &&
-      registry.cliTarget(bot.modelSelection.instanceId)?.driverKind === "codex"
+      supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)
     ) {
       // Durable but still inert. Electron must observe this exact ACK before
       // sending the one-way commit release that clears the journal.
@@ -1372,14 +1374,11 @@ function handleDesktopTrustedApprovalMessage(raw: unknown): boolean {
     respond({ ok: false, error: "Stop this bot's turn before changing its approval level" });
     return true;
   }
-  if (
-    (mode === "full" || mode === "custom") &&
-    registry.cliTarget(existing.modelSelection.instanceId)?.driverKind !== "codex"
-  ) {
+  if (!supportsApprovalMode(registry.cliTarget(existing.modelSelection.instanceId)?.driverKind, mode)) {
     respond({
       ok: false,
       error: mode === "full"
-        ? "Full access is available only for Codex bots"
+        ? "This provider does not support Full access"
         : "Custom approval settings are available only for Codex bots",
     });
     return true;
@@ -2786,6 +2785,7 @@ bus.subscribe((event: RuntimeEvent) => {
             unattended,
             scope: event.approvalScope,
             requiresExplicitApproval: event.requiresExplicitApproval,
+            nativeApproval: requiresNativeApproval(event.provider, approvalModeForTurn(asker)),
           })
         : null;
       if (verdict?.approve && asker && event.requestId) {
@@ -2885,11 +2885,12 @@ bus.subscribe((event: RuntimeEvent) => {
                 requiresExplicitApproval: event.requiresExplicitApproval,
               })
             : undefined,
-          // In safe Auto a card can only mean a guard stopped it — say so.
-          // Full access has no guard-card path; only a failed delivery above
-          // can hand its permission back to the human.
+          // Explain native approval requests without implying that Full
+          // access bypasses a provider's own remaining checks.
           held:
-            permission && event.requiresExplicitApproval
+            verdict?.source === "native-approval"
+              ? "The provider requires your approval for this action."
+              : permission && event.requiresExplicitApproval
               ? "This changes the provider sandbox, so only Full access can approve it automatically."
               : permission && asker && approvalModeFor(asker) === "auto"
                 ? "This action needs you, so Approve for me stopped to ask."
@@ -9685,10 +9686,11 @@ const server = createServer(async (req, res) => {
       const existingApprovalMode = approvalModeFor(existing);
       if (
         (existingApprovalMode === "full" || existingApprovalMode === "custom") &&
-        registry.cliTarget(checked.selection.instanceId)?.driverKind !== "codex"
+        (!supportsApprovalMode(registry.cliTarget(checked.selection.instanceId)?.driverKind, existingApprovalMode) ||
+          registry.cliTarget(checked.selection.instanceId)?.driverKind !== registry.cliTarget(existing.modelSelection.instanceId)?.driverKind)
       ) {
         return json(res, 400, {
-          error: `${existingApprovalMode === "full" ? "Full access" : "Custom approval settings"} requires a Codex provider; choose Ask or Auto first`,
+          error: "Changing providers with elevated permissions requires choosing Ask or Auto first",
         });
       }
       // patchBot persists first and emits the canonical bot change, which the
@@ -9913,10 +9915,11 @@ const server = createServer(async (req, res) => {
       if (
         (requestedApprovalMode === "full" || requestedApprovalMode === "custom") &&
         (body.approvalMode !== undefined || normalizedSelection !== undefined) &&
-        (!targetSelection || registry.cliTarget(targetSelection.instanceId)?.driverKind !== "codex")
+        (!targetSelection || !supportsApprovalMode(registry.cliTarget(targetSelection.instanceId)?.driverKind, requestedApprovalMode) ||
+          (existingBot && normalizedSelection && registry.cliTarget(normalizedSelection.instanceId)?.driverKind !== registry.cliTarget(existingBot.modelSelection.instanceId)?.driverKind))
       ) {
         return json(res, 400, {
-          error: `${requestedApprovalMode === "full" ? "Full access" : "Custom approval settings"} ${requestedApprovalMode === "full" ? "is" : "are"} available only for Codex bots`,
+          error: "This provider does not support the selected approval level, or changing providers requires choosing Ask or Auto first",
         });
       }
       const requiresPrivateApprovalTransition =
