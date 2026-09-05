@@ -26,7 +26,7 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import { approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -2934,16 +2934,18 @@ bus.subscribe((event: RuntimeEvent) => {
                 requiresExplicitApproval: event.requiresExplicitApproval,
               })
             : undefined,
-          // Explain native approval requests without implying that Full
-          // access bypasses a provider's own remaining checks.
-          held:
-            verdict?.source === "native-approval"
-              ? "The provider requires your approval for this action."
-              : permission && event.requiresExplicitApproval
-              ? "This changes the provider sandbox, so only Full access can approve it automatically."
-              : permission && asker && approvalModeFor(asker) === "auto"
-                ? "This action needs you, so Approve for me stopped to ask."
-              : undefined,
+          // A card can outlive the bot record that raised it. Without one
+          // there is no mode to explain, but the sandbox note still applies.
+          held: approvalHeldReason({
+            source: verdict?.source,
+            permission,
+            requiresExplicitApproval: event.requiresExplicitApproval,
+            mode: asker ? approvalModeForOrigin(approvalModeFor(asker), { peerInitiated: isInternalTurn(event.threadId) }) : "ask",
+            unattended: Boolean(unattended),
+            fullAccessAvailable: asker && !isInternalTurn(event.threadId)
+              ? supportsApprovalMode(registry.cliTarget(asker.modelSelection.instanceId)?.driverKind, "full")
+              : false,
+          }),
           approvalScope: event.approvalScope,
         },
       });
