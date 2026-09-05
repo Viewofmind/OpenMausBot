@@ -8337,40 +8337,59 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const botId = String(body.botId ?? "");
         const threadId = String(body.threadId ?? "");
         const resumeKey = String(body.resumeKey ?? "");
-        const slugs: string[] = Array.isArray(body.slugs)
-          ? [...new Set<string>(body.slugs.map((slug: unknown) => String(slug).toLowerCase()).filter((slug: string) => CONNECTOR_SLUG.test(slug)))]
-          : [];
+        const rawItems = Array.isArray(body.items) ? body.items : Array.isArray(body.slugs) ? body.slugs : [];
+        const items: { slug: string; alias?: string }[] = [];
+        for (const raw of rawItems as unknown[]) {
+          if (typeof raw === "string") {
+            const slug = raw.trim().toLowerCase();
+            if (CONNECTOR_SLUG.test(slug)) items.push({ slug });
+            continue;
+          }
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+          const row = raw as { slug?: unknown; toolkit?: unknown; alias?: unknown; account?: unknown };
+          const slug = typeof row.slug === "string" ? row.slug : typeof row.toolkit === "string" ? row.toolkit : undefined;
+          if (!slug || !CONNECTOR_SLUG.test(slug.toLowerCase())) continue;
+          const alias = composio.normalizeAccountAlias((row.alias ?? row.account) as string | undefined);
+          items.push({ slug: slug.toLowerCase(), ...(alias ? { alias } : {}) });
+        }
+        const slugs = [...new Set(items.map((item) => item.slug))];
         const owner = connectorThread(botId, threadId);
         if (!owner) return json(res, 403, { error: "conversation does not belong to this bot" });
         if (!/^[\w-]{8,100}$/.test(resumeKey)) return json(res, 400, { error: "invalid resume key" });
-        if (!slugs.length || slugs.length > 12) return json(res, 400, { error: "one to twelve valid apps are required" });
+        if (!items.length || items.length > 12) return json(res, 400, { error: "one to twelve valid connection requests are required" });
         if (!composio.configured(cfg) || owner.bot.composio === false) {
           return json(res, 409, { error: "connected apps are not enabled for this bot" });
         }
         const connectionState: Record<string, { connected?: boolean }> = await composio.connectionStatus(cfg, slugs).catch(() => ({}));
         requireActiveInternalCapability();
         const messageIds: string[] = [];
-        for (const slug of slugs) {
+        for (const item of items) {
           const existing = store.messagesFor(threadId).find(
-            (message) => message.connector?.resumeKey === resumeKey && message.connector.slug === slug,
+            (message) => message.connector?.resumeKey === resumeKey && message.connector.slug === item.slug
+              && (message.connector.alias ?? "").toLowerCase() === (item.alias ?? "").toLowerCase(),
           );
           if (existing) {
             messageIds.push(existing.id);
             continue;
           }
-          const toolkit = await composio.toolkitCard(cfg, slug);
+          const toolkit = await composio.toolkitCard(cfg, item.slug);
           requireActiveInternalCapability();
-          const connected = connectionState[slug]?.connected === true;
+          const connected = connectionState[item.slug]?.connected === true;
+          const status = item.alias ? "required" : connected ? "connected" : "required";
+          const description = item.alias
+            ? `Connect ${toolkit.label} as “${item.alias}” so the bot can continue`
+            : toolkit.blurb || `Connect ${toolkit.label} so the bot can continue`;
           const message = store.appendMessage(threadId, {
             role: "bot",
             kind: "connector",
             ...(owner.group ? { from: { botId: owner.bot.id, name: owner.bot.name, color: owner.bot.color } } : {}),
             connector: {
-              slug,
+              slug: item.slug,
               label: toolkit.label,
-              description: toolkit.blurb || `Connect ${toolkit.label} so the bot can continue`,
-              status: connected ? "connected" : "required",
+              description,
+              status,
               resumeKey,
+              ...(item.alias ? { alias: item.alias } : {}),
             },
           });
           messageIds.push(message.id);
@@ -12223,7 +12242,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           connector: { ...connector, status: "authorizing", error: undefined, dismissed: false },
         });
         try {
-          return json(res, 200, await composio.authorizeService(cfg, connector.slug));
+          return json(res, 200, await composio.authorizeService(cfg, connector.slug, connector.alias));
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           store.patchMessage(threadId, message.id, {
@@ -12233,7 +12252,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
       }
       if (m[3] === "status" && method === "GET") {
-        const state = (await composio.connectionStatus(cfg, [connector.slug]))[connector.slug];
+        const service = (await composio.connectionStatus(cfg, [connector.slug]))[connector.slug];
+        // A different active account must never complete a second-account card.
+        // Missing alias metadata stays pending rather than guessing from the
+        // toolkit-wide status (including scoped keys without account reads).
+        const account = connector.alias
+          ? service?.accounts?.find((item) => item.alias?.trim().toLowerCase() === connector.alias!.toLowerCase())
+          : undefined;
+        const state = connector.alias ? {
+          connected: /^active$/i.test(account?.status ?? ""),
+          pending: /^(initiated|initializing|pending)$/i.test(account?.status ?? ""),
+          status: account?.status ?? "not_connected",
+        } : service;
         const failed = /failed|expired|revoked|error/i.test(state?.status ?? "");
         const next = {
           ...connector,
