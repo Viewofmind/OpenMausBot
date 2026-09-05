@@ -79,7 +79,7 @@ import {
 } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
-import { peerAllowed, peerRosterSystemPrompt, reachablePeers } from "./peer-roster.ts";
+import { peerAllowed, peerRosterSystemPrompt, reachablePeers, roomPeerRosterSystemPrompt } from "./peer-roster.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
@@ -2397,6 +2397,17 @@ function clearInternalTurn(threadId: string) {
 function isInternalTurn(threadId: string): boolean {
   return internalTurnThreads.has(threadId);
 }
+// When the person last wrote into each thread with a turn in flight — but
+// only for turns THEY started. post_to_room's ceiling counts the bot posts
+// nobody has answered, and "answered" used to mean a person writing in the
+// room alone. A person driving one bot from its own conversation ("tell
+// #planning we shipped", then two more) was refused the third post and
+// told to go and ask the user — who had just asked. The person who wrote
+// into the bot's thread is attending that post as surely as one writing
+// in the room, so the ceiling reads this too. A scheduled or webhook turn,
+// a peer hop, or a resumed card records nothing here: the user message
+// such a turn finds in its thread may be hours old and its author gone.
+const personAskAt = new Map<string, number>();
 let routines: RoutineManager | null = null;
 let calendarCalls: CalendarCallManager | null = null;
 const localVmOwnerBusy = (botId: string) => store.bot(botId)?.busy === true;
@@ -3813,6 +3824,15 @@ async function startTurn(
           sendId: opts?.sendId,
         });
   }
+  // A card continuation neither starts nor ends the person's ask: it
+  // resumes the turn their last message began, so that record stands.
+  if (!opts?.cardContinuation) {
+    if (commsDepth === 0 && opts?.automationSource === undefined && !opts?.unattended) {
+      personAskAt.set(threadId, userMessage.at);
+    } else {
+      personAskAt.delete(threadId);
+    }
+  }
 
   // transcript for API-backed drivers: settled text turns on the ACTIVE
   // branch only — abandoned forks never reach the model
@@ -5223,6 +5243,14 @@ async function runGroupMemberTurn(
     .filter((b): b is NonNullable<typeof b> => Boolean(b))
     .map((b) => `@${b.name}${b.title ? ` (${b.title})` : ""}`)
     .join(", ");
+  // The roster above is who an @mention can reach; the section's other bots
+  // are who it cannot. The 1:1 prompt has carried a peer roster since #774,
+  // and a room turn had nothing — the only advice it gave ("mention them
+  // like @Name") sends the model after a teammate who will never see it.
+  // Same reachability rule as list_bots, minus the room's own members.
+  const outsideRoom = integrations.agents
+    ? reachablePeers(store.bots, bot).filter((peer) => !readyGroup.memberIds.includes(peer.id))
+    : [];
   const system = [
     `You are ${bot.name}, a bot in the room "${readyGroup.name}" in OpenMausBot.`,
     bot.title && `Role: ${bot.title}.`,
@@ -5230,6 +5258,7 @@ async function runGroupMemberTurn(
     `Room members: ${roster}, and ${userName} (the human).`,
     readyGroup.bulletin.trim() && `Room bulletin (shared instructions for everyone):\n${readyGroup.bulletin.trim()}`,
     `Reply as yourself, briefly and conversationally. To bring a teammate in, mention them like @Name — they'll see the conversation and respond.`,
+    outsideRoom.length > 0 && roomPeerRosterSystemPrompt(outsideRoom),
     integrations.agents &&
       "If a supported API key is missing, use request_credential to create a secure credential request. A freshly QR-paired mobile app or the desktop app can show the secure entry card. Never claim it opened unless the request succeeded, and never ask the user to paste credentials into chat.",
     integrations.agents &&
@@ -5501,6 +5530,25 @@ async function runGroupMemberTurn(
     const members = group.memberIds
       .map((id) => store.bot(id))
       .filter((b): b is NonNullable<typeof b> => Boolean(b) && b!.id !== bot.id);
+    // A mention of a section peer who is NOT in the room reaches nobody:
+    // no turn, no error, just a name in the reply that looks like it did
+    // something. Say so in the room, where the person who can fix it — by
+    // adding them — is the one reading. Only reachable peers are checked,
+    // so the chip never names a bot this one could not contact anyway.
+    const missed = mentionedBots(
+      replyText,
+      reachablePeers(store.bots, bot).filter((peer) => !group.memberIds.includes(peer.id)),
+    );
+    for (const peer of missed) {
+      store.appendMessage(threadId, {
+        role: "bot",
+        kind: "activity",
+        tool: {
+          name: `${peer.name} isn't in this room, so that mention didn't reach them — add them to the room to bring them in.`,
+          ok: false,
+        },
+      });
+    }
     for (const next of roomResponders(replyText, members, { kind: "mentions" })) {
       if (isCancelled?.()) return false;
       if (spoken.has(next.id)) continue;
@@ -7443,26 +7491,36 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       // Nothing else ever tells a bot a room id, so this is the discovery
       // half of post_to_room: it lists exactly the rooms that tool would
-      // accept, resolved from the sender's own membership. Listing a room a
-      // post would be refused for would only teach the model to keep trying.
+      // accept, resolved from the sender's own membership. A room a post
+      // would be refused for gets no id — an id would only teach the model
+      // to keep trying — but it is still NAMED, with the refusal it would
+      // have met. Without that the bot can only say it is in no room at
+      // all, while the person is looking at it in that very room.
       if (method === "GET" && path === "/api/internal/rooms") {
         const from = internalSender;
         const fromThreadId = internalCapability.threadId;
         if (!connectorThread(from.id, fromThreadId)) {
           return json(res, 403, { error: "source conversation does not belong to sender" });
         }
-        const rooms = store.groups
-          .filter((group) => roomPostEligibility(from, group).ok)
-          .slice(0, 50)
-          .map((group) => ({
+        const rooms: Array<{ id: string; name: string; members: string[] }> = [];
+        const unpostable: Array<{ name: string; reason: string }> = [];
+        for (const group of store.groups) {
+          if (group.dm || !group.memberIds.includes(from.id)) continue;
+          const eligibility = roomPostEligibility(from, group);
+          if (!eligibility.ok) {
+            unpostable.push({ name: group.name, reason: eligibility.error });
+            continue;
+          }
+          rooms.push({
             id: group.id,
             name: group.name,
             members: group.memberIds
               .map((id) => store.bot(id))
               .filter((member): member is BotRecord => Boolean(member))
               .map((member) => member.name),
-          }));
-        return json(res, 200, { rooms });
+          });
+        }
+        return json(res, 200, { rooms: rooms.slice(0, 50), unpostable: unpostable.slice(0, 50) });
       }
       if (method === "GET" && path === "/api/internal/routines") {
         const from = internalSender;
@@ -7981,8 +8039,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             text: message,
             now: Date.now(),
           };
-          const spokeAt = lastHumanRoomMessageAt(group);
-          if (spokeAt !== undefined) attempt.lastHumanAt = spokeAt;
+          // The person attending is whoever wrote last: in the room, or —
+          // when the post was asked for in the sender's own conversation —
+          // there. A room-sourced post has no such person; its room is the
+          // conversation, and what a person wrote in it is already counted.
+          const askedAt = owner.group ? undefined : personAskAt.get(fromThreadId);
+          const spokeAt = Math.max(lastHumanRoomMessageAt(group) ?? -Infinity, askedAt ?? -Infinity);
+          if (Number.isFinite(spokeAt)) attempt.lastHumanAt = spokeAt;
           return decideRoomPost(roomPostBudgets.get(group.id) ?? emptyRoomPostBudget(), attempt);
         };
         // A refusal is stored, an allowance is not: the budget a refusal
@@ -8042,10 +8105,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         store.patchGroup(room.id, { unread: true });
         // The same visibility contract the peer tools keep: whatever a bot
         // does elsewhere shows up in the conversation it is actually in.
+        // The chip is settled — the post has already landed — and carries
+        // the same link a "Messaged @X" chip does, which is what makes it a
+        // receipt rather than a log line: linked chips stay visible with
+        // tool calls off, and open the room they name.
         const chip: Omit<Message, "id" | "at"> = {
           role: "bot",
           kind: "activity",
-          tool: { name: `Posted in ${room.name}` },
+          tool: { name: `Posted in ${room.name}`, ok: true },
+          comm: { groupId: room.id, withBotId: poster.id, withName: room.name, withColor: poster.color },
         };
         if (owner.group) chip.from = { botId: poster.id, name: poster.name, color: poster.color };
         store.appendMessage(fromThreadId, chip);
