@@ -100,8 +100,18 @@ export function isSameOrigin(req: IncomingMessage): boolean {
 export function requestSource(req: IncomingMessage): string {
   const peer = req.socket?.remoteAddress || "unknown";
   const viaLocalProxy = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
-  const forwarded = viaLocalProxy ? headerValue(req.headers["x-forwarded-for"])?.split(",")[0]?.trim() : undefined;
-  return forwarded || peer;
+  // The LAST hop is the one the adjacent (trusted, same-machine) proxy wrote;
+  // earlier hops are whatever the client or an outer proxy put there.
+  const hops = viaLocalProxy ? (headerValue(req.headers["x-forwarded-for"]) ?? "").split(",").map((h) => h.trim()).filter(Boolean) : [];
+  const forwarded = hops.length ? hops[hops.length - 1] : undefined;
+  return sanitizeSource(forwarded || peer);
+}
+
+/** Only what an address can contain, bounded, so a hostile header cannot
+ * carry control characters into logs or grow the lockout map without limit. */
+export function sanitizeSource(value: string): string {
+  const clean = value.replace(/[^\w.:%[\]-]/g, "");
+  return (clean || "unknown").slice(0, 64);
 }
 
 /** "Safari on iPhone" beats "Unnamed device" in the sessions list. */
@@ -154,25 +164,102 @@ export function clearSessionCookie(name: string): string {
   return `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
 }
 
-/** Route → scope. Anything not listed needs `client`, which every session has;
- * the listed routes change who can get in or what the server runs, so they
- * need `admin`. Loopback holds both scopes, while packaged loopback mutations
- * separately prove the private desktop capability below. Keep this table next
- * to the routes it names when adding one. */
-const ADMIN_ROUTES: ReadonlyArray<{ methods: readonly string[] | null; path: RegExp }> = [
-  { methods: null, path: /^\/api\/auth\/pairing(\/|$)/ },
-  { methods: null, path: /^\/api\/auth\/sessions(\/|$)/ },
-  { methods: ["PUT", "PATCH", "DELETE"], path: /^\/api\/config$/ },
-  { methods: ["POST", "PUT", "PATCH", "DELETE"], path: /^\/api\/(instances|engines|mcp-servers|mcp\/servers|custom-engines)(\/|$)/ },
-  { methods: ["POST"], path: /^\/api\/computers\/(boxes|vps)(\/|$)/ },
+/** What a `client` session may do: chat, rooms, approvals, attachments,
+ * routines, its own session, and reads that carry no secrets. Everything
+ * else needs `admin`: default deny, so a new route is admin-only until it is
+ * deliberately listed here. Two client-allowed PATCH routes carry a body
+ * filter in the handler (bot and room edits: display fields only). Loopback
+ * holds both scopes. */
+export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: RegExp }> = [
+  // own session
+  { methods: ["GET"], path: /^\/api\/auth\/session$/ },
+  { methods: ["POST"], path: /^\/api\/auth\/stream-ticket$/ },
+  { methods: ["POST"], path: /^\/api\/auth\/logout$/ },
+  // liveness, identity, the stream
+  { methods: ["GET"], path: /^\/api\/health$/ },
+  { methods: ["GET"], path: /^\/api\/edition$/ },
+  { methods: ["GET"], path: /^\/api\/brand$/ },
+  { methods: ["GET"], path: /^\/api\/events$/ },
+  // reads: fleet, transcripts, search (no secrets in any of these)
+  { methods: ["GET"], path: /^\/api\/bots$/ },
+  { methods: ["GET"], path: /^\/api\/team-map$/ },
+  { methods: ["GET"], path: /^\/api\/search$/ },
+  { methods: ["GET"], path: /^\/api\/threads\/[\w-]+\/messages$/ },
+  { methods: ["GET"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/image$/ },
+  { methods: ["GET"], path: /^\/api\/threads\/[\w-]+\/export$/ },
+  { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/file$/ },
+  // chat, one to one
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/messages$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/messages\/[\w-]+\/edit$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/active-branch$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/read$/ },
+  { methods: ["DELETE"], path: /^\/api\/bots\/[\w-]+\/queue\/[\w-]+$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/tasks$/ },
+  { methods: ["POST", "PATCH", "DELETE"], path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
+  { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+\/profile$/ },
+  { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+$/ }, // display fields only: see clientBotPatchViolation
+  // approvals and cards
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/respond$/ },
+  { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/respond$/ },
+  { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+\/cards\/[\w-]+$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/secret-cards\/[\w-]+\/(?:resume|dismiss)$/ },
+  { methods: ["GET"], path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/status$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/connector-cards\/[\w-]+\/(?:resume|dismiss)$/ },
+  { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/always-allow$/ }, // must match a pending card
+  // rooms
+  { methods: ["POST"], path: /^\/api\/groups$/ },
+  { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/messages$/ },
+  { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/interrupt$/ },
+  { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/read$/ },
+  { methods: ["DELETE"], path: /^\/api\/groups\/[\w-]+\/queue\/[\w-]+$/ },
+  { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/tasks$/ },
+  { methods: ["POST", "PATCH", "DELETE"], path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+$/ },
+  { methods: ["PATCH"], path: /^\/api\/groups\/[\w-]+$/ }, // display fields only: see clientGroupPatchViolation
+  { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/reactions$/ },
+  // attachments
+  { methods: ["POST"], path: /^\/api\/attachments$/ },
+  { methods: ["GET"], path: /^\/api\/attachments\/[\w.-]+$/ },
+  { methods: ["POST"], path: /^\/api\/files$/ },
+  // voice: labels and audio, never the key
+  { methods: ["GET"], path: /^\/api\/tts\/voices$/ },
+  { methods: ["POST"], path: /^\/api\/tts\/prepare$/ },
+  { methods: ["POST"], path: /^\/api\/tts\/speak$/ },
+  // routines: a scheduled message; the input carries no cwd or permission field
+  { methods: ["GET"], path: /^\/api\/routines$/ },
+  { methods: ["POST"], path: /^\/api\/routines$/ },
+  { methods: ["PATCH", "DELETE"], path: /^\/api\/routines\/[\w-]+$/ },
+  { methods: ["POST"], path: /^\/api\/routines\/[\w-]+\/run$/ },
+  { methods: ["POST"], path: /^\/api\/routine-runs\/[\w-]+\/(?:cancel|seen)$/ },
+  // webhook list is secret-free; creating or rotating one is not
+  { methods: ["GET"], path: /^\/api\/webhooks$/ },
+  // configured-or-not booleans; the handler strips the few identifying fields for clients
+  { methods: ["GET"], path: /^\/api\/config$/ },
 ];
 
 export function requiredScope(method: string, path: string): Scope {
   const upper = method.toUpperCase();
-  for (const rule of ADMIN_ROUTES) {
-    if (rule.path.test(path) && (rule.methods === null || rule.methods.includes(upper))) return "admin";
+  for (const rule of CLIENT_ALLOW) {
+    if (rule.path.test(path) && rule.methods.includes(upper)) return "client";
   }
-  return "client";
+  return "admin";
+}
+
+/** Fields a client session may change on a bot: how it looks in the list,
+ * never what it may do. Returns the first offending field, or null. */
+const CLIENT_BOT_PATCH_FIELDS = new Set(["unread", "pinned", "pinnedMessageId", "color", "mascotExpression", "mascotBody"]);
+export function clientBotPatchViolation(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "body";
+  for (const key of Object.keys(body)) if (!CLIENT_BOT_PATCH_FIELDS.has(key)) return key;
+  return null;
+}
+
+/** Same for a room: name and reading state, never its folder or who answers. */
+const CLIENT_GROUP_PATCH_FIELDS = new Set(["name", "bulletin", "unread", "pinnedMessageId", "section"]);
+export function clientGroupPatchViolation(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "body";
+  for (const key of Object.keys(body)) if (!CLIENT_GROUP_PATCH_FIELDS.has(key)) return key;
+  return null;
 }
 
 export interface ResolveOptions {
