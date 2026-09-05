@@ -4764,6 +4764,7 @@ const agentRoutine = (
     name: safeName,
     instructions: safeInstructions.slice(0, 2_000),
     instructionsTruncated: safeInstructions.length > 2_000,
+    continuity: routine.continuity === true,
     enabled: routine.enabled,
     runOn: routine.runOn,
     durationMinutes: routine.durationMinutes,
