@@ -3,6 +3,7 @@ import { z } from "zod";
 import { schemaIssue, type JsonValue } from "./schema.ts";
 import type { MausColor } from "./store.ts";
 import { botMascotBody, type MascotBodyId } from "../shared/mascot-bodies.ts";
+import { takeImportName } from "../shared/import-name.ts";
 
 export const TEAM_MANIFEST_FORMAT = "openmaus.team" as const;
 export const TEAM_MANIFEST_VERSION = 2 as const;
@@ -209,8 +210,6 @@ export interface ImportedMemberProfile {
   mascotBody?: MascotBodyId;
 }
 
-const MAX_MEMBER_NAME = 100;
-
 /** Everything an untrusted manifest may seed into a brand-new bot — and
  * nothing else.
  *
@@ -222,7 +221,7 @@ const MAX_MEMBER_NAME = 100;
  *
  * 1. Allowlist, not blocklist. The returned object is built field by field
  *    from the parsed member, so every privilege-bearing BotRecord field —
- *    autoApprove, autoReview, alwaysAllow, chiefOfStaff, approvePeerComms, composio,
+ *    approvalMode, autoApprove, autoReview, alwaysAllow, chiefOfStaff, approvePeerComms, composio,
  *    computer, cloudBackend, cwd — is structurally absent, whatever the
  *    file claimed. parseTeamManifest already drops unknown member keys;
  *    this keeps the guarantee even if the schema grows a field later,
@@ -246,13 +245,7 @@ export function importedMemberProfile(
   member: TeamManifestMember,
   takenNames: Set<string>,
 ): ImportedMemberProfile {
-  const base = member.name.trim();
-  let name = base;
-  for (let n = 2; takenNames.has(name.toLowerCase()); n++) {
-    const tag = ` ${n}`;
-    name = `${base.slice(0, MAX_MEMBER_NAME - tag.length).trimEnd()}${tag}`;
-  }
-  takenNames.add(name.toLowerCase());
+  const name = takeImportName(member.name, takenNames);
   const profile: ImportedMemberProfile = {
     name,
     title: member.title,

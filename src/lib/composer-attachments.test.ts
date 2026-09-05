@@ -6,6 +6,8 @@ import {
   appendPastedText,
   attachmentBasename,
   attachmentImageUrl,
+  clipboardHasImages,
+  clipboardImageFiles,
   composeMessage,
   documentMime,
   fileAttachment,
@@ -354,6 +356,106 @@ describe("isImageFile", () => {
     expect(isImageFile({ type: "image/webp", size: 10 })).toBe(true);
     expect(isImageFile({ type: "image/svg+xml", size: 10 })).toBe(false);
     expect(isImageFile({ type: "text/plain", size: 10 })).toBe(false);
+  });
+});
+
+/**
+ * Helper to construct a mock clipboard item for DataTransferItemList testing.
+ *
+ * @param kind - Item kind (e.g. 'file' or 'string').
+ * @param type - Item MIME type.
+ * @param file - File instance returned by getAsFile, if any.
+ * @returns Mock clipboard item object.
+ */
+function mockClipboardItem(kind: string, type: string, file: File | null = null) {
+  /**
+   * Returns the mock file or null.
+   *
+   * @returns Mock file or null.
+   */
+  function getAsFile() {
+    return file;
+  }
+  return { kind, type, getAsFile };
+}
+
+describe("clipboardImageFiles", () => {
+  it("returns empty array for empty or null clipboard", () => {
+    expect(clipboardImageFiles(null)).toEqual([]);
+    expect(clipboardImageFiles(undefined)).toEqual([]);
+    expect(clipboardImageFiles({ files: [], items: [] })).toEqual([]);
+  });
+
+  it("extracts images from items when available", () => {
+    const pngFile = new File([new Uint8Array([1])], "test.png", { type: "image/png" });
+    const clipboardData = {
+      items: [
+        mockClipboardItem("string", "text/plain"),
+        mockClipboardItem("file", "image/png", pngFile),
+      ],
+      files: [],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([pngFile]);
+  });
+
+  it("falls back to files when items has no image files", () => {
+    const jpegFile = new File([new Uint8Array([2])], "test.jpg", { type: "image/jpeg" });
+    const clipboardData = {
+      items: [
+        mockClipboardItem("string", "text/plain"),
+      ],
+      files: [jpegFile],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([jpegFile]);
+  });
+
+  it("ignores non-image files in fallback", () => {
+    const txtFile = new File([new Uint8Array([3])], "test.txt", { type: "text/plain" });
+    const clipboardData = {
+      items: [],
+      files: [txtFile],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([]);
+  });
+
+  it("does not duplicate images exposed through both clipboard collections", () => {
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", file.type, file)], files: [file] })).toEqual([file]);
+  });
+
+  it("falls back when an image item cannot produce a file", () => {
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", "image/png", null)], files: [file] })).toEqual([file]);
+  });
+
+  it("does not accept unsupported image formats or string items", () => {
+    const svg = new File(["<svg/>"], "shot.svg", { type: "image/svg+xml" });
+    const png = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", svg.type, svg), mockClipboardItem("string", png.type, png)], files: [svg] })).toEqual([]);
+  });
+});
+
+describe("clipboardHasImages", () => {
+  it("detects images in items", () => {
+    expect(clipboardHasImages({
+      items: [{ kind: "file", type: "image/png" }],
+      files: [],
+    })).toBe(true);
+  });
+
+  it("detects images in files", () => {
+    expect(clipboardHasImages({
+      items: [],
+      files: [{ type: "image/jpeg", size: 10 }],
+    })).toBe(true);
+  });
+
+  it("returns false when no images exist", () => {
+    expect(clipboardHasImages(null)).toBe(false);
+    expect(clipboardHasImages({
+      items: [{ kind: "string", type: "text/plain" }],
+      files: [{ type: "text/plain", size: 10 }],
+    })).toBe(false);
   });
 });
 

@@ -142,11 +142,78 @@ export function documentMime(file: Pick<File, "name" | "type">): string | null {
   return DOCUMENT_MIMES[extension] ?? null;
 }
 
-export function isImageFile(file: { type: string; size: number }): boolean {
+/**
+ * Checks if a given file or descriptor has a supported image MIME type.
+ *
+ * @param file - Object with a MIME `type` and optional `size`.
+ * @returns `true` if the file is a supported image format (PNG, JPEG, GIF, WebP).
+ */
+export function isImageFile(file: { type: string; size?: number }): boolean {
   return (
     file.type.startsWith("image/") &&
     ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type.split(";")[0]!.trim().toLowerCase())
   );
+}
+
+/**
+ * Extracts valid image files from clipboard data, checking items first because
+ * Chromium on macOS exposes screenshots and copied image bitmaps via items
+ * while clipboardData.files may remain empty.
+ *
+ * @param clipboardData - The clipboard DataTransfer object or mock data.
+ * @returns Array of valid image File objects found in the clipboard.
+ */
+export function clipboardImageFiles(
+  clipboardData: {
+    files?: Iterable<File> | null;
+    items?: Iterable<{ kind: string; type: string; getAsFile(): File | null }> | null;
+  } | null | undefined,
+): File[] {
+  if (!clipboardData) return [];
+  if (clipboardData.items) {
+    const fromItems: File[] = [];
+    for (const item of clipboardData.items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file && isImageFile(file)) {
+          fromItems.push(file);
+        }
+      }
+    }
+    if (fromItems.length > 0) return fromItems;
+  }
+  if (clipboardData.files) {
+    return Array.from(clipboardData.files).filter(isImageFile);
+  }
+  return [];
+}
+
+/**
+ * Detects if the clipboard data contains any image items or files.
+ *
+ * @param clipboardData - The clipboard DataTransfer object or mock data.
+ * @returns `true` if any image file or item is present in the clipboard.
+ */
+export function clipboardHasImages(
+  clipboardData: {
+    files?: Iterable<{ type: string; size?: number }> | null;
+    items?: Iterable<{ kind: string; type: string }> | null;
+  } | null | undefined,
+): boolean {
+  if (!clipboardData) return false;
+  if (clipboardData.items) {
+    for (const item of clipboardData.items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        return true;
+      }
+    }
+  }
+  if (clipboardData.files) {
+    for (const file of clipboardData.files) {
+      if (isImageFile(file)) return true;
+    }
+  }
+  return false;
 }
 
 const IMAGE_EXTENSION_BY_MIME: Readonly<Record<string, string>> = {

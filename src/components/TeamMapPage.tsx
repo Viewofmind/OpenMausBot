@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowRight, BookOpen, Crown, Loader2, Network, Radio, RefreshCw, Save, X } from "lucide-react";
+import { ArrowRight, BookOpen, Crown, Loader2, Network, RefreshCw, Save, X } from "lucide-react";
 
 import { MausAvatar } from "./Avatar";
 import { api, formatTime, useStore, type Bot } from "@/state/store";
@@ -338,9 +338,6 @@ export function TeamMapPage() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const working = bots.filter((bot) => bot.busy || bot.activity === "working").length;
-  const waiting = bots.filter((bot) => bot.activity === "waiting-on-you").length;
-
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-app text-ink">
       <header className="flex shrink-0 items-center justify-between border-b border-hairline/40 px-7 py-5 max-md:pl-12">
@@ -348,9 +345,6 @@ export function TeamMapPage() {
           <div className="flex items-center gap-2.5">
             <Network size={20} className="text-accent" />
             <h1 className="text-[18px] font-semibold">Team map</h1>
-            <span className="flex items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 text-[10.5px] font-medium text-success">
-              <Radio size={10} /> Live
-            </span>
           </div>
           <p className="mt-1 text-[12.5px] text-ink-secondary">
             See every section, who is working, and where tasks are moving.
@@ -368,19 +362,6 @@ export function TeamMapPage() {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-7 py-6">
-        <div className="mb-5 grid max-w-[620px] grid-cols-3 gap-2">
-          {[
-            [bots.length, "Bots"],
-            [working, "Working"],
-            [waiting, "Waiting on you"],
-          ].map(([value, label]) => (
-            <div key={label} className="rounded-xl border border-hairline/40 bg-panel px-3.5 py-3">
-              <div className="text-[18px] font-semibold tabular-nums text-ink">{value}</div>
-              <div className="text-[11.5px] text-ink-secondary">{label}</div>
-            </div>
-          ))}
-        </div>
-
         {error && <div className="mb-4 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
 
         <div className="space-y-4">
@@ -420,9 +401,8 @@ export function TeamMapPage() {
                   )}
 
                   {hasHierarchy && (
-                    <div className="flex h-4 items-stretch pl-5 @min-[700px]/teammap:h-auto @min-[700px]/teammap:items-center @min-[700px]/teammap:pl-0" aria-hidden>
-                      <span className="h-full w-px bg-hairline @min-[700px]/teammap:h-px @min-[700px]/teammap:w-full" />
-                      <ArrowRight size={14} className="hidden shrink-0 -translate-x-0.5 text-ink-secondary/60 @min-[700px]/teammap:block" />
+                    <div className="flex h-8 items-center justify-center text-ink-secondary/50 @min-[700px]/teammap:h-auto @min-[700px]/teammap:pt-5" aria-hidden="true">
+                      <ArrowRight size={32} strokeWidth={1.5} className="shrink-0 rotate-90 @min-[700px]/teammap:rotate-0" />
                     </div>
                   )}
 
@@ -442,22 +422,19 @@ export function TeamMapPage() {
           })}
         </div>
 
-        <section className="mt-6 max-w-[900px]">
-          <div className="mb-2.5 flex items-center justify-between">
-            <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">Agent handoffs</h2>
-            <span className="text-[11px] text-ink-secondary">Running and queued first</span>
-          </div>
-          <div className="space-y-2">
-            {edges.slice(0, 12).map((edge) => (
-              <EdgeRow key={`${edge.sourceBotId}:${edge.targetBotId}`} edge={edge} bots={bots} />
-            ))}
-            {edges.length === 0 && (
-              <div className="rounded-xl border border-dashed border-hairline bg-panel px-4 py-6 text-center text-[12.5px] text-ink-secondary">
-                No bot-to-bot handoffs yet. Ask a Chief of Staff to delegate a task and it will appear here live.
-              </div>
-            )}
-          </div>
-        </section>
+        {edges.length > 0 && (
+          <section className="mt-6 max-w-[900px]">
+            <div className="mb-2.5 flex items-center justify-between">
+              <h2 className="text-[12px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">Agent handoffs</h2>
+              <span className="text-[11px] text-ink-secondary">Running and queued first</span>
+            </div>
+            <div className="space-y-2">
+              {edges.slice(0, 12).map((edge) => (
+                <EdgeRow key={`${edge.sourceBotId}:${edge.targetBotId}`} edge={edge} bots={bots} />
+              ))}
+            </div>
+          </section>
+        )}
       </div>
       {contextEditor && (
         <SectionContextDialog
