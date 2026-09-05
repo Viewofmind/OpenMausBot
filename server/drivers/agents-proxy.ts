@@ -226,6 +226,10 @@ const ROUTINE_FIELDS_SCHEMA = {
     type: "boolean",
     description: "Only for updates: set true to remove an existing safety limit. Do not combine with timeout_minutes.",
   },
+  continuity: {
+    type: "boolean",
+    description: "Opt in to using the latest completed run's bounded report as historical context. Defaults to false; set false in an update to start fresh again. Shown on the confirmation card.",
+  },
 } as const;
 
 const TOOLS = [
@@ -511,6 +515,7 @@ function routineFields(args: Json): { fields: Json; error?: string } {
   if (typeof args.run_on === "string") fields.runOn = args.run_on;
   if (args.clear_timeout === true) fields.timeoutMinutes = null;
   else if (typeof args.timeout_minutes === "number") fields.timeoutMinutes = args.timeout_minutes;
+  if (typeof args.continuity === "boolean") fields.continuity = args.continuity;
   return { fields };
 }
 

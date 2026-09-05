@@ -319,6 +319,7 @@ describe("agents-proxy MCP surface", () => {
     ]);
     expect(create.inputSchema.properties).not.toHaveProperty("duration_minutes");
     expect(create.inputSchema.properties.timeout_minutes).toMatchObject({ minimum: 5, maximum: 240 });
+    expect(create.inputSchema.properties.continuity).toMatchObject({ type: "boolean" });
     expect(create.inputSchema.properties.clear_timeout.type).toBe("boolean");
     expect(schedule.properties.every_minutes).toMatchObject({ minimum: 5, maximum: 1_440 });
     expect(create.description).toContain("does NOT enable");
@@ -677,6 +678,7 @@ describe("agents-proxy MCP surface", () => {
       run_on: "maus",
       duration_minutes: 45,
       timeout_minutes: 15,
+      continuity: true,
     });
     expect(lastRoutineRequestBody).toEqual({
       fromBotId: "bot-asker",
@@ -688,6 +690,7 @@ describe("agents-proxy MCP surface", () => {
         schedule: { type: "weekly", time: "09:00", weekdays: ["monday", "friday"] },
         runOn: "maus",
         timeoutMinutes: 15,
+        continuity: true,
       },
     });
     expect(res.result.content[0].text).toContain("confirmation card");
@@ -744,14 +747,14 @@ describe("agents-proxy MCP surface", () => {
     const update = await callTool("propose_routine_action", {
       routine_id: "routine-1",
       action: "update",
-      changes: { name: "Weekday brief", clear_timeout: true },
+      changes: { name: "Weekday brief", clear_timeout: true, continuity: false },
     });
     expect(lastRoutineRequestBody).toEqual({
       fromBotId: "bot-asker",
       fromThreadId: "thread-asker-routine",
       action: "update",
       routineId: "routine-1",
-      changes: { name: "Weekday brief", timeoutMinutes: null },
+      changes: { name: "Weekday brief", timeoutMinutes: null, continuity: false },
     });
     expect(update.result.content[0].text).toContain("has not been applied");
 
