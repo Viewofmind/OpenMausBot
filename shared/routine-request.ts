@@ -24,6 +24,8 @@ export interface RoutineRequestDefinition {
   durationMinutes: number;
   /** Optional safety cap for active work. Missing means no timeout. */
   timeoutMinutes?: number;
+  /** Carry the previous run's report into the next run. */
+  continuity?: boolean;
 }
 
 export type RoutineRequestChanges =

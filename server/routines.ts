@@ -59,6 +59,10 @@ export interface Routine {
   /** Optional safety cap for active work. Missing means no timeout. */
   timeoutMinutes?: number;
   attachments?: RoutineContextAttachment[];
+  /** Carry the previous run's report into the next run's prompt, so recurring
+   * work builds on itself instead of restarting cold. Optional so existing
+   * files migrate in place. */
+  continuity?: boolean;
   /** Conversation that created this routine in chat. Calendar/import-created
    * routines intentionally have no source, and older files migrate in place. */
   sourceThreadId?: string;
@@ -111,6 +115,13 @@ export interface RoutineRun {
   seenAt?: number;
 }
 
+/** The previous report handed to the next run of a continuity routine. */
+export interface RoutineContinuityCarry {
+  finishedAt: number;
+  output: string;
+  truncated: boolean;
+}
+
 export interface RoutineRequestReceipt {
   requestId: string;
   messageId: string;
@@ -151,6 +162,7 @@ export interface RoutineInput {
   /** `null` deliberately removes an existing safety cap. */
   timeoutMinutes?: number | null;
   attachments?: RoutineContextAttachment[];
+  continuity?: boolean;
 }
 
 interface RoutineFile {
@@ -343,8 +355,36 @@ function escapeAttachmentPath(value: string): string {
     .replaceAll("\n", "&#10;");
 }
 
-function composeExecutionPrompt(prompt: string, attachments: readonly RoutineContextAttachment[] | undefined): string {
+/** Mirrors the cap `run.output` is stored under, so a report written by this
+ * version always carries whole. It still bounds reports loaded from a file
+ * another version wrote, which is also why the carry is redacted again. */
+const CONTINUITY_CHARS = 2_000;
+
+/** The carried text is model-facing prose, not markup, so it is fenced by a tag
+ * rather than escaped. Only a literal closing tag needs neutralising. */
+function fenceCarriedReport(output: string): string {
+  return output.replaceAll("</previous-run>", "<\\/previous-run>");
+}
+
+function composeExecutionPrompt(
+  prompt: string,
+  attachments: readonly RoutineContextAttachment[] | undefined,
+  carry?: RoutineContinuityCarry | null,
+): string {
   const parts = [prompt];
+  if (carry) {
+    parts.push(
+      [
+        "This routine carries continuity. Below is the report you filed the last time it ran.",
+        "Build on it: say what has changed since, and do not repeat findings that still hold unchanged.",
+        `<previous-run finished="${escapeAttachmentPath(new Date(carry.finishedAt).toISOString())}"${
+          carry.truncated ? ' truncated="true"' : ""
+        }>`,
+        fenceCarriedReport(carry.output),
+        "</previous-run>",
+      ].join("\n"),
+    );
+  }
   for (const attachment of attachments ?? []) {
     const tag = attachment.kind === "image" ? "attached-image" : "attached-file";
     parts.push(
@@ -352,6 +392,10 @@ function composeExecutionPrompt(prompt: string, attachments: readonly RoutineCon
     );
   }
   return parts.filter(Boolean).join("\n\n");
+}
+
+function finishedOrder(run: RoutineRun): number {
+  return run.finishedAt ?? run.createdAt;
 }
 
 function cleanSchedule(schedule: RoutineSchedule): RoutineSchedule {
@@ -445,6 +489,10 @@ function sanitizeInput(input: RoutineInput): Omit<Routine, "id" | "createdAt" | 
   if (runOn === "cloud" && attachments.length > 0) {
     throw new Error("Attachments can only run on this computer until cloud file staging is available");
   }
+  const continuity = input.continuity === true;
+  if (continuity && target === "room-goal") {
+    throw new Error("Room goals do not carry continuity yet");
+  }
   return {
     name,
     prompt,
@@ -457,6 +505,7 @@ function sanitizeInput(input: RoutineInput): Omit<Routine, "id" | "createdAt" | 
     durationMinutes: Math.min(240, Math.max(5, Math.round(Number(input.durationMinutes) || 30))),
     ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
     attachments,
+    ...(continuity ? { continuity: true } : {}),
   };
 }
 
@@ -697,6 +746,7 @@ export class RoutineManager {
       durationMinutes: patch.durationMinutes ?? routine.durationMinutes,
       timeoutMinutes: Object.hasOwn(patch, "timeoutMinutes") ? patch.timeoutMinutes : routine.timeoutMinutes,
       attachments: patch.attachments ?? routine.attachments,
+      continuity: patch.continuity ?? routine.continuity,
     });
     if (this.targetState(clean) === "missing") throw new Error(this.missingTargetMessage(clean.target));
     const cancelledRuns: RoutineRun[] = [];
@@ -707,6 +757,9 @@ export class RoutineManager {
         // confirmation cards. Keep it monotonic even for two writes in one ms.
         updatedAt: Math.max(now, routine.updatedAt + 1),
       });
+      // `Object.assign` cannot remove a key, and a cleared flag is absent
+      // rather than false, so switching continuity off has to delete it.
+      if (!clean.continuity) delete routine.continuity;
       if (Object.hasOwn(patch, "timeoutMinutes") && patch.timeoutMinutes == null) {
         delete routine.timeoutMinutes;
       }
@@ -874,6 +927,32 @@ export class RoutineManager {
     this.emitRun(run);
     queueMicrotask(() => void this.tick());
     return cloneRun(run);
+  }
+
+  /** The most recent completed report for a continuity routine, or `null` when
+   * continuity is off, the routine is gone, or nothing has finished yet. The
+   * text is redacted on the way in: a report can quote anything the run saw,
+   * and continuity would otherwise carry it forward on every future run. */
+  private continuityCarry(run: RoutineRun): RoutineContinuityCarry | null {
+    const routine = this.routines.find((candidate) => candidate.id === run.routineId);
+    if (!routine?.continuity) return null;
+    let latest: RoutineRun | null = null;
+    for (const candidate of this.runs) {
+      if (candidate.routineId !== run.routineId) continue;
+      if (candidate.id === run.id) continue;
+      if (candidate.status !== "completed") continue;
+      if (!candidate.output?.trim()) continue;
+      if (!latest || finishedOrder(candidate) > finishedOrder(latest)) latest = candidate;
+    }
+    if (!latest) return null;
+    const redacted = redactSecretsInText(latest.output ?? "").trim();
+    if (!redacted) return null;
+    const truncated = redacted.length > CONTINUITY_CHARS;
+    return {
+      finishedAt: latest.finishedAt ?? latest.createdAt,
+      output: truncated ? `${redacted.slice(0, CONTINUITY_CHARS).trimEnd()}…` : redacted,
+      truncated,
+    };
   }
 
   activeWebhookRunCount(webhookId: string): number {
@@ -1076,7 +1155,7 @@ export class RoutineManager {
             await this.options.startTurn(
               run.botId,
               task.threadId,
-              composeExecutionPrompt(prompt, run.attachments),
+              composeExecutionPrompt(prompt, run.attachments, this.continuityCarry(run)),
               run.runOn ?? "maus",
               triggerSource,
               (message) => this.failThread(task.threadId, message),

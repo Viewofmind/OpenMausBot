@@ -131,6 +131,39 @@ describe("RoutineRequestService", () => {
     expect(JSON.stringify(card)).toContain("redacted");
   });
 
+  it("carries continuity from the proposal through the card to the created routine", async () => {
+    const { service, store, routines } = harness();
+
+    const plain = await service.propose({
+      botId: "bot-a",
+      threadId: "thread-plain",
+      proposal: createProposal(),
+    });
+    expect(plain.detail).toContain("Continuity: Each run starts fresh");
+
+    const proposed = await service.propose({
+      botId: "bot-a",
+      threadId: "thread-a",
+      proposal: createProposal({ continuity: true }),
+    });
+    expect(proposed.detail).toContain("Continuity: Carries the previous run's report into the next run");
+
+    const card = store.messagesFor("thread-a")[0]!.card!;
+    expect(card.routineRequest?.operation).toMatchObject({
+      action: "create",
+      routine: { continuity: true },
+    });
+
+    const result = service.resolve({
+      botId: "bot-a",
+      threadId: "thread-a",
+      requestId: proposed.requestId,
+      behavior: "allow",
+    });
+    expect(result.state).toBe("applied");
+    expect(routines.listRoutines().find((routine) => routine.name === "Morning brief")?.continuity).toBe(true);
+  });
+
   it("canonicalizes receipt fingerprints and binds them to the card's conversation", async () => {
     const { service, store } = harness();
     await service.propose({ botId: "bot-a", threadId: "thread-a", proposal: createProposal() });
