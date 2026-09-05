@@ -26,7 +26,7 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import { approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -67,7 +67,7 @@ import {
   generateAvatarImage,
   snapshotAvatarGenerationState,
 } from "./avatar-image.ts";
-import { parseBotProfilePatch } from "./bot-profile.ts";
+import { fitsOnOneLine, parseBotProfilePatch } from "./bot-profile.ts";
 import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as box from "./box.ts";
@@ -79,7 +79,7 @@ import {
 } from "./cloud-backend.ts";
 import * as composio from "./composio.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
-import { peerAllowed, peerRosterSystemPrompt, reachablePeers, roomPeerRosterSystemPrompt } from "./peer-roster.ts";
+import { peerAllowed, peerName, peerRosterSystemPrompt, reachablePeers, roomPeerRosterSystemPrompt, roomRosterLine } from "./peer-roster.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
 import {
   containerComputerAction,
@@ -1173,9 +1173,10 @@ const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) 
 /** Defense in depth for hand-edited/corrupt durable records: elevated
  * approval semantics require an implemented provider mapping. The trusted transition enforces
  * this too, but no provider dispatch or later permission callback relies on
- * persistence having been produced exclusively by that route. */
-const approvalModeForTurn = (bot: BotRecord): ApprovalMode => {
-  const mode = approvalModeFor(bot);
+ * persistence having been produced exclusively by that route. And a turn
+ * another bot started never runs as Full — see approvalModeForOrigin. */
+const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMode => {
+  const mode = approvalModeForOrigin(approvalModeFor(bot), { peerInitiated });
   if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
     return "ask";
   }
@@ -2820,7 +2821,9 @@ bus.subscribe((event: RuntimeEvent) => {
       const unattended = permission && asker && event.requestId ? isUnattended(asker.id) : false;
       const verdict = permission && asker && event.requestId
         ? autoVerdict({
-            approvalMode: approvalModeForTurn(asker),
+            // the same origin the dispatch used, so a peer-started turn's
+            // residual asks are judged as Approve for me here too
+            approvalMode: approvalModeForTurn(asker, isInternalTurn(event.threadId)),
             autoApprove: false,
             alwaysAllow: asker.alwaysAllow,
           }, event.tool, event.summary, {
@@ -3921,7 +3924,11 @@ async function startTurn(
   directTurnDispatchClaims.set(bot.id, { id: dispatchClaimId, threadId, phase: "setup" });
   beginInternalCapabilityGeneration(threadId, dispatchClaimId);
   store.setActivity(bot.id, "working");
-  store.patchBot(bot.id, { unread: false });
+  // The badge is "this bot answered you, and you have not looked yet". A
+  // person starting a turn has looked; a teammate's hop has not — the fold
+  // never re-marks an internal turn, so clearing here would silently spend
+  // a signal the person still owes a glance to.
+  if (commsDepth === 0) store.patchBot(bot.id, { unread: false });
   turnUsage.delete(threadId);
 
   void (async () => {
@@ -4270,7 +4277,7 @@ async function startTurn(
         threadId,
         text: turnText,
         images: turnImages,
-        approvalMode: approvalModeForTurn(liveBot ?? bot),
+        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0),
         model,
         effort,
         // a rewound thread never resumes the abandoned branch's session
@@ -4912,7 +4919,12 @@ function serializeRoomContext(
     .slice(-GROUP_CONTEXT_MESSAGES)
     .map((m) => {
       const rendered = textOverride?.messageId === m.id ? { ...m, text: textOverride.text } : m;
-      const speaker = m.role === "user" ? userName : (m.from?.name ?? "Bot");
+      // a bot's name is quoted on the speaker line, so it gets one line; a
+      // user line that came through the API says so, since the reader would
+      // otherwise take it for the person typing
+      const speaker = m.role === "user"
+        ? m.via === "api" ? `${userName} (sent through the local API, not typed)` : userName
+        : m.from ? peerName(m.from.name) : "Bot";
       const line = `${speaker}: ${transcriptText(rendered, messagesById, userName)}`;
       // A room reply is the room talking. A post_to_room message is another
       // bot's text carried in from somewhere else, so it says so — the
@@ -4942,7 +4954,7 @@ const ROOM_POST_MAX_CHARS = 4_000;
 // approval bus: peer-approval.ts only needs to push cards and broadcast
 // them — its pending map lives in the module so the two respond endpoints
 // can call resolvePeerComms without holding a reference back to here.
-const approvalBus: ApprovalBus = { store, broadcast };
+const approvalBus: ApprovalBus = { store, broadcast, notify };
 
 // Approvals live only in memory, so any peer card still open on disk is one
 // whose resolver died with the previous process. Left alone it can never be
@@ -5255,7 +5267,7 @@ async function runGroupMemberTurn(
   const roster = readyGroup.memberIds
     .map((id) => store.bot(id))
     .filter((b): b is NonNullable<typeof b> => Boolean(b))
-    .map((b) => `@${b.name}${b.title ? ` (${b.title})` : ""}`)
+    .map(roomRosterLine)
     .join(", ");
   // The roster above is who an @mention can reach; the section's other bots
   // are who it cannot. The 1:1 prompt has carried a peer roster since #774,
@@ -5918,6 +5930,9 @@ type StartGroupTurnOptions = {
   goalCoordinatorBotId?: string;
   /** Correlates a room goal card with its durable RoutineRun receipt. */
   goalRunId?: string;
+  /** The message came through the HTTP API with nothing to say a person
+   * sent it (see Message.via). */
+  via?: "api";
 };
 
 function startGroupTurn(
@@ -5961,6 +5976,7 @@ function startGroupTurn(
     sendId,
     channelMode,
     queueId,
+    via: options.via,
   });
   if (!group.dm) store.titleGroupTaskFromFirstMessage(group.id, text, threadId);
 
@@ -6106,14 +6122,14 @@ function drainQueuedChannelSends(): void {
       const group = store.group(groupId);
       return group ? groupIsWorking(group) : false;
     },
-    ({ groupId, threadId, text, replyToId, sendId, mode, id }) => {
+    ({ groupId, threadId, text, replyToId, sendId, mode, id, via }) => {
       const group = store.group(groupId);
       const ownsThread = group?.dm
         ? group.threadId === threadId
         : Boolean(group && store.groupTaskByThread(group.id, threadId));
       if (!group || !ownsThread) return;
       try {
-        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id);
+        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id, { via });
       } catch (error) {
         store.appendMessage(threadId, {
           role: "bot",
@@ -6214,14 +6230,17 @@ function connectorThread(botId: string, threadId: string) {
  * last, and a second copy of it could only ever disagree.
  *
  * Only a person puts a user-role message in a room: the composer, or a
- * calendar call they scheduled. No bot has that ingress — post_to_room
- * appends role "bot", which is the rule this whole surface turns on — so
- * a bot cannot re-arm the ceiling it just spent. */
+ * calendar call they scheduled. No bot tool has that ingress — post_to_room
+ * appends role "bot", which is the rule this whole surface turns on. The
+ * one door a bot's shell could reach on a headless server, the HTTP API
+ * with no session behind it, stamps what it lets in (Message.via), and a
+ * line so stamped does not count here — so a bot cannot re-arm the ceiling
+ * it just spent. */
 function lastHumanRoomMessageAt(group: GroupRecord): number | undefined {
   const messages = store.messagesFor(group.threadId);
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
-    if (message.role === "user" && message.kind === "text") return message.at;
+    if (message.role === "user" && message.kind === "text" && !message.via) return message.at;
   }
   return undefined;
 }
@@ -7847,7 +7866,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           currentFrom = freshFrom;
           currentTarget = freshTarget;
         }
-        const channel = getOrCreateChannel(store, currentFrom, currentTarget);
+        // An ask made from inside a room is mirrored into that room — the
+        // conversation the person is actually reading — the way delegate_bot
+        // already does. The pair channel is for asks made from a bot's own
+        // thread; sending a room's ask there put the whole exchange behind
+        // an unbadged "A ⇄ B" entry nobody had a reason to open.
+        const channel = getOrCreateChannel(
+          store,
+          currentFrom,
+          currentTarget,
+          connectorThread(currentFrom.id, fromThreadId)?.group,
+        );
         mirrorExchange(commsBus, currentFrom, currentTarget, message, channel, fromThreadId);
         const prefixed = withPeerProvenance(message, {
           botName: currentFrom.name,
@@ -8157,6 +8186,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (name.length > 80) return json(res, 400, { error: "name must be at most 80 characters" });
         if (role.length > 120) return json(res, 400, { error: "role must be at most 120 characters" });
+        // the same door the profile endpoints keep: both fields are quoted
+        // into every other room member's system prompt, one line each
+        if (!fitsOnOneLine(name)) return json(res, 400, { error: "name must fit on one line" });
+        if (!fitsOnOneLine(role)) return json(res, 400, { error: "role must fit on one line" });
         if (instructions.length > 1_000) {
           return json(res, 400, { error: "instructions must be at most 1000 characters" });
         }
@@ -8924,7 +8957,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const userName = cfg.profile?.name?.trim() || "User";
       const lines: string[] = [`# ${title}`, ""];
       for (const msg of messages) {
-        const who = msg.role === "user" ? userName : (msg.from?.name ?? bot?.name ?? "Bot");
+        const who = msg.role === "user"
+          ? msg.via === "api" ? `${userName} (via the local API)` : userName
+          : (msg.from?.name ?? bot?.name ?? "Bot");
         if (msg.kind === "text" && msg.text) lines.push(`**${who}:**`, "", msg.text, "");
         else if (msg.kind === "activity" && msg.tool) lines.push(`> ${msg.tool.name}`, "");
         else if (msg.kind === "screen") lines.push("> [screen capture]", "");
@@ -9593,6 +9628,20 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const sendId = parseSendId(body.sendId);
       const replyTo = resolveReplyTarget(threadId, body.replyToId);
+      // Who is this "user"? On a headless server loopback is the owner by
+      // design, and a bot's shell is a loopback caller too. A request with
+      // no paired session and no browser origin cannot be told from a
+      // script, so its message is stamped rather than trusted as typed —
+      // the room's readers, its posting budget and its transcript all look
+      // at that stamp — and the send is logged where the operator can see
+      // it. The desktop app never gets here: its owner capability is
+      // checked before this handler runs.
+      const browserOrigin = typeof req.headers.origin === "string" && req.headers.origin.trim() !== "";
+      const via: "api" | undefined =
+        auth.kind === "loopback" && !DESKTOP_MANAGED && !browserOrigin ? "api" : undefined;
+      if (via) {
+        console.warn(`room message from ${requestSource(req)} through the local API (no session, no browser origin) into "${group.name}"`);
+      }
       const receipt = await sendSequencer.run(
         sendId ? `group:${group.id}:${threadId}:${sendId}` : undefined,
         sendFingerprint(text, replyTo?.id, channelMode),
@@ -9629,10 +9678,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               replyToId: replyTo?.id,
               sendId,
               mode: channelMode,
+              via,
             });
             return { ok: true as const, queued: true as const, queueId: queued.id, threadId };
           }
-          const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode);
+          const message = startGroupTurn(current.id, text, replyTo, sendId, channelMode, undefined, { via });
           return { ok: true as const, threadId, message };
         },
       );
@@ -10181,6 +10231,43 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         patch.alwaysAllow = [...new Set(body.alwaysAllow as string[])].slice(0, 200);
       }
+      // What "the proof of a human" above actually rests on. In the packaged
+      // desktop it is real: every mutation here already carried the owner
+      // capability a tool call cannot forge. Outside it — `pnpm dev`, the
+      // CLI, the Docker stack — loopback is the owner by design, so the
+      // acknowledgement flag and the settings that loosen a bot's leash
+      // (a wider peer list, the peer-approval gate switched off, a section
+      // move that changes who is in reach, a standing always-allow grant)
+      // are one curl away from the bot they constrain. What such a request
+      // does NOT have is a paired session or a browser origin; and the one
+      // moment a bot's shell can send it is while a turn is running. So an
+      // originless, session-less loopback caller may loosen a bot only
+      // while every bot is idle — and is logged when it does — while the
+      // served UI (a browser, with its origin) and a paired device keep
+      // working mid-turn as before. A bar, not a wall: the wall is the
+      // desktop capability or a paired session, which is what the refusal
+      // points at.
+      const loosened: string[] = [];
+      if (body.peers !== undefined && Array.isArray(existingBot?.peers)) {
+        const nextPeers = patch.peers;
+        if (nextPeers === undefined || (Array.isArray(nextPeers) && nextPeers.some((peerId) => !existingBot.peers!.includes(peerId)))) {
+          loosened.push("peers");
+        }
+      }
+      if (body.approvePeerComms === false && existingBot?.approvePeerComms === true) loosened.push("approvePeerComms");
+      if (section !== undefined && sectionKey(existingBot?.section) !== sectionKey(section)) loosened.push("section");
+      if (Array.isArray(patch.alwaysAllow) && patch.alwaysAllow.some((key) => !(existingBot?.alwaysAllow ?? []).includes(key))) {
+        loosened.push("alwaysAllow");
+      }
+      const browserOrigin = typeof req.headers.origin === "string" && req.headers.origin.trim() !== "";
+      if (loosened.length && auth.kind === "loopback" && !DESKTOP_MANAGED && !browserOrigin) {
+        if (store.bots.some((candidate) => candidate.busy)) {
+          return json(res, 409, {
+            error: "A bot is working right now, so this change has to come from the desktop app or a paired device. Try again once every bot is idle.",
+          });
+        }
+        console.warn(`bot ${m[1]}: ${loosened.join(", ")} loosened by ${requestSource(req)} through the local API with no paired session`);
+      }
       if (existingBot?.computer === "local" && computerSpecified && requestedComputer !== "local") {
         const routineThread = routines!.activeBotRunForBot(existingBot.id)?.threadId;
         const groupThread = activeGroupTurnForBot(existingBot.id)?.threadId;
@@ -10720,7 +10807,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                   { status: 409 },
                 );
               }
-              clearUnattended(current.id);
+              // A person steering a webhook turn is present, and auto mode may
+              // follow them again. But this route is also reachable from the
+              // bot's own shell on a headless server (loopback is the owner
+              // there), and "continue" typed by the turn itself must not be
+              // the thing that lifts the block written against it — so only
+              // a request that proves a person (a paired session, or the
+              // desktop's owner capability, which every mutation there has
+              // already shown) clears the mark.
+              if (auth.kind === "session" || DESKTOP_MANAGED) clearUnattended(current.id);
               const message = store.appendMessage(threadId, {
                 role: "user",
                 kind: "text",
