@@ -184,6 +184,7 @@ import {
 } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ProviderRegistry } from "./harness/registry.ts";
+import { selectDefaultModelSelection } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -324,10 +325,11 @@ import {
   requestOrigin,
   requestSource,
   resolveRequestAuth,
+  parseCookies,
   serializeSessionCookie,
   sessionCookieName,
 } from "./request-auth.ts";
-import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
+import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
@@ -953,17 +955,9 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
   });
 }
 
-// default selection for new bots: first available instance, claude preferred
+// New bots honor setup's saved choice; unconfigured workspaces prefer Claude.
 async function defaultSelection() {
-  const described = await registry.describe();
-  const available = described.filter((d) => d.snapshot.state === "available");
-  // Deliberately NO fallback to described[0]. Handing a bot an engine whose
-  // CLI isn't installed makes it look ready and then fail on send with a raw
-  // spawn ENOENT — the single worst first-run experience, and the one every
-  // user with no CLIs used to get. An empty selection is honest: the UI shows
-  // the setup path instead of a bot that cannot answer.
-  const pick = available.find((d) => d.driverKind === "claudeAgent") ?? available[0];
-  return { instanceId: pick?.instanceId ?? "", model: pick?.models.default ?? "" };
+  return selectDefaultModelSelection(await registry.describe(), cfg.defaultModelSelection);
 }
 
 function checkedModelSelection(
@@ -7558,7 +7552,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const environment = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED });
       if (wantsCookie) {
         const secure = requestOrigin(req)?.startsWith("https://") === true;
-        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: SESSION_TTL_MS / 1000 }));
+        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: cookieMaxAgeSeconds(result.session) }));
         return json(res, 200, { session: result.session, environment });
       }
       return json(res, 200, { token: result.token, session: result.session, environment });
@@ -7571,6 +7565,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       loopbackMutationToken: desktopMutationToken,
       companionMutationToken,
     });
+    // The browser's cookie carries the term it was set with, and the
+    // session's term slides on use (sessions.ts `renew`), so re-issue the
+    // cookie on every cookie-authenticated request. One small header; and
+    // unlike "send once per renewal" it survives a lost response and a
+    // restart. Later handlers that clear the cookie (logout, self-revoke)
+    // overwrite this header, which is the order we want.
+    if (gate.auth?.kind === "session" && gate.auth.via === "cookie") {
+      const presented = parseCookies(req.headers.cookie).get(SESSION_COOKIE);
+      if (presented) {
+        const secure = requestOrigin(req)?.startsWith("https://") === true;
+        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, presented, { secure, maxAgeSeconds: cookieMaxAgeSeconds(gate.auth.session) }));
+      }
+    }
     // Reachability probe, public: the phone races it across a server's
     // addresses before it has a session, and the tunnel verifier polls it.
     // A stranger learns only the app name; pid (the desktop boot probe keys
@@ -7626,7 +7633,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : "this server has no public address to put in a link: set OMB_PUBLIC_URL, or open /pair on the address you use and type the code",
       });
     }
-    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings() });
+    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings(), publicUrl: PUBLIC_URL });
     m = path.match(/^\/api\/auth\/pairing\/([\w-]+)$/);
     if (m && method === "DELETE") {
       const cancelled = sessions.cancelPairing(m[1]);

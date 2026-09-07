@@ -4,8 +4,8 @@
 //
 // A pairing code is 12 characters from a 32-symbol alphabet with no 0/O/1/I
 // (60 bits), single use, five minutes. Exchanging it yields an opaque
-// session token (`omb_sess_…`, 256 bits) that lives 30 days; only its sha256
-// is stored. A stream ticket is a 5-minute single-use credential for the SSE
+// session token (`omb_sess_…`, 256 bits) that lives 30 days, renewed on use
+// up to 180 days from pairing (`renew`); only its sha256 is stored. A stream ticket is a 5-minute single-use credential for the SSE
 // endpoint, because EventSource cannot set headers. Failed exchanges are
 // counted per source: five in a minute lock that source out for ten.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -19,7 +19,32 @@ export const SCOPES: readonly Scope[] = ["admin", "client"];
 export const PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 export const PAIRING_CODE_LENGTH = 12;
 export const PAIRING_CODE_TTL_MS = 5 * 60_000;
-export const SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
+/** A whole number of days from an environment variable, as milliseconds.
+ * Anything that is not a whole number of days between 1 and 3650 falls back
+ * to the default rather than being clamped, so a typo is not silently
+ * turned into a policy. */
+export function daysMs(value: string | undefined, fallbackDays: number): number {
+  const days = Number(value);
+  const ok = Number.isInteger(days) && days >= 1 && days <= 3650;
+  return (ok ? days : fallbackDays) * 24 * 60 * 60_000;
+}
+/** How long a session lives after its last renewal. A session used with half
+ * the term or less left is renewed for the full term again (see `renew`), so
+ * a device in regular use keeps working; one that goes quiet lapses.
+ * OMB_SESSION_TTL_DAYS overrides the 30-day default. */
+export const SESSION_TTL_MS = daysMs(process.env.OMB_SESSION_TTL_DAYS, 30);
+/** The most a session may live from the day it was paired, however often it
+ * is used. Renewal never pushes a session past this, so a stolen cookie has a
+ * bounded life and every device re-pairs occasionally. OMB_SESSION_MAX_DAYS
+ * overrides the 180-day default. */
+export const SESSION_MAX_AGE_MS = daysMs(process.env.OMB_SESSION_MAX_DAYS, 180);
+/** Renewal is due once half the term or less is left. */
+export const SESSION_RENEW_WHEN_LEFT_MS = SESSION_TTL_MS / 2;
+
+/** Max-Age for a cookie that should die with its session: whole seconds, at least one. */
+export function cookieMaxAgeSeconds(session: { expiresAt: number }, now = Date.now()): number {
+  return Math.max(1, Math.floor((session.expiresAt - now) / 1000));
+}
 export const STREAM_TICKET_TTL_MS = 5 * 60_000;
 /** Per-source slow-down only. A 60-bit code cannot be guessed online in
  * five minutes whatever the rate, so the lock exists to make noise visible,
@@ -293,7 +318,9 @@ export class SessionRegistry {
       scopes: [...pairing.scopes],
       createdAt: now,
       lastSeenAt: now,
-      expiresAt: now + SESSION_TTL_MS,
+      // The absolute cap applies from the first term, so a TTL configured
+      // longer than the cap does not hand out a session the cap forbids.
+      expiresAt: now + Math.min(SESSION_TTL_MS, SESSION_MAX_AGE_MS),
     };
     this.sessions.push(record);
     this.lastSeenWrites.set(record.id, now); // the exchange itself was the first sighting
@@ -318,6 +345,26 @@ export class SessionRegistry {
       this.persist();
     }
     return record;
+  }
+
+  /** Sliding expiry. Called by the request gate once a request has passed
+   * the origin and scope checks (so a rejected request never extends
+   * anything): a still-valid session with half its term or less left is
+   * renewed for the full term, capped at SESSION_MAX_AGE_MS from pairing.
+   * Nothing expired is revived. Writes at most once per half-term, so it
+   * adds nothing to the last-seen traffic. Returns whether it renewed. */
+  renew(sessionId: string): boolean {
+    const record = this.sessions.find((s) => s.id === sessionId);
+    const now = this.now();
+    if (!record || record.expiresAt <= now) return false;
+    if (record.expiresAt - now > SESSION_RENEW_WHEN_LEFT_MS) return false;
+    const next = Math.min(now + SESSION_TTL_MS, record.createdAt + SESSION_MAX_AGE_MS);
+    if (next <= record.expiresAt) return false; // already at the absolute cap
+    record.expiresAt = next;
+    record.lastSeenAt = now;
+    this.lastSeenWrites.set(record.id, now);
+    this.persist();
+    return true;
   }
 
   /** Still valid right now (prunes expiry first). */

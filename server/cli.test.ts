@@ -3,13 +3,16 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { formatSessions, pairingBlock, parseArgs, qrToString, runLogin, serverEntry } from "./cli.ts";
+import { applyStartupPreferences, formatSessions, pairingBlock, parseArgs, qrToString, runLogin, runOnboardingCommand, serverEntry, verifyPhoneEndpoint, type CliOptions } from "./cli.ts";
+import { SetupCancelled } from "./cli-prompts.ts";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { startControlPlaneStub } from "./testing/control-plane-stub.ts";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
+const setup = vi.hoisted(() => ({ runSetup: vi.fn(), isSetupComplete: vi.fn(), readCliStartup: vi.fn(), saveCliStartup: vi.fn() }));
+vi.mock("./cli-setup.ts", () => setup);
 
 describe("openmausbot command line", () => {
   it("parses commands and flags, and explains mistakes", () => {
@@ -18,13 +21,19 @@ describe("openmausbot command line", () => {
     expect(serve).toMatchObject({ command: "serve", port: 9001, dataDir: resolve("/tmp/x"), label: "cab mini", tailscale: true, pair: false });
     expect(parseArgs(["pair", "--client", "--public-url", "https://h/"], {})).toMatchObject({ command: "pair", client: true, publicUrl: "https://h" });
     expect(parseArgs(["sessions", "revoke", "abc"], {})).toMatchObject({ command: "sessions", revoke: "abc" });
-    expect(parseArgs([], { OMB_PORT: "8123" })).toMatchObject({ command: "help", port: 8123 });
+    expect(parseArgs([], { OMB_PORT: "8123" })).toMatchObject({ command: "start", port: 8123 });
+    expect(parseArgs(["--port", "8125", "--no-open", "--local"], {})).toMatchObject({ command: "start", port: 8125, open: false, local: true });
+    expect(parseArgs(["--help"], {})).toMatchObject({ command: "help" });
+    expect(parseArgs(["-h"], {})).toMatchObject({ command: "help" });
+    expect(parseArgs(["--local", "--tunnel"], {})).toHaveProperty("error");
     expect(parseArgs(["dance"], {})).toEqual({ error: 'unknown command "dance"' });
     expect(parseArgs(["serve", "--port"], {})).toEqual({ error: "--port needs a value" });
     expect(parseArgs(["serve", "--port", "70000"], {})).toEqual({ error: "--port must be 1-65535" });
     expect(parseArgs(["pair", "--public-url", "mini.example"], {})).toEqual({ error: "--public-url must start with http:// or https://" });
     expect(parseArgs(["serve", "--bogus"], {})).toEqual({ error: 'unknown argument "--bogus"' });
     expect(parseArgs(["serve", "--tunnel"], {})).toMatchObject({ command: "serve", tunnel: true });
+    expect(parseArgs(["setup", "--data-dir", "/tmp/cli-setup"], {})).toMatchObject({ command: "setup", dataDir: resolve("/tmp/cli-setup") });
+    expect(parseArgs(["start", "--port", "8125", "--no-pair"], {})).toMatchObject({ command: "start", port: 8125, pair: false });
     expect(parseArgs(["login", "--email", "a@b.test"], {})).toMatchObject({ command: "login", email: "a@b.test" });
     expect(parseArgs(["logout"], {})).toMatchObject({ command: "logout" });
     expect(parseArgs(["browser", "install", "--with-deps"], {})).toMatchObject({ command: "browser", browserAction: "install", withDeps: true });
@@ -99,6 +108,210 @@ describe("openmausbot command line", () => {
     }
     expect(dead).toBe(true);
   }, 90_000);
+});
+
+describe("terminal onboarding commands", () => {
+  const inputTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  const outputTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  const terminal = (enabled: boolean) => {
+    Object.defineProperty(process.stdin, "isTTY", { value: enabled, configurable: true });
+    Object.defineProperty(process.stdout, "isTTY", { value: enabled, configurable: true });
+  };
+  afterEach(() => {
+    if (inputTty) Object.defineProperty(process.stdin, "isTTY", inputTty);
+    else Reflect.deleteProperty(process.stdin, "isTTY");
+    if (outputTty) Object.defineProperty(process.stdout, "isTTY", outputTty);
+    else Reflect.deleteProperty(process.stdout, "isTTY");
+    vi.unstubAllEnvs();
+    vi.resetAllMocks();
+  });
+  const command = (name: "setup" | "start") => parseArgs([name, "--data-dir", join(process.env.HOME!, "onboarding"), "--port", "18451"], {}) as CliOptions;
+  const io = () => ({ log: vi.fn(), error: vi.fn(), ask: vi.fn() });
+  const preserveEnv = () => vi.stubEnv("OMB_DATA_DIR", process.env.OMB_DATA_DIR);
+  const phoneSetup = vi.fn<NonNullable<NonNullable<Parameters<typeof runOnboardingCommand>[3]>["phoneSetup"]>>();
+  const running = vi.fn().mockResolvedValue(false);
+  const open = vi.fn().mockResolvedValue(true);
+  const flow = { phoneSetup, running, open };
+  beforeEach(() => {
+    phoneSetup.mockImplementation(async (options) => ({ options }));
+    running.mockResolvedValue(false);
+    open.mockResolvedValue(true);
+  });
+
+  it("runs explicit setup once and explains how to start without launching a server", async () => {
+    terminal(true);
+    preserveEnv();
+    const options = command("setup");
+    const output = io();
+    const serve = vi.fn();
+    setup.runSetup.mockImplementation(async () => {
+      expect(process.env.OMB_DATA_DIR).toBe(options.dataDir);
+      return true;
+    });
+    expect(await runOnboardingCommand(options, output, serve, flow)).toBe(0);
+    expect(setup.runSetup).toHaveBeenCalledWith({ dataDir: options.dataDir, port: options.port });
+    expect(setup.isSetupComplete).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+    expect(output.log).toHaveBeenCalledWith(expect.stringContaining("Start with: openmausbot"));
+    expect(phoneSetup).toHaveBeenCalledOnce();
+    expect(setup.saveCliStartup).toHaveBeenCalledWith(options.dataDir, { access: "local" });
+  });
+
+  it("starts after first-time setup and passes through the requested serve options", async () => {
+    terminal(true);
+    preserveEnv();
+    const options = command("start");
+    setup.isSetupComplete.mockResolvedValue(false);
+    setup.runSetup.mockResolvedValue(true);
+    const serve = vi.fn().mockResolvedValue(0);
+    expect(await runOnboardingCommand(options, io(), serve, flow)).toBe(0);
+    expect(setup.runSetup).toHaveBeenCalledOnce();
+    expect(serve).toHaveBeenCalledWith({ ...options, guided: true });
+  });
+
+  it("uses completed setup without prompting even when start has no terminal", async () => {
+    terminal(false);
+    preserveEnv();
+    setup.isSetupComplete.mockResolvedValue(true);
+    const serve = vi.fn().mockResolvedValue(7);
+    expect(await runOnboardingCommand(command("start"), io(), serve, flow)).toBe(7);
+    expect(setup.runSetup).not.toHaveBeenCalled();
+    expect(serve).toHaveBeenCalledOnce();
+  });
+
+  it.each(["setup", "start"] as const)("refuses an unconfigured %s without a terminal", async (name) => {
+    terminal(false);
+    preserveEnv();
+    setup.isSetupComplete.mockResolvedValue(false);
+    const output = io();
+    const serve = vi.fn();
+    expect(await runOnboardingCommand(command(name), output, serve, flow)).toBe(1);
+    expect(setup.runSetup).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+    expect(output.error).toHaveBeenCalledWith(expect.stringContaining("interactive terminal"));
+  });
+
+  it.each([false, new SetupCancelled()])("does not start after setup is cancelled (%s)", async (result) => {
+    terminal(true);
+    preserveEnv();
+    setup.isSetupComplete.mockResolvedValue(false);
+    if (result instanceof Error) setup.runSetup.mockRejectedValue(result);
+    else setup.runSetup.mockResolvedValue(result);
+    const serve = vi.fn();
+    expect(await runOnboardingCommand(command("start"), io(), serve, flow)).toBe(130);
+    expect(serve).not.toHaveBeenCalled();
+  });
+
+  it("persists an explicitly chosen phone route and uses it on later starts without prompts", async () => {
+    terminal(true);
+    preserveEnv();
+    const options = command("start");
+    setup.isSetupComplete.mockResolvedValue(true);
+    phoneSetup.mockResolvedValue({ options: { ...options, tunnel: true, client: true }, phone: "android" });
+    const serve = vi.fn().mockResolvedValue(0);
+    await runOnboardingCommand(options, io(), serve, flow);
+    expect(setup.saveCliStartup).toHaveBeenCalledWith(options.dataDir, { access: "tunnel", phone: "android" });
+    expect(serve).toHaveBeenLastCalledWith(expect.objectContaining({ tunnel: true, phone: "android", guided: true }));
+    phoneSetup.mockClear();
+    setup.readCliStartup.mockReturnValue({ access: "tunnel", phone: "android" });
+    await runOnboardingCommand(options, io(), serve, flow);
+    expect(phoneSetup).not.toHaveBeenCalled();
+    expect(serve).toHaveBeenLastCalledWith(expect.objectContaining({ tunnel: true, phone: "android" }));
+  });
+
+  it("keeps the provider setup but does not start if phone setup is cancelled", async () => {
+    terminal(true);
+    preserveEnv();
+    setup.runSetup.mockResolvedValue(true);
+    phoneSetup.mockRejectedValue(new SetupCancelled());
+    const serve = vi.fn();
+    const output = io();
+    expect(await runOnboardingCommand(command("start"), output, serve, flow)).toBe(130);
+    expect(serve).not.toHaveBeenCalled();
+    expect(setup.saveCliStartup).not.toHaveBeenCalled();
+    expect(output.log).toHaveBeenCalledWith(expect.stringContaining("already saved is kept"));
+  });
+
+  it("reopens an already-running workspace without setup, pairing, or a second server", async () => {
+    terminal(true);
+    preserveEnv();
+    running.mockResolvedValue(true);
+    const serve = vi.fn();
+    expect(await runOnboardingCommand(command("start"), io(), serve, flow)).toBe(0);
+    expect(open).toHaveBeenCalledWith(18451);
+    expect(setup.runSetup).not.toHaveBeenCalled();
+    expect(phoneSetup).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+  });
+
+  it("honors --no-pair and --no-open without saving an access choice", async () => {
+    terminal(true);
+    preserveEnv();
+    setup.isSetupComplete.mockResolvedValue(true);
+    const serve = vi.fn().mockResolvedValue(0);
+    await runOnboardingCommand({ ...command("start"), pair: false, open: false }, io(), serve, flow);
+    expect(phoneSetup).not.toHaveBeenCalled();
+    expect(setup.saveCliStartup).not.toHaveBeenCalled();
+    expect(serve).toHaveBeenCalledWith(expect.objectContaining({ pair: false, open: false }));
+  });
+
+  it("does not claim --local changed an already-running public workspace", async () => {
+    terminal(true);
+    preserveEnv();
+    running.mockResolvedValue(true);
+    const output = io();
+    const serve = vi.fn();
+    expect(await runOnboardingCommand({ ...command("start"), local: true }, output, serve, flow)).toBe(1);
+    expect(output.error).toHaveBeenCalledWith(expect.stringContaining("current connection was not changed"));
+    expect(open).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a credential-bearing explicit URL even when phone setup is skipped", async () => {
+    terminal(true);
+    preserveEnv();
+    setup.isSetupComplete.mockResolvedValue(true);
+    const options = { ...command("start"), publicUrl: "https://user:secret@example.com" };
+    const serve = vi.fn();
+    await expect(runOnboardingCommand(options, io(), serve, flow)).rejects.toThrow("address was not saved");
+    expect(setup.saveCliStartup).not.toHaveBeenCalled();
+    expect(serve).not.toHaveBeenCalled();
+  });
+});
+
+describe("saved startup access", () => {
+  const options = () => parseArgs([], {}) as CliOptions;
+  it("keeps local launches local and supports a one-time local override", () => {
+    expect(applyStartupPreferences(options(), { access: "local" })).toMatchObject({ tunnel: false, tailscale: false, publicUrl: undefined });
+    expect(applyStartupPreferences({ ...options(), local: true }, { access: "tunnel", phone: "ios" })).toMatchObject({ tunnel: false, phone: undefined });
+  });
+  it("explicit route flags take priority over saved settings", () => {
+    expect(applyStartupPreferences({ ...options(), tailscale: true }, { access: "tunnel" })).toMatchObject({ tailscale: true, tunnel: false });
+  });
+  it("refuses a saved URL that embeds a credential or points to localhost", () => {
+    for (const publicUrl of ["https://localhost", "https://user:secret@example.com", "https://example.com/pair#code=secret"])
+      expect(() => applyStartupPreferences(options(), { access: "public-url", publicUrl })).toThrow("not a valid HTTPS origin");
+  });
+});
+
+describe("phone endpoint identity", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("checks the public endpoint matches this server without sending credentials", async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ environmentId: "fixture" }))
+      .mockResolvedValueOnce(Response.json({ environmentId: "fixture" }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await verifyPhoneEndpoint(18451, "https://maus.example.com")).toBe(true);
+    expect(fetcher.mock.calls[1]![1]).toMatchObject({ redirect: "error" });
+    expect(fetcher.mock.calls[1]![1]).not.toHaveProperty("headers");
+  });
+  it("refuses another server or unreachable origin", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ environmentId: "ours" }))
+      .mockResolvedValueOnce(Response.json({ environmentId: "other" })));
+    expect(await verifyPhoneEndpoint(18451, "https://maus.example.com")).toBe(false);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    expect(await verifyPhoneEndpoint(18451, "https://maus.example.com")).toBe(false);
+    expect(await verifyPhoneEndpoint(18451, "https://localhost")).toBe(false);
+  });
 });
 
 const exited = (child: ChildProcess) => (child.exitCode !== null ? Promise.resolve(child.exitCode) : new Promise<number | null>((done) => child.once("exit", (code) => done(code))));

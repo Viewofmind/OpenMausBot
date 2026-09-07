@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { JsonValue } from "./schema.ts";
 
 import { customMcpServers,
   DATA_DIR,
@@ -51,6 +52,27 @@ describe("configuration boundaries", () => {
     );
     expect(() => parseConfigPatch({ opencodeGo: { apiKey: 42 } })).toThrow("opencodeGo.apiKey");
     expect(() => parseConfigPatch({ profile: [] })).toThrow("profile");
+  });
+
+  it("accepts and normalizes a default model selection", () => {
+    const input = { defaultModelSelection: { instanceId: " codex ", model: " chosen-model ", effort: "high" } };
+    const expected = { defaultModelSelection: { instanceId: "codex", model: "chosen-model", effort: "high" } };
+    expect(parseStoredConfig(input)).toEqual(expected);
+    expect(parseConfigPatch(input)).toEqual(expected);
+  });
+
+  it.each<JsonValue>([
+    null,
+    "codex/model",
+    {},
+    { instanceId: "codex" },
+    { instanceId: "", model: "model" },
+    { instanceId: "codex", model: "   " },
+    { instanceId: "codex", model: 42 },
+    { instanceId: "codex", model: "model", effort: "turbo" },
+  ])("rejects an invalid default model selection: %j", (defaultModelSelection) => {
+    expect(() => parseStoredConfig({ defaultModelSelection })).toThrow("defaultModelSelection");
+    expect(() => parseConfigPatch({ defaultModelSelection })).toThrow("defaultModelSelection");
   });
 
   it("canonicalizes legacy browser profile ids without dropping other stored settings", () => {
@@ -391,6 +413,23 @@ describe("default fleet", () => {
     });
   });
 
+  it("keeps an explicit empty routing provider while other instances inherit the workspace pin", () => {
+    const config: AppConfig = {
+      openaiCompat: { provider: "workspace-provider" },
+      instances: {
+        isolated: { driver: "openai-compat", config: { provider: "" } },
+        inherited: { driver: "openai-compat" },
+        pinned: { driver: "openai-compat", config: { provider: "instance-provider" } },
+      },
+    };
+    const instances = instanceConfigs(config);
+    expect(instances.isolated.config).toEqual({ provider: "" });
+    expect(instances.inherited.config).toEqual({ provider: "workspace-provider" });
+    expect(instances.pinned.config).toEqual({ provider: "instance-provider" });
+    expect(config.instances?.isolated.config).toEqual({ provider: "" });
+    expect(config.instances?.inherited.config).toBeUndefined();
+  });
+
   it("does not retain an injected OpenAI-compatible URL across config refreshes", () => {
     const config: AppConfig = {
       openaiCompat: { url: "https://first.example.test/v1" },
@@ -607,6 +646,31 @@ describe("credential env preference", () => {
     expect(cfg.xai?.key).toBe("file-xai");
     expect(cfg.tts?.key).toBe("file-tts");
     expect(cfg.imageGen?.key).toBe("file-image");
+  });
+
+  it("persists a default selection without changing the fleet or unrelated settings", () => {
+    const path = join(DATA_DIR, "config.json");
+    const existing = {
+      profile: { name: "Ada" },
+      instances: { customCodex: { driver: "codex", config: { cli: "/opt/custom-codex" } } },
+      openaiCompat: { key: "fixture-key", url: "https://models.example.test/v1" },
+      futureSetting: { keep: true },
+    };
+    writeFileSync(path, JSON.stringify(existing));
+    const selection = { instanceId: "customCodex", model: "fixture-model", effort: "high" as const };
+
+    saveConfig({ defaultModelSelection: selection });
+    expect(loadConfig().defaultModelSelection).toEqual(selection);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ...existing, defaultModelSelection: selection });
+
+    saveConfig({ profile: { email: "ada@example.com" } });
+    expect(loadConfig().defaultModelSelection).toEqual(selection);
+
+    const replacement = { instanceId: "claude", model: "different-model" };
+    saveConfig({ defaultModelSelection: replacement });
+    expect(loadConfig().defaultModelSelection).toEqual(replacement);
+    expect(loadConfig().profile).toEqual({ name: "Ada", email: "ada@example.com" });
+    expect(loadConfig().instances).toEqual(existing.instances);
   });
 
   it("loads legacy browser profiles without resetting config and canonicalizes them on the next write", () => {

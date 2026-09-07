@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 import { writeFileAtomic } from "./atomic.ts";
-import type { InstanceConfigMap } from "./contracts.ts";
+import { EFFORT_LEVELS, type InstanceConfigMap, type ModelSelection } from "./contracts.ts";
 import { parseStoredMcpServer } from "./mcp-registry.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
 
@@ -230,7 +230,19 @@ const instanceConfigSchema = z.object({
   config: z.json().optional(),
 });
 const instanceConfigMapSchema = z.record(z.string(), instanceConfigSchema);
+const defaultModelSelectionSchema = z.object({
+  instanceId: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  effort: z.enum(EFFORT_LEVELS).optional(),
+});
 const appConfigSchema = z.object({
+  defaultModelSelection: defaultModelSelectionSchema.optional(),
+  /** CLI-only launch preferences. Never enable remote access implicitly. */
+  cliStartup: z.object({
+    access: z.enum(["local", "tunnel", "tailscale", "public-url"]),
+    publicUrl: z.string().url().optional(),
+    phone: z.enum(["ios", "android"]).optional(),
+  }).optional(),
   xai: z.object({ key: optionalText, url: optionalText }).optional(),
   /** `model` seeds the default selection; `provider` pins an OpenRouter
    * upstream (e.g. "fireworks"). Both are non-secret and optional. */
@@ -269,10 +281,17 @@ const appConfigSchema = z.object({
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
 });
-const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true });
+const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
 export interface AppConfig {
+  /** Preferred selection for newly created bots; existing bots keep theirs. */
+  defaultModelSelection?: ModelSelection;
+  cliStartup?: {
+    access: "local" | "tunnel" | "tailscale" | "public-url";
+    publicUrl?: string;
+    phone?: "ios" | "android";
+  };
   mcpServers?: Record<string, unknown>;
   language?: string;
   xai?: { key?: string; url?: string };
@@ -593,6 +612,12 @@ export function saveConfig(patch: Partial<AppConfig>): void {
   if (checkedPatch.vps !== undefined) disk.vps = normalizeVpsConfig(checkedPatch.vps);
   // scalar, not a section: the merge loop above only walks objects
   if (checkedPatch.language !== undefined) disk.language = checkedPatch.language;
+  // A selection is replaced as one value, so changing engines also clears
+  // an effort level omitted from the new selection.
+  if (checkedPatch.defaultModelSelection !== undefined) {
+    disk.defaultModelSelection = checkedPatch.defaultModelSelection;
+  }
+  if (checkedPatch.cliStartup !== undefined) disk.cliStartup = checkedPatch.cliStartup;
   // Custom MCP mutations go through their own dedicated local API, but
   // saveConfig remains the single atomic persistence boundary.
   if (checkedPatch.mcpServers !== undefined) {
@@ -787,6 +812,9 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
         const merged = { ...current };
         // A per-instance value always wins over the workspace default.
         for (const [k, v] of Object.entries(defaults)) {
+          // Empty routing explicitly means "no upstream pin" for isolated
+          // API connections. Do not replace it with a workspace provider.
+          if (k === "provider" && typeof merged[k] === "string") continue;
           if (typeof merged[k] !== "string" || !(merged[k] as string).trim()) merged[k] = v;
         }
         entry.config = merged;

@@ -47,6 +47,11 @@ refreshes it.
 3. README and docs downloads point at the canonical repo, while the legacy
    mirror exists only for installed updater clients and historical releases.
 
+The npm package is published separately and its versioned `.tgz` is attached
+only to the canonical release. It is not a desktop updater artifact; the
+mirror checks permit that one extra file while still verifying the complete,
+byte-identical desktop asset set.
+
 ## Why the gates exist
 
 Each verification step in `release.yml` maps to a real incident from the

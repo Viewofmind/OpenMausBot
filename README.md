@@ -344,13 +344,41 @@ OpenMausBot is free and open source. If it does real work for you, you can
 one-time any amount, or monthly. Payments are handled by [Polar](https://polar.sh/supamaus),
 which takes care of receipts and taxes; nothing about the app ever sits behind a paywall.
 
-## Run it on a server
+## Run from a terminal or on a server
 
-Bots keep working with every laptop closed when the server runs on a VPS or
-a Mac mini. One command with Node 24: `npx openmausbot serve` (add
-`--tunnel` for a public address with no domain or open port, or
-`--tailscale` for your tailnet), or the Docker stack for your own domain.
-Devices pair once with a short code. The step-by-step guide is
+With Node 24 or newer, install once and run:
+
+```sh
+npm install -g openmausbot
+openmausbot
+```
+
+Or use `npx openmausbot` without a global install. First launch guides you with
+arrow-key choices: choose AI access, sign in or paste a hidden API key, choose
+a model, and optionally connect a phone. Next time, the same command reuses your
+saved setup and opens the local workspace. Keep the terminal open; Ctrl-C stops
+the server, not your saved work. Use `--no-open` to skip opening the browser.
+
+Phone access is optional and defaults to skipping. Choose an explicitly
+approved managed public HTTPS endpoint protected by pairing, an existing
+Tailscale connection, or your own HTTPS reverse proxy. Use Safari or an installed
+iOS app on iPhone/iPad; Android uses the web browser for this CLI flow. A phone
+cannot use a localhost link. `--local` ignores saved remote access for one launch;
+`--no-pair` suppresses phone prompts and invitations but does not disable a saved
+remote connection.
+
+Run `openmausbot setup` to reconfigure without resetting bots or conversations;
+the saved model default applies only to new bots. Native setup confirms provider
+sign-in; API setup asks before a potentially billable test message. API keys are
+saved as plaintext, not encrypted, in private `config.json` (`0600` on Unix).
+See the [short setup guide](docs/cli-onboarding.md) for account differences,
+phone choices, credential storage, and cancellation.
+
+For a background service on a VPS or an always-on computer, use
+`npx openmausbot serve` with explicit remote options: `--tunnel` after
+`npx openmausbot login` for a managed public address, `--tailscale` for your
+tailnet, or the Docker stack for your own domain. These are separate from
+AI-provider sign-in. Devices pair once with a short code. The deployment guide is
 [docs/deploy-vps.md](docs/deploy-vps.md); the reference is
 [docs/self-hosting.md](docs/self-hosting.md).
 

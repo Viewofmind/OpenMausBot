@@ -50,7 +50,7 @@ desktop-first agent app and adopt these points as requirements:
    ambiguity-free alphabet (60 bits), rejection-sampled, **5-minute** TTL,
    single use. Exchange it once at `POST /api/auth/pair` for an opaque
    session token: random bytes, **sha256 at rest** (the companion's
-   discipline), 30-day expiry, per-device label recorded, revocable from
+   discipline), 30-day expiry renewed on use up to 180 days from pairing, per-device label recorded, revocable from
    Settings. Pairing URLs carry the code in the **hash**, never the query.
 3. **Never put the session token in a URL.** The event stream is SSE and
    `EventSource` cannot set headers, so an authenticated `POST

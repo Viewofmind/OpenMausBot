@@ -156,6 +156,7 @@ describe("pairing", () => {
     expect(opened.hint).toBeNull();
     const listed = await call("/api/auth/pairing");
     expect(listed.body.pairings.length).toBeGreaterThanOrEqual(1);
+    expect(listed.body.publicUrl).toBe(PUBLIC_URL);
   });
 
   it("refuses to mint or list codes from a client-only session", async () => {
@@ -232,6 +233,15 @@ describe("pairing", () => {
 
     const sameOrigin = await call("/api/bots", { headers: remote("10.0.0.4", { cookie, origin: `http://${REMOTE_HOST}` }) });
     expect(sameOrigin.status).toBe(200);
+    // Every cookie-authenticated response re-issues the cookie with the
+    // session's current remaining life (sliding expiry), never on a 401.
+    const refreshed = header(sameOrigin.headers, "set-cookie");
+    expect(refreshed.split(";")[0]).toBe(cookie);
+    expect(refreshed).toMatch(/Max-Age=\d+/);
+    expect(refreshed).toContain("HttpOnly");
+    const stranger = await call("/api/bots", { headers: remote("10.0.0.4", { cookie: `${cookie.split("=")[0]}=omb_sess_nope`, origin: `http://${REMOTE_HOST}` }) });
+    expect(stranger.status).toBe(401);
+    expect(header(stranger.headers, "set-cookie")).toBe("");
     const noOrigin = await call("/api/auth/session", { headers: remote("10.0.0.4", { cookie }) });
     expect(noOrigin.body).toMatchObject({ kind: "session", via: "cookie", label: "iPad in the kitchen" });
     const csrf = await call("/api/bots", { method: "POST", headers: remote("10.0.0.4", { cookie, origin: "https://evil.example" }), body: "{}" });

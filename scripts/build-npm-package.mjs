@@ -54,18 +54,81 @@ writeFileSync(
   join(out, "README.md"),
   `# openmausbot
 
-Run the OpenMausBot server on any machine with Node 24+, then pair your
-devices to it.
+Your own team of AI bots, with guided terminal setup. Requires Node 24+.
 
 \`\`\`sh
-npx openmausbot serve                 # starts the server, prints a pairing link + QR
-npx openmausbot serve --tailscale     # HTTPS over your tailnet, no domain needed
-npx openmausbot pair --label "Phone"  # another device later
-npx openmausbot sessions              # who is paired; "sessions revoke <id>" signs one out
+npm install -g openmausbot
+openmausbot
 \`\`\`
 
-Engines (Claude Code, Codex, …) are separate CLIs signed in on the same
-machine. Full guide: https://github.com/milind-soni/OpenMausBot/blob/main/docs/self-hosting.md
+Or run \`npx openmausbot\` without a global install. Use the same command next
+time; \`openmausbot start\` is an alias for the bare command.
+
+First launch: use arrow keys and Enter (numbered choices in plain terminals) to choose
+ChatGPT/Codex, Claude Code, or an API service; sign in or paste a hidden API
+key; choose a model and save. Setup asks before installing a missing Codex
+or Claude CLI. The saved model applies only to new bots; existing bots and
+conversations keep their settings.
+
+One optional step connects your phone, defaulting to Skip for now. Choose
+an explicitly approved managed public HTTPS endpoint protected by pairing,
+existing Tailscale, or an HTTPS reverse proxy you already configured.
+Managed access uses a separate OpenMausBot account and asks permission for
+the public endpoint and possible connector download. The pairing page and
+basic server identity are public; chat and settings require pairing.
+Tailscale must already be installed and signed in on both devices.
+
+After the HTTPS connection is checked, scan the QR with your phone's
+Camera: use Safari on iPhone/iPad or a web browser on Android. An installed
+OpenMausBot iOS app can also scan or accept the full link. This CLI link
+does not work with the current Android native pairing scanner. Choose
+Connect on the phone; scanning alone is not a completed pairing. Codes
+are private, single-use, and expire after five minutes. Guided phone
+access permits chat and approvals, not settings or pairing administration.
+Localhost and a bare LAN address cannot connect your phone to this server.
+
+Later launches reuse your saved choices and open the local workspace.
+Keep the terminal open: this is a foreground server, not a background
+service. Ctrl-C stops the server without deleting saved work. Automatic
+browser opening uses only the local address; it is skipped for SSH and
+headless sessions, and can be disabled with \`--no-open\`.
+
+\`\`\`sh
+openmausbot setup          # reconfigure AI and optional phone access; not a reset
+openmausbot --no-open      # do not open a browser
+openmausbot --local        # ignore saved remote access for this launch
+openmausbot --no-pair      # suppress phone prompts and invitations
+openmausbot pair           # another phone while the HTTPS workspace is running
+openmausbot sessions       # list devices; sessions revoke ID signs one out
+openmausbot serve          # no onboarding prompts; explicit remote flags for services
+\`\`\`
+
+Stop an existing server before reconfiguring or changing access mode.
+\`--local\` preserves your saved choice for next time. \`--no-pair\` does not
+turn off saved remote access; use \`--local\` for that on a new launch.
+With a custom \`--data-dir\` or \`--port\`, keep using those options when
+starting and pairing.
+
+API services include OpenAI, OpenRouter, Groq, and compatible endpoints.
+API connections currently support chat only. Setup asks before a short,
+potentially billable API test; native setup confirms sign-in, with model
+access checked when you send a message. API billing is separate from
+ChatGPT/Claude subscriptions. New API keys in config.json and managed
+account credentials in tunnel-account.json are plaintext, not encrypted,
+with owner-only permissions (0600 on Unix). Keep these files private.
+
+Ctrl-C before saving AI setup leaves its pending OMB changes unapplied.
+During the later phone step, it keeps the AI setup already saved and exits
+without starting a server. Completed installs and sign-ins remain; run
+\`openmausbot setup\` to continue without deleting your data.
+
+For a service, use \`serve --tunnel\` after \`login\` for managed HTTPS,
+\`serve --tailscale\` for your tailnet, or your own reverse proxy. The
+\`login\` command signs in to an OpenMausBot account, not an AI provider;
+it does not start the tunnel itself.
+
+[Setup guide](https://github.com/milind-soni/OpenMausBot/blob/main/docs/cli-onboarding.md)
+· [Hosting guide](https://github.com/milind-soni/OpenMausBot/blob/main/docs/self-hosting.md)
 `,
 );
 console.log(`npm package assembled at ${out} (openmausbot@${app.version})`);

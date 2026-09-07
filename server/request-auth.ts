@@ -345,6 +345,11 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
     if (!session.scopes.includes(needed)) {
       return deny(403, `forbidden: this session lacks the ${needed} scope`);
     }
+    // Only a request that passed both checks counts as use of the session,
+    // and only a request the client made itself: redeeming a stream ticket
+    // is the tail of an API call that already counted, and a stream left
+    // open unattended must not keep a session alive on its own.
+    if (via !== "ticket") options.sessions.renew(session.id);
     return { auth: { kind: "session", session, via, scopes: session.scopes }, status: 401, error: "" };
   }
 
