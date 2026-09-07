@@ -5,13 +5,34 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 
 describe("screenTouchingTool", () => {
   it("strips the Claude driver's mcp__<server>__ prefix", () => {
     expect(screenTouchingTool("mcp__computer__click")).toBe(true);
     expect(screenTouchingTool("mcp__computer__screenshot")).toBe(true);
     expect(screenTouchingTool("mcp__browser__browser_navigate")).toBe(true);
+  });
+
+  it("counts agent-browser's tools, which the engine swap left out", () => {
+    // The Electron surface's names were kept and agent-browser's were never
+    // added, so every browser turn silently stopped earning a picture.
+    expect(screenTouchingTool("mcp__browser__agent_browser_open")).toBe(true);
+    expect(screenTouchingTool("agent_browser_click")).toBe(true);
+    expect(screenTouchingTool("agent_browser_fill")).toBe(true);
+    expect(screenTouchingTool("agent_browser_type")).toBe(true);
+    expect(screenTouchingTool("agent_browser_press")).toBe(true);
+    expect(screenTouchingTool("agent_browser_select")).toBe(true);
+    expect(screenTouchingTool("agent_browser_check")).toBe(true);
+    expect(screenTouchingTool("agent_browser_screenshot")).toBe(true);
+  });
+
+  it("still leaves agent-browser's read-only tools and waits out", () => {
+    expect(screenTouchingTool("agent_browser_snapshot")).toBe(false);
+    expect(screenTouchingTool("agent_browser_read")).toBe(false);
+    expect(screenTouchingTool("agent_browser_get_text")).toBe(false);
+    expect(screenTouchingTool("agent_browser_wait_for_text")).toBe(false);
+    expect(screenTouchingTool("agent_browser_wait_for_load")).toBe(false);
   });
 
   it("takes Codex's bare names and pi's server_tool names", () => {
@@ -75,5 +96,25 @@ describe("settledFrameIsNews", () => {
 
   it("fingerprints with sha256 over the base64, like the observation dedupe", () => {
     expect(screenFrameHash(frame)).toBe(createHash("sha256").update(frame).digest("hex"));
+  });
+});
+
+describe("screenSurfaceForTool", () => {
+  it("sends browser tools to the browser, whichever surface names them", () => {
+    expect(screenSurfaceForTool("agent_browser_open")).toBe("browser");
+    expect(screenSurfaceForTool("mcp__browser__agent_browser_click")).toBe("browser");
+    expect(screenSurfaceForTool("browser_navigate")).toBe("browser");
+  });
+
+  it("sends everything else to the computer", () => {
+    expect(screenSurfaceForTool("click")).toBe("computer");
+    expect(screenSurfaceForTool("mcp__computer__screenshot")).toBe("computer");
+    expect(screenSurfaceForTool("computer_batch")).toBe("computer");
+  });
+
+  it("keeps a browsed page from being illustrated with an idle desktop", () => {
+    // The case that made this necessary: a bot holding both surfaces, whose
+    // turn was entirely web work, settled with a picture of its Local VM.
+    expect(screenSurfaceForTool("agent_browser_open")).not.toBe(screenSurfaceForTool("launch_app"));
   });
 });

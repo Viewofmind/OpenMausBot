@@ -270,6 +270,7 @@ import { RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrig
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
 import {
+  agentBrowserFrame,
   agentBrowserIntegration,
   browserEngineEncryptionKey,
   clearBrowserSessionState,
@@ -281,7 +282,7 @@ import {
   describeBrowserEngine,
 } from "./browser-engine.ts";
 import { captureOutsideHumanControl } from "./private-screen-capture.ts";
-import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -2874,7 +2875,7 @@ bus.subscribe((event: RuntimeEvent) => {
         if (bot) {
           const touches = screenTouchingTool(toolName);
           if (touches || /computer|screenshot|click|type_text|press_key|scroll|open_url|wait_for|browser_/i.test(toolName)) {
-            pokeScreenPoller(bot.id, touches);
+            pokeScreenPoller(bot.id, touches, screenSurfaceForTool(toolName));
           }
         }
       }
@@ -3684,6 +3685,9 @@ const screenPollers = new Map<
   {
     timer: ReturnType<typeof setInterval> | null;
     capture: () => Promise<void>;
+    /** Which surface the last screen-touching tool acted on. A bot with both
+     * a computer and a browser must be pictured on the one it just used. */
+    surface: "browser" | "computer";
     last: Frame | null;
     /** Did this turn actually reach for the screen? A bot that merely HAS
      * a computer would otherwise end every reply — a one-word "yes"
@@ -3705,11 +3709,14 @@ const SCREEN_MIN_GAP_MS = 3000;
  * boxAgent's whole session runs ON the box, so every tool it calls acts on
  * that screen even though none of them is named like a computer tool. Its
  * shell-only turns are kept honest by the settle-time hash gate instead. */
+type ScreenCapture = () => Promise<{ png: string; format: string }>;
+
 function startScreenPoller(
   botId: string,
-  capture: () => Promise<{ png: string; format: string }>,
+  captures: { computer?: ScreenCapture; browser?: ScreenCapture },
   { screenIsTheWork = false } = {},
 ) {
+  if (!captures.computer && !captures.browser) return;
   if (screenPollers.has(botId)) return;
   // One capture at a time, shared by the interval, the pokes, and the
   // turn-end grab: awaiting the in-flight promise (rather than dropping the
@@ -3728,12 +3735,13 @@ function startScreenPoller(
       if (!current && Date.now() - lastAt < SCREEN_MIN_GAP_MS) return Promise.resolve();
       current ??= (async () => {
         try {
+          const chosen = captures[entry.surface] ?? captures.computer ?? captures.browser!;
           const frame = await captureOutsideHumanControl(
             () => ({
               held: computerControl.snapshot(botId).held,
               revision: computerControlRevision.get(botId) ?? 0,
             }),
-            capture,
+            chosen,
           );
           if (!frame) return;
           entry.last = frame;
@@ -3747,6 +3755,7 @@ function startScreenPoller(
       })();
       return current;
     },
+    surface: (captures.computer ? "computer" : "browser") as "browser" | "computer",
     last: null as Frame | null,
     touched: screenIsTheWork,
   };
@@ -3758,7 +3767,7 @@ function startScreenPoller(
  * instead of waiting for the next interval tick. Rate-limited inside
  * capture() — a tool-heavy turn used to fire one full REST chain per
  * completed tool, competing with the agent for the same endpoint. */
-function pokeScreenPoller(botId: string, touches: boolean) {
+function pokeScreenPoller(botId: string, touches: boolean, surface?: "browser" | "computer") {
   const entry = screenPollers.get(botId);
   if (!entry) return;
   // the same signal, read twice: a completed computer tool is both the
@@ -3769,6 +3778,10 @@ function pokeScreenPoller(botId: string, touches: boolean) {
   // named mcp__computer__*, and matching that alone used to append an
   // untouched desktop to every curl-and-answer reply.
   if (touches) entry.touched = true;
+  // Picture the surface the tool acted on. Only a touching tool moves this:
+  // a status read on the computer must not redirect the picture away from a
+  // page the browser is still showing.
+  if (touches && surface) entry.surface = surface;
   void entry.capture();
 }
 
@@ -4132,6 +4145,7 @@ async function startTurn(
       }
       const wants = plan.computer;
       let previewCapture: (() => Promise<{ png: string; format: string }>) | null = null;
+      let browserCapture: (() => Promise<{ png: string; format: string }>) | null = null;
       let computerKind: "box" | "vps" | "vm" | "local" | null = null;
       let autoVpsProblem: string | null = null;
 
@@ -4389,6 +4403,16 @@ async function startTurn(
         const selectedProfile = liveBot.browserProfile;
         browser = browserIntegration(bot.id, selectedProfile);
         if (browser) integrations.browser = browser.integration;
+        // The browser lost its frame source when the Electron surface was
+        // removed: previewCapture is set by the computer branches above, and
+        // nothing replaced it here. A bot with only a browser was pictured
+        // not at all; a bot with both was pictured on its desktop even while
+        // the work was a web page, because agent-browser runs its own headless
+        // Chrome on the host rather than inside that desktop.
+        if (browser) {
+          const frame = { binaryPath: browser.integration.command, env: browser.integration.env };
+          browserCapture = () => agentBrowserFrame(frame);
+        }
       }
       // A cancelled adapter can be between accepting sendTurn and revealing
       // its provider turn id. Never overlap a replacement with that ambiguous
@@ -4471,8 +4495,12 @@ async function startTurn(
       // after its own turn.completed would never be torn down — it would
       // keep polling the box forever, carrying dead per-turn state. busy
       // is flipped false in the fold, so it is the honest "still running".
-      if (previewCapture && store.bot(bot.id)?.busy) {
-        startScreenPoller(bot.id, previewCapture, { screenIsTheWork: instance.driverKind === "boxAgent" });
+      if ((previewCapture || browserCapture) && store.bot(bot.id)?.busy) {
+        startScreenPoller(
+          bot.id,
+          { ...(previewCapture ? { computer: previewCapture } : {}), ...(browserCapture ? { browser: browserCapture } : {}) },
+          { screenIsTheWork: instance.driverKind === "boxAgent" },
+        );
       }
       // An adapter may publish completion synchronously just before its
       // dispatch promise resolves. The event could not use the turn-id map

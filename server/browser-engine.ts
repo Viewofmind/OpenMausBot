@@ -10,7 +10,8 @@
 // reason a person can act on, never a silently browserless bot.
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
@@ -188,6 +189,61 @@ export function agentBrowserIntegration(input: {
   const path = (input.env ?? process.env).PATH;
   if (path) env.PATH = path;
   return { command: input.binaryPath, args: ["mcp", "--tools", "core", "--no-webmcp"], env };
+}
+
+/** How long a settled-frame capture may take before the turn gives up on it.
+ * The poller runs beside a live turn, so a hung browser must not hold the
+ * transcript open; a missing picture is better than a stuck fold. */
+const FRAME_TIMEOUT_MS = 10_000;
+
+/** One PNG of a bot's browser, for the transcript's settled frame.
+ *
+ * The Electron browser surface used to supply this and was removed with the
+ * engine swap, leaving the computer surfaces as the only frame source — so a
+ * bot whose only surface is the browser showed the reader nothing at all,
+ * despite the panel promising screenshots in the chat.
+ *
+ * Runs the same binary with the same session env as the MCP mount, so it
+ * attaches to the daemon the bot is already driving rather than starting a
+ * second browser beside it. */
+export function agentBrowserFrame(input: {
+  binaryPath: string;
+  env: Record<string, string>;
+  timeoutMs?: number;
+}): Promise<{ png: string; format: string }> {
+  const file = join(tmpdir(), `openmausbot-browser-${randomUUID()}.png`);
+  return new Promise((settle, fail) => {
+    const child = spawn(input.binaryPath, ["screenshot", file], {
+      env: { ...process.env, ...input.env },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (stderr.length < 2_000) stderr += String(chunk);
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      fail(new Error("the browser did not return a picture in time"));
+    }, input.timeoutMs ?? FRAME_TIMEOUT_MS);
+    const done = (error: Error | null): void => {
+      clearTimeout(timer);
+      try {
+        if (error) {
+          fail(error);
+          return;
+        }
+        settle({ png: readFileSync(file).toString("base64"), format: "png" });
+      } catch {
+        fail(new Error("the browser reported a picture it did not write"));
+      } finally {
+        rmSync(file, { force: true });
+      }
+    };
+    child.on("error", (error: unknown) => done(error instanceof Error ? error : new Error(String(error))));
+    child.on("close", (code) => {
+      done(code === 0 ? null : new Error(`the browser could not be pictured${stderr.trim() ? `: ${stderr.trim().slice(0, 200)}` : ""}`));
+    });
+  });
 }
 
 /** Session ids are file-system and shell safe: a bot id or a profile partition. */

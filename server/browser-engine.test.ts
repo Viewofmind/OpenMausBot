@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  agentBrowserFrame,
   agentBrowserIntegration,
   browserEngineEncryptionKey,
   browserEngineStatus,
@@ -136,5 +137,46 @@ describe("what a bot gets", () => {
     expect(fresh).toMatch(/^[0-9a-f]{64}$/u);
     expect(fresh).not.toBe(key);
     mkdirSync(join(dataDir, "unused"));
+  });
+});
+
+
+describe("agentBrowserFrame", () => {
+  /** A stand-in for the real binary: writes the PNG the CLI would write. */
+  function fakeBinary(body: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "omb-frame-"));
+    const file = join(dir, "agent-browser");
+    writeFileSync(file, `#!/bin/sh\n${body}\n`);
+    chmodSync(file, 0o755);
+    return file;
+  }
+
+  it("returns the picture the browser wrote, base64 encoded", async () => {
+    // `screenshot <path>` is argument 2; the CLI writes the file there.
+    const binaryPath = fakeBinary('printf "PNGDATA" > "$2"');
+    const frame = await agentBrowserFrame({ binaryPath, env: { AGENT_BROWSER_SESSION: "bot-1" } });
+    expect(frame.format).toBe("png");
+    expect(Buffer.from(frame.png, "base64").toString()).toBe("PNGDATA");
+  });
+
+  it("carries the mount's session env, so it pictures the bot's own browser", async () => {
+    const binaryPath = fakeBinary('printf "%s" "$AGENT_BROWSER_SESSION" > "$2"');
+    const frame = await agentBrowserFrame({ binaryPath, env: { AGENT_BROWSER_SESSION: "profile-x" } });
+    expect(Buffer.from(frame.png, "base64").toString()).toBe("profile-x");
+  });
+
+  it("fails with the browser's own reason when the capture fails", async () => {
+    const binaryPath = fakeBinary('echo "no open page" >&2; exit 3');
+    await expect(agentBrowserFrame({ binaryPath, env: {} })).rejects.toThrow(/no open page/);
+  });
+
+  it("fails rather than inventing a picture the browser never wrote", async () => {
+    const binaryPath = fakeBinary("exit 0");
+    await expect(agentBrowserFrame({ binaryPath, env: {} })).rejects.toThrow(/did not write/);
+  });
+
+  it("gives up on a hung browser instead of holding the turn open", async () => {
+    const binaryPath = fakeBinary("sleep 5");
+    await expect(agentBrowserFrame({ binaryPath, env: {}, timeoutMs: 150 })).rejects.toThrow(/in time/);
   });
 });

@@ -38,7 +38,8 @@ const SCREEN_TOUCHING_TOOLS = new Set([
   "open_url",
   "browser_click",
   "browser_fill",
-  // built-in browser
+  // built-in browser: the Electron surface's names, kept because a bot on an
+  // older remote harness can still call them
   "browser_navigate",
   "browser_type",
   "browser_press",
@@ -49,6 +50,20 @@ const SCREEN_TOUCHING_TOOLS = new Set([
   "browser_back",
   "browser_forward",
   "browser_screenshot",
+  // built-in browser: agent-browser's names. The engine swap replaced the
+  // Electron surface without renaming these here, so every browser turn
+  // stopped counting as screen work and no page ever reached the transcript.
+  // Read-only tools stay out by the same rule as everywhere else in this
+  // list: agent_browser_snapshot, _read and _get_text return text, and the
+  // waits change nothing the action before them did not already count.
+  "agent_browser_open",
+  "agent_browser_click",
+  "agent_browser_fill",
+  "agent_browser_type",
+  "agent_browser_press",
+  "agent_browser_select",
+  "agent_browser_check",
+  "agent_browser_screenshot",
   // Cua Driver (local Mac, Local VM, VPS)
   "double_click",
   "right_click",
@@ -81,4 +96,14 @@ export function screenFrameHash(png: string): string {
  * observation dedupe does: an unshown screen beats a wrongly hidden one. */
 export function settledFrameIsNews(shownFrameHash: string | undefined, png: string): boolean {
   return shownFrameHash === undefined || screenFrameHash(png) !== shownFrameHash;
+}
+
+/** Which surface a screen-touching tool acted on. A bot can hold a computer
+ * and a browser at once, and they are different pictures: agent-browser runs
+ * its own headless Chrome on the host, not inside the bot's desktop. Picking
+ * by the tool is what keeps a browsed page from being illustrated with an
+ * idle Local VM. */
+export function screenSurfaceForTool(toolName: string): "browser" | "computer" {
+  const bare = toolName.toLowerCase().replace(/^mcp__.+?__/, "");
+  return bare.startsWith("agent_browser_") || bare.startsWith("browser_") ? "browser" : "computer";
 }
