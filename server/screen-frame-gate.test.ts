@@ -35,6 +35,26 @@ describe("screenTouchingTool", () => {
     expect(screenTouchingTool("agent_browser_wait_for_load")).toBe(false);
   });
 
+  it("takes the server__tool spelling the desktop's own cards use", () => {
+    // The approval card for a browser turn reads `browser__agent_browser_open`
+    // — the server segment without Claude's `mcp` in front. Stripping only
+    // `mcp__<server>__` left this unmatched, so a browser turn still settled
+    // with no picture even after agent-browser's tool names were added.
+    expect(screenTouchingTool("browser__agent_browser_open")).toBe(true);
+    expect(screenTouchingTool("browser__agent_browser_screenshot")).toBe(true);
+    expect(screenSurfaceForTool("browser__agent_browser_open")).toBe("browser");
+    // Not only the browser: the computer server's own tools carry the same
+    // spelling and were missed the same way.
+    expect(screenTouchingTool("computer__screenshot")).toBe(true);
+    expect(screenSurfaceForTool("computer__screenshot")).toBe("computer");
+  });
+
+  it("keeps read-only tools out whatever prefix they arrive with", () => {
+    expect(screenTouchingTool("browser__agent_browser_snapshot")).toBe(false);
+    expect(screenTouchingTool("browser__agent_browser_read")).toBe(false);
+    expect(screenTouchingTool("computer__computer_status")).toBe(false);
+  });
+
   it("takes Codex's bare names and pi's server_tool names", () => {
     expect(screenTouchingTool("click")).toBe(true);
     expect(screenTouchingTool("hotkey")).toBe(true);

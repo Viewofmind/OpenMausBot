@@ -81,7 +81,14 @@ const SCREEN_TOUCHING_TOOLS = new Set([
  * at most once, so pi's `computer_computer_exec` lands on `computer_exec`
  * — still a shell — and never on a bare `exec`. */
 export function screenTouchingTool(toolName: string): boolean {
-  const bare = toolName.toLowerCase().replace(/^mcp__.+?__/, "");
+  // Claude spells a mounted tool `mcp__browser__agent_browser_open`. The
+  // desktop's own approval cards — and the drivers behind them — spell the
+  // same tool `browser__agent_browser_open`, the server segment without the
+  // `mcp`. Stripping only the first spelling left the second unmatched, so a
+  // browser turn still settled with no picture after the tool names
+  // themselves were added. Every segment before a `__` is a namespace; a
+  // bare tool name never contains one.
+  const bare = toolName.toLowerCase().replace(/^(?:[a-z0-9]+__)+/, "");
   return SCREEN_TOUCHING_TOOLS.has(bare) || SCREEN_TOUCHING_TOOLS.has(bare.replace(/^(?:computer|browser)_/, ""));
 }
 
