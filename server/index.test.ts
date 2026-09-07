@@ -7374,6 +7374,74 @@ describe("bot memory API", () => {
   // The recall eval from docs/memory-comparison.md: a bot that did work in
   // an earlier task can find it from a later one, without the user pasting
   // it back — and never sees another bot's threads.
+  it("tells a room when a bot recalls from its private chat, once per source thread", async () => {
+    const bot = (await api("POST", "/api/bots", {})).body.bot;
+    const room = (await api("POST", "/api/groups", { name: "Ops", memberIds: [bot.id] })).body.group;
+    try {
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).status).toBe(200);
+      const privateThreadId = bot.threadId as string;
+      const roomThreadId = room.threadId as string;
+
+      // something said privately, which the room never saw
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, {
+        text: "The pricing page audit found three broken links",
+      })).status).toBe(202);
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      await expect.poll(async () => {
+        const state = (await api("GET", "/api/bots?messages=0")).body;
+        return state.bots.find((candidate: { id: string }) => candidate.id === bot.id)?.busy;
+      }, { timeout: 5_000 }).toBe(false);
+
+      const searchFrom = async (fromThreadId: string, q = "audit broken links") =>
+        fetch(
+          `${BASE}/api/internal/session-search?fromBotId=${encodeURIComponent(bot.id)}&fromThreadId=${encodeURIComponent(fromThreadId)}&q=${encodeURIComponent(q)}`,
+          { headers: { authorization: `Bearer ${await mintTestCapability(BASE, bot.id, fromThreadId)}` } },
+        );
+      const roomActivity = async () => {
+        const dump = await api("GET", `/api/threads/${roomThreadId}/export?format=json`);
+        const messages = (dump.body.messages ?? []) as Array<{ kind?: string; tool?: { name?: string } }>;
+        return messages.filter((message) => message.kind === "activity" && /recalled/.test(message.tool?.name ?? ""));
+      };
+
+      // recalled into the room: the room is told, and the model is told it crossed
+      const first = await searchFrom(roomThreadId);
+      expect(first.status).toBe(200);
+      const firstHits = ((await first.json()) as { hits: Array<Record<string, unknown>> }).hits;
+      expect(firstHits).toHaveLength(1);
+      expect(firstHits[0]).toMatchObject({ threadId: privateThreadId, current: false, crossed: true });
+
+      const announced = await roomActivity();
+      expect(announced).toHaveLength(1);
+      expect(announced[0]!.tool?.name).toContain("recalled 1 message from its private chat with you");
+
+      // searching the same source again in the same room says nothing further
+      expect((await searchFrom(roomThreadId)).status).toBe(200);
+      expect(await roomActivity()).toHaveLength(1);
+
+      // reading the whole message is also a crossing, and is already announced
+      const read = await fetch(
+        `${BASE}/api/internal/session-read?fromBotId=${encodeURIComponent(bot.id)}&fromThreadId=${encodeURIComponent(roomThreadId)}&threadId=${encodeURIComponent(privateThreadId)}&messageId=${encodeURIComponent(String(firstHits[0]!.messageId))}`,
+        { headers: { authorization: `Bearer ${await mintTestCapability(BASE, bot.id, roomThreadId)}` } },
+      );
+      expect(read.status).toBe(200);
+      expect(await read.json()).toMatchObject({ crossed: true });
+      expect(await roomActivity()).toHaveLength(1);
+
+      // the same recall in a one-to-one is not a disclosure and stays silent
+      const own = await searchFrom(privateThreadId);
+      expect(own.status).toBe(200);
+      const ownHits = ((await own.json()) as { hits: Array<Record<string, unknown>> }).hits;
+      expect(ownHits[0]).toMatchObject({ current: true, crossed: false });
+      expect(await roomActivity()).toHaveLength(1);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      await api("DELETE", `/api/groups/${room.id}`);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("session_search recalls the bot's own earlier task from a later one, and only its own", async () => {
     const bot = (await api("POST", "/api/bots", {})).body.bot;
     const other = (await api("POST", "/api/bots", {})).body.bot;

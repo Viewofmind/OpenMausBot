@@ -157,6 +157,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
 import { readMessageText, recallMessages, searchMessages } from "./message-db.ts";
+import { claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7901,6 +7902,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // every task included. Own-bot only, on purpose — a bot's transcripts
       // are its notebook the same way MEMORY.md is (section-context.ts draws
       // that line), and search across bots would be an isolation change.
+      // Announce in the room that a bot reached outside it. Silent when the
+      // room has already been told about that thread, so a bot searching
+      // three times in one turn leaves one chip per source, not per search.
+      const discloseRecall = (bot: BotRecord, roomThreadId: string, sourceThreadIds: readonly string[]): void => {
+        const crossing = claimRecallCrossings(roomThreadId, sourceThreadIds);
+        if (!crossing.count) return;
+        store.appendMessage(roomThreadId, {
+          role: "bot",
+          kind: "activity",
+          from: { botId: bot.id, name: bot.name, color: bot.color },
+          tool: { name: recallCrossingLabel(bot.name, crossing.count), ok: true },
+        });
+      };
       if (method === "GET" && path === "/api/internal/session-search") {
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
         const from = store.bot(fromBotId);
@@ -7914,11 +7928,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const rawLimit = Number(url.searchParams.get("limit"));
         const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.trunc(rawLimit), 25) : 12;
         const ownThreads = [...new Set([from.threadId, ...(from.tasks ?? []).map((task) => task.threadId)])];
+        // A room is the only place a recall can be a disclosure: in a 1:1 the
+        // user already owns every thread the bot can reach.
+        const inRoom = Boolean(store.groupByThread(fromThreadId));
         const hits = recallMessages(q, ownThreads, limit).map((hit) => ({
           ...hit,
           task: store.taskByThread(from.id, hit.threadId)?.title,
           current: hit.threadId === fromThreadId,
+          crossed: inRoom && hit.threadId !== fromThreadId,
         }));
+        if (inRoom) {
+          discloseRecall(from, fromThreadId, hits.filter((hit) => hit.crossed).map((hit) => hit.threadId));
+        }
         return json(res, 200, { hits });
       }
       // session_read: the whole message behind a session_search hit. Same
@@ -7938,8 +7959,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const own = threadId === from.threadId || Boolean(store.taskByThread(from.id, threadId));
         const message = own ? readMessageText(threadId, messageId) : null;
         if (!message) return json(res, 404, { error: "no such message in your conversations" });
+        const readInRoom = Boolean(store.groupByThread(fromThreadId));
+        const readCrossed = readInRoom && threadId !== fromThreadId;
+        if (readCrossed) discloseRecall(from, fromThreadId, [threadId]);
         return json(res, 200, {
           ...message,
+          crossed: readCrossed,
           text: message.text.length > SESSION_READ_MAX_CHARS ? `${message.text.slice(0, SESSION_READ_MAX_CHARS)}…` : message.text,
           task: store.taskByThread(from.id, threadId)?.title,
         });
