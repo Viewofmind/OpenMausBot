@@ -216,6 +216,7 @@ export function agentBrowserFrame(input: {
     const child = spawn(input.binaryPath, ["screenshot", file], {
       env: { ...process.env, ...input.env },
       stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
     });
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => {

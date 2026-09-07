@@ -281,7 +281,7 @@ import {
   browserSessionId,
   describeBrowserEngine,
 } from "./browser-engine.ts";
-import { captureOutsideHumanControl } from "./private-screen-capture.ts";
+import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
 import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
@@ -3684,7 +3684,7 @@ const screenPollers = new Map<
   string,
   {
     timer: ReturnType<typeof setInterval> | null;
-    capture: () => Promise<void>;
+    capture: (fresh?: boolean) => Promise<void>;
     /** Which surface the last screen-touching tool acted on. A bot with both
      * a computer and a browser must be pictured on the one it just used. */
     surface: "browser" | "computer";
@@ -3709,8 +3709,6 @@ const SCREEN_MIN_GAP_MS = 3000;
  * boxAgent's whole session runs ON the box, so every tool it calls acts on
  * that screen even though none of them is named like a computer tool. Its
  * shell-only turns are kept honest by the settle-time hash gate instead. */
-type ScreenCapture = () => Promise<{ png: string; format: string }>;
-
 function startScreenPoller(
   botId: string,
   captures: { computer?: ScreenCapture; browser?: ScreenCapture },
@@ -3718,47 +3716,20 @@ function startScreenPoller(
 ) {
   if (!captures.computer && !captures.browser) return;
   if (screenPollers.has(botId)) return;
-  // One capture at a time, shared by the interval, the pokes, and the
-  // turn-end grab: awaiting the in-flight promise (rather than dropping the
-  // call) is what lets the final frame be the settled one. The min-gap keeps
-  // a tool-heavy turn from spending the box's single command endpoint on
-  // previews the user isn't waiting for.
-  let current: Promise<void> | null = null;
-  let lastAt = 0;
-  const entry = {
+  // Assign rather than spread: the source's last-frame getter deliberately
+  // hides a stale frame as soon as the selected surface changes.
+  const entry = Object.assign(createScreenFrameSource({
+    captures,
+    control: () => ({
+      held: computerControl.snapshot(botId).held,
+      revision: computerControlRevision.get(botId) ?? 0,
+    }),
+    onFrame: (frame) => broadcast({ kind: "screen", botId, ...frame }),
+    minGapMs: SCREEN_MIN_GAP_MS,
+  }), {
     timer: null as ReturnType<typeof setInterval> | null,
-    capture: (): Promise<void> => {
-      // A person can type credentials while driving any browser/computer
-      // surface. Never take a preview during that lease: live frames and the
-      // settled transcript image must retain only the last pre-takeover view.
-      if (computerControl.snapshot(botId).held) return Promise.resolve();
-      if (!current && Date.now() - lastAt < SCREEN_MIN_GAP_MS) return Promise.resolve();
-      current ??= (async () => {
-        try {
-          const chosen = captures[entry.surface] ?? captures.computer ?? captures.browser!;
-          const frame = await captureOutsideHumanControl(
-            () => ({
-              held: computerControl.snapshot(botId).held,
-              revision: computerControlRevision.get(botId) ?? 0,
-            }),
-            chosen,
-          );
-          if (!frame) return;
-          entry.last = frame;
-          broadcast({ kind: "screen", botId, ...frame });
-        } catch {
-          /* box asleep or mid-command — try again next tick */
-        } finally {
-          lastAt = Date.now();
-          current = null;
-        }
-      })();
-      return current;
-    },
-    surface: (captures.computer ? "computer" : "browser") as "browser" | "computer",
-    last: null as Frame | null,
     touched: screenIsTheWork,
-  };
+  });
   entry.timer = setInterval(() => void entry.capture(), SCREEN_POLL_MS);
   screenPollers.set(botId, entry);
 }
@@ -3822,7 +3793,7 @@ async function finalScreenFrame(botId: string, threadId: string): Promise<Frame 
   if (entry.timer) clearInterval(entry.timer);
   screenPollers.delete(botId);
   if (!entry.touched) return null;
-  await entry.capture();
+  await entry.capture(true);
   const frame = entry.last;
   if (!frame || !settledFrameIsNews(shownScreenHash(botId, threadId), frame.png)) return null;
   settledScreenHashes.set(botId, screenFrameHash(frame.png));

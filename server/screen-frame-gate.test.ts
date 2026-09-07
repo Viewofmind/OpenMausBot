@@ -112,6 +112,14 @@ describe("screenSurfaceForTool", () => {
     expect(screenSurfaceForTool("computer_batch")).toBe("computer");
   });
 
+  it.each(["browser_click", "browser_fill"])("keeps desktop %s on the computer across drivers", (tool) => {
+    expect(screenSurfaceForTool(`mcp__computer__${tool}`)).toBe("computer");
+    expect(screenSurfaceForTool(`computer_${tool}`)).toBe("computer");
+    expect(screenSurfaceForTool(tool)).toBe("computer");
+    expect(screenSurfaceForTool(`mcp__browser__${tool}`)).toBe("browser");
+    expect(screenSurfaceForTool(`browser_agent_${tool}`)).toBe("browser");
+  });
+
   it("keeps a browsed page from being illustrated with an idle desktop", () => {
     // The case that made this necessary: a bot holding both surfaces, whose
     // turn was entirely web work, settled with a picture of its Local VM.

@@ -104,6 +104,14 @@ export function settledFrameIsNews(shownFrameHash: string | undefined, png: stri
  * by the tool is what keeps a browsed page from being illustrated with an
  * idle Local VM. */
 export function screenSurfaceForTool(toolName: string): "browser" | "computer" {
-  const bare = toolName.toLowerCase().replace(/^mcp__.+?__/, "");
+  const name = toolName.toLowerCase();
+  // The computer server's browser_click/fill act inside the desktop, not
+  // in agent-browser. Keep the server identity before stripping prefixes.
+  if (name.startsWith("mcp__computer__") || name.startsWith("computer_")) return "computer";
+  if (name.startsWith("mcp__browser__")) return "browser";
+  const bare = name.replace(/^mcp__.+?__/, "");
+  // Codex reports bare names. These two belong to computer-proxy; the
+  // standalone browser now uses the unambiguous agent_browser_* names.
+  if (bare === "browser_click" || bare === "browser_fill") return "computer";
   return bare.startsWith("agent_browser_") || bare.startsWith("browser_") ? "browser" : "computer";
 }
