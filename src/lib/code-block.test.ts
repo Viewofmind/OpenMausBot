@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   countLines,
   formatLineCount,
+  getCodeFileExtension,
   getLanguageDisplayName,
+  getSnippetFileName,
 } from "./code-block";
 
 describe("getLanguageDisplayName", () => {
@@ -89,3 +91,66 @@ describe("formatLineCount", () => {
     expect(formatLineCount(42)).toBe("42 lines");
   });
 });
+
+describe("getCodeFileExtension", () => {
+  it("maps common language identifiers to their standard file extensions", () => {
+    expect(getCodeFileExtension("ts")).toBe("ts");
+    expect(getCodeFileExtension("typescript")).toBe("ts");
+    expect(getCodeFileExtension("tsx")).toBe("tsx");
+    expect(getCodeFileExtension("js")).toBe("js");
+    expect(getCodeFileExtension("jsx")).toBe("jsx");
+    expect(getCodeFileExtension("py")).toBe("py");
+    expect(getCodeFileExtension("python")).toBe("py");
+    expect(getCodeFileExtension("sh")).toBe("sh");
+    expect(getCodeFileExtension("bash")).toBe("sh");
+    expect(getCodeFileExtension("zsh")).toBe("zsh");
+    expect(getCodeFileExtension("json")).toBe("json");
+    expect(getCodeFileExtension("sql")).toBe("sql");
+    expect(getCodeFileExtension("rs")).toBe("rs");
+    expect(getCodeFileExtension("rust")).toBe("rs");
+    expect(getCodeFileExtension("go")).toBe("go");
+    expect(getCodeFileExtension("html")).toBe("html");
+    expect(getCodeFileExtension("css")).toBe("css");
+    expect(getCodeFileExtension("md")).toBe("md");
+    expect(getCodeFileExtension("markdown")).toBe("md");
+    expect(getCodeFileExtension("yaml")).toBe("yaml");
+    expect(getCodeFileExtension("yml")).toBe("yaml");
+    expect(getCodeFileExtension("dockerfile")).toBe("dockerfile");
+  });
+
+  it("normalizes case and surrounding whitespace", () => {
+    expect(getCodeFileExtension("  PYTHON  ")).toBe("py");
+    expect(getCodeFileExtension("TS")).toBe("ts");
+    expect(getCodeFileExtension(" JSON ")).toBe("json");
+  });
+
+  it("falls back to 'txt' for omitted, empty, or unknown long identifiers", () => {
+    expect(getCodeFileExtension("")).toBe("txt");
+    expect(getCodeFileExtension("   ")).toBe("txt");
+    expect(getCodeFileExtension(null)).toBe("txt");
+    expect(getCodeFileExtension(undefined)).toBe("txt");
+  });
+
+  it("uses valid short alphanumeric identifiers directly as extension", () => {
+    expect(getCodeFileExtension("zig")).toBe("zig");
+    expect(getCodeFileExtension("lua")).toBe("lua");
+    expect(getCodeFileExtension("r")).toBe("r");
+  });
+});
+
+describe("getSnippetFileName", () => {
+  it("generates correct default filenames based on language", () => {
+    expect(getSnippetFileName("python")).toBe("snippet.py");
+    expect(getSnippetFileName("ts")).toBe("snippet.ts");
+    expect(getSnippetFileName("json")).toBe("snippet.json");
+    expect(getSnippetFileName("sql")).toBe("snippet.sql");
+    expect(getSnippetFileName("")).toBe("snippet.txt");
+    expect(getSnippetFileName(null)).toBe("snippet.txt");
+  });
+
+  it("preserves standalone filenames like dockerfile and makefile", () => {
+    expect(getSnippetFileName("dockerfile")).toBe("dockerfile");
+    expect(getSnippetFileName("makefile")).toBe("makefile");
+  });
+});
+
