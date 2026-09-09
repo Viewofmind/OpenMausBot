@@ -1,4 +1,4 @@
-import { Children, createElement, type ChangeEvent, type ReactElement } from "react";
+import { Children, createElement, type ChangeEvent, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
@@ -12,13 +12,13 @@ import type { EffortLevel } from "../../server/contracts.ts";
 const fixture = vi.hoisted(() => {
   vi.stubGlobal("window", {});
   vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {} });
-  return { instances: [] as InstanceInfo[] };
+  return { instances: [] as InstanceInfo[], dispatch: vi.fn() };
 });
 vi.mock("@/state/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/state/store")>()),
   useStore: () => ({
     state: { instances: fixture.instances },
-    dispatch: vi.fn(),
+    dispatch: fixture.dispatch,
     refreshInstances: vi.fn(),
     refreshModels: vi.fn(),
   }),
@@ -68,6 +68,14 @@ function renderEffort(instances: InstanceInfo[], effort?: EffortLevel): string {
 }
 
 describe("EffortRow", () => {
+  it("pins thread effort changes without changing profile defaults", () => {
+    fixture.instances = [engine(["high"])];
+    const row = EffortRow({ bot: bot(), threadId: "independent-thread" })!;
+    const levels = Children.toArray(row.props.children).at(-1) as ReactElement<{ children: ReactNode }>;
+    const high = Children.toArray(levels.props.children)[1] as ReactElement<{ onClick: () => void }>;
+    high.props.onClick();
+    expect(fixture.dispatch).toHaveBeenLastCalledWith({ type: "setModel", botId: "atlas", threadId: "independent-thread", selection: { instanceId: "codex", model: "gpt-5.6", effort: "high" } });
+  });
   it("renders nothing for an engine that declares no effort levels", () => {
     expect(renderEffort([engine()])).toBe("");
     // an engine that declares an empty list is the same promise as none
@@ -113,6 +121,14 @@ describe("ModelPicker trigger", () => {
   /** The visible effort suffix, not the tooltip that also names the level. */
   const effortChip = (markup: string) =>
     markup.match(/<span data-model-effort[^>]*>(.*?)<\/span>/s)?.[1].replace(/<!--.*?-->/g, "").trim();
+
+  it("names the thread in busy header help and the bot in profile settings", () => {
+    fixture.instances = [engine()];
+    for (const threadId of ["independent-thread", undefined]) {
+      const markup = renderToStaticMarkup(createElement(ModelPicker, { bot: { ...bot(), busy: true }, threadId }));
+      expect(markup).toContain(`Stop this ${threadId ? "thread" : "bot"}&#x27;s turn before changing its model`);
+    }
+  });
 
   it("shows the model and its effort together in the header", () => {
     const markup = renderTrigger("high");

@@ -49,10 +49,12 @@ export function effortLabel(level: EffortLevel): string {
  * sends, so both stay and the tooltips say which is which. */
 export function EffortRow({
   bot,
+  threadId,
   className,
   label,
 }: {
   bot: Bot;
+  threadId?: string;
   className?: string;
   label?: ReactNode;
 }) {
@@ -79,7 +81,7 @@ export function EffortRow({
                 ? "Send no effort level and let the engine decide"
                 : `Ask for ${effortLabel(level)} reasoning effort`
             }
-            onClick={() => dispatch({ type: "setModel", botId: bot.id, selection: { ...selection, effort: level } })}
+            onClick={() => dispatch({ type: "setModel", botId: bot.id, threadId, selection: { ...selection, effort: level } })}
             className={cn(
               "rounded-full border px-2.5 py-1 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
               selection.effort === level
@@ -235,11 +237,13 @@ export function ClaudeAccountSelect({ accounts, selectedId, onSelect }: {
 
 export function ModelPicker({
   bot,
+  threadId,
   className,
   contained = false,
   label,
 }: {
   bot: Bot;
+  threadId?: string;
   className?: string;
   /** Expand the menu in-flow under the trigger so it cannot overflow a
    * narrow parent (the Agent profile sidebar). */
@@ -358,6 +362,7 @@ export function ModelPicker({
     dispatch({
       type: "setModel",
       botId: bot.id,
+      threadId,
       selection: nextSelection,
     });
     setOpen(false);
@@ -417,7 +422,7 @@ export function ModelPicker({
       )}
       title={
         bot.busy
-          ? t("model.busy")
+          ? t(threadId ? "model.threadBusy" : "model.busy")
           : active
           ? `${active.displayName} · ${modelLabel(active, selection.model)}${
               modelProvider(active, selection.model) ? ` · ${modelProvider(active, selection.model)}` : ""
@@ -478,7 +483,7 @@ export function ModelPicker({
             "flex overflow-hidden rounded-2xl border border-hairline/50 bg-card",
             contained
               ? "relative mt-3 w-full max-h-[min(420px,50dvh)]"
-              : "absolute right-0 top-full z-30 mt-2 w-[380px] max-h-[min(480px,calc(100dvh-7rem))] shadow-2xl shadow-black/50",
+              : "absolute right-0 top-full z-30 mt-2 w-[380px] max-w-[calc(100vw-2rem)] max-h-[min(480px,calc(100dvh-7rem))] shadow-2xl shadow-black/50",
           )}
         >
           <ModelEngineRail instances={state.instances} selectedInstance={railInstance} claudeInstance={claudeRailInstance} onSelect={selectRail} />
@@ -528,7 +533,7 @@ export function ModelPicker({
                     </p>
                   )}
                   <div className="mt-0.5 text-[11.5px] text-ink-secondary">
-                    {pane === "custom" ? t("model.localHint") : t("model.chooseHint")}
+                    {pane === "custom" ? t("model.localHint") : t(threadId ? "model.chooseThreadHint" : "model.chooseHint")}
                   </div>
                 </div>
 
@@ -584,7 +589,7 @@ export function ModelPicker({
                       {pane === "main" ? (
                         <>
                           {railInstance.snapshot.update && (
-                            <EngineUpdateNotice update={railInstance.snapshot.update} className="mx-1 mb-2" />
+                            <EngineUpdateNotice update={railInstance.snapshot.update} instance={railInstance} className="mx-1 mb-2" />
                           )}
                           <EngineGroupLabel className="px-2 pb-1 pt-0.5">
                             {query
@@ -657,6 +662,7 @@ export function ModelPicker({
                 {!contained && (
                   <EffortRow
                     bot={bot}
+                    threadId={threadId}
                     className="shrink-0 border-t border-hairline/40 px-4 py-3"
                     label={<span className="text-[12.5px] font-medium text-ink">Effort</span>}
                   />

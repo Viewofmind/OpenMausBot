@@ -14,7 +14,7 @@ import { freePortBlock } from "../server/testing/ports.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FAKE_CLI = join(ROOT, "server", "testing", "fake-claude-cli.ts");
-const MUTATING = new Set(["new-bot", "new-channel", "send", "send-channel", "interrupt"]);
+const MUTATING = new Set(["new-bot", "new-channel", "send", "send-channel", "interrupt", "set-model"]);
 
 export class ControlOmbError extends Error {
   readonly hint?: string;
@@ -41,18 +41,19 @@ read-only:
   bots [--url URL]
   channels [--url URL]
   models [--url URL]
-  messages --bot ID [--limit 30] [--url URL]
-  messages --channel ID [--limit 30] [--url URL]
-  wait --bot ID [--timeout 30] [--url URL]
-  wait --channel ID [--timeout 30] [--url URL]
+  messages --bot ID [--task ID] [--limit 30] [--url URL]
+  messages --channel ID [--task ID] [--limit 30] [--url URL]
+  wait --bot ID [--task ID] [--timeout 30] [--url URL]
+  wait --channel ID [--task ID] [--timeout 30] [--url URL]
 
 mutating (an explicit --url or OPENMAUSBOT_URL/OMB_PORT is required):
   new-bot --name NAME [--url URL]
   new-channel --name NAME --members ID,ID [--url URL]
-  send --bot ID --text TEXT [--dry-run] [--url URL]
-  send-channel --channel ID --text TEXT [--dry-run] [--url URL]
-  interrupt --bot ID [--dry-run] [--url URL]
-  interrupt --channel ID [--dry-run] [--url URL]
+  send --bot ID --text TEXT [--task ID] [--dry-run] [--url URL]
+  send-channel --channel ID --text TEXT [--task ID] [--dry-run] [--url URL]
+  interrupt --bot ID [--task ID] [--dry-run] [--url URL]
+  interrupt --channel ID [--task ID] [--dry-run] [--url URL]
+  set-model --bot ID --instance ID --model ID [--task ID] [--effort LEVEL] [--dry-run] [--url URL]
 
 isolated fixture:
   node --experimental-strip-types scripts/control-omb.ts launch
@@ -208,29 +209,53 @@ export async function runControlOmb(
       bot: { type: "string" },
       channel: { type: "string" },
       text: { type: "string" },
+      task: { type: "string" },
       "dry-run": { type: "boolean", default: false },
     });
     const expected = command === "send" ? "bot" : "channel";
     const destination = target(values);
     if (destination.type !== expected) throw new ControlOmbError(`${command} requires --${expected} ID`);
     const tool = expected === "bot" ? "send_bot_message" : "send_channel_message";
-    const input = { [`${expected}_id`]: destination.id, text: required(values.text, "--text") };
+    const input = {
+      [`${expected}_id`]: destination.id,
+      text: required(values.text, "--text"),
+      ...(values.task !== undefined ? { task_id: required(values.task, "--task") } : {}),
+    };
     return dryRun(command, values, tool, input) ?? call(tool, input, values.url);
+  }
+
+  if (command === "set-model") {
+    const values = parse(command, args, {
+      bot: { type: "string" }, task: { type: "string" }, instance: { type: "string" },
+      model: { type: "string" }, effort: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
+    });
+    const input = {
+      bot_id: required(values.bot, "--bot"),
+      instance_id: required(values.instance, "--instance"),
+      model: required(values.model, "--model"),
+      ...(values.task !== undefined ? { task_id: required(values.task, "--task") } : {}),
+      ...(values.effort !== undefined ? { effort: required(values.effort, "--effort") } : {}),
+    };
+    return dryRun(command, values, "set_bot_model", input) ?? call("set_bot_model", input, values.url);
   }
 
   if (command === "wait" || command === "messages" || command === "interrupt") {
     const values = parse(command, args, {
       bot: { type: "string" },
       channel: { type: "string" },
+      task: { type: "string" },
       timeout: { type: "string" },
       limit: { type: "string" },
       "dry-run": { type: "boolean", default: false },
     });
     const destination = target(values);
+    const pinned = values.task !== undefined ? { task_id: required(values.task, "--task") } : {};
     if (command === "wait") {
       return call("wait_for_conversation", {
         target_type: destination.type,
         target_id: destination.id,
+        ...pinned,
         timeout_seconds: positiveInteger(values.timeout, "--timeout", 30, 120),
       }, values.url);
     }
@@ -238,11 +263,12 @@ export async function runControlOmb(
       const tool = destination.type === "bot" ? "get_bot_messages" : "get_channel_messages";
       return call(tool, {
         [`${destination.type}_id`]: destination.id,
+        ...pinned,
         limit: positiveInteger(values.limit, "--limit", 30, 200),
       }, values.url);
     }
     const tool = "interrupt_conversation";
-    const input = { target_type: destination.type, target_id: destination.id };
+    const input = { target_type: destination.type, target_id: destination.id, ...pinned };
     return dryRun(command, values, tool, input) ?? call(tool, input, values.url);
   }
 

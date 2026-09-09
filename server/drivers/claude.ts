@@ -17,6 +17,7 @@ import { join, dirname, isAbsolute, normalize } from "node:path";
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
+import { ClaudeLoginController } from "./claude-login-auth.ts";
 
 import type {
   DriverCreateInput,
@@ -1382,6 +1383,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       return writeUser(s, threadId, claudeUserMessage(text, undefined));
     };
 
+    // Sign in from Settings: the unmodified CLI's own login, driven over pipes
+    // (server/drivers/claude-login-auth.ts). Same environment as every turn.
+    const login = new ClaudeLoginController({ cli: config.cli, environment, onAuthenticated: async () => { await refreshModels(); } });
+
     const snapshot = async (): Promise<ProviderSnapshot> => {
       const env = environment();
       const version = await new Promise<string | null>((resolve) => {
@@ -1465,6 +1470,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       },
       refreshModels,
       snapshot,
+      startAuthentication: () => login.start(),
+      getAuthentication: (flowId) => login.get(flowId),
+      completeAuthentication: (flowId, code) => login.complete(flowId, code),
+      cancelAuthentication: () => login.cancel(),
+      signOut: () => login.signOut(),
       adapter: {
         provider: DRIVER_KIND,
         capabilities: {
@@ -1508,9 +1518,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       generateText: (prompt) => generateReview(prompt),
       reviewPermission: generateReview,
       dispose: async () => {
-        for (const { stop } of active.values()) stop();
-        for (const threadId of [...sessions.keys()]) closeSession(threadId, "dispose");
-        listeners.clear();
+        try {
+          await login.dispose();
+        } finally {
+          for (const { stop } of active.values()) stop();
+          for (const threadId of [...sessions.keys()]) closeSession(threadId, "dispose");
+          listeners.clear();
+        }
       },
     };
   },

@@ -126,7 +126,7 @@ struct SettingsView: View {
                         TasksRoutinesView()
                     } label: {
                         Label {
-                            Text("Tasks & Routines")
+                            Text("Threads & Routines")
                         } icon: {
                             SettingsIcon(symbol: "calendar.badge.clock", color: .orange)
                         }

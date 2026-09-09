@@ -14,6 +14,7 @@ import {
   LEARN_PROMPT,
   PROFILE_PROMPT,
   ROUTINE_PROMPT,
+  ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
 } from "./system-prompt.ts";
 
@@ -71,7 +72,7 @@ describe("computerPrompt", () => {
 
 describe("shared sentences", () => {
   it("each begins with one space so they concatenate onto the persona line", () => {
-    for (const sentence of [COMPOSIO_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT]) {
+    for (const sentence of [COMPOSIO_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, ROUTINE_EXECUTION_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT]) {
       expect(sentence.startsWith(" ")).toBe(true);
       expect(sentence.startsWith("  ")).toBe(false);
     }

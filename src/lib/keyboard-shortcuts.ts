@@ -99,11 +99,11 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     ],
   },
   {
-    category: "Management & Channels",
+    category: "Management & Groups",
     items: [
       {
         id: "save-bulletin",
-        description: "Save channel bulletin changes",
+        description: "Save group instruction changes",
         macKeys: ["⌘", "Return"],
         winKeys: ["Ctrl", "Enter"],
       },

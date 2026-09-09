@@ -10,11 +10,49 @@ import {
   markdownImageName,
   markdownImageOpenUrl,
   localFilePath,
+  textDirection,
 } from "./ChatMarkdown";
+import { StoreProvider } from "@/state/store";
+import { ThreadRefsContext } from "./ThreadRefs";
 
 vi.mock("react", async (importOriginal) => {
   const react = await importOriginal<typeof React>();
   return { ...react, useEffect: vi.fn(react.useEffect) };
+});
+
+describe("mention highlighting", () => {
+  const mentionPeers = [{ name: "Atlas" }, { name: "調査担当" }];
+  it("carries bot colors into Markdown without coloring everyone as a bot", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "@Atlas @Juniper @everyone", everyone: true,
+      mentionPeers: [{ name: "Atlas", color: "blue" }, { name: "Juniper", color: "red" }],
+    }));
+    expect(html).toContain('style="--mention-color:#377FE6">@Atlas');
+    expect(html).toContain('style="--mention-color:#D94B52">@Juniper');
+    expect(html).toContain('<span class="mention-highlight">@everyone</span>');
+  });
+  it("highlights known mentions in prose, lists and tables", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Ask @Atlas.\n\n- @調査担当 確認\n\n| Who |\n| --- |\n| @everyone |", mentionPeers, everyone: true,
+    }));
+    expect(html.match(/class="mention-highlight"/g)).toHaveLength(3);
+    expect(html).toContain('<span class="mention-highlight">@Atlas</span>');
+    expect(html).toContain("<table");
+  });
+  it("leaves code, links, emails and unknown names untouched", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "`@Atlas`\n\n```text\n@Atlas\n```\n\n[@Atlas](https://example.test) me@Atlas.test @Ghost", mentionPeers,
+    }));
+    expect(html).not.toContain('class="mention-highlight"');
+    expect(html).toContain('href="https://example.test"');
+  });
+  it("keeps model HTML inert even when it contains a matching name", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: '<img src=x onerror="bad()"> @Atlas', mentionPeers,
+    }));
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain('<script');
+  });
 });
 
 it("requests both code palettes for skin-aware highlighting", async () => {
@@ -37,6 +75,37 @@ it("requests both code palettes for skin-aware highlighting", async () => {
     effect.mockImplementation(originalUseEffect);
     vi.doUnmock("shiki");
   }
+});
+
+describe("#Title thread links in markdown", () => {
+  const threads = [
+    { botId: "scout", botName: "Scout", threadId: "qa-245", title: "QA PR 245", activeAt: 2 },
+    { botId: "scout", botName: "Scout", threadId: "short", title: "QA", activeAt: 1 },
+  ];
+  const render = (text: string) => renderToStaticMarkup(createElement(StoreProvider, null,
+    createElement(ThreadRefsContext.Provider, { value: { threads, currentBotId: "scout" } }, createElement(ChatMarkdown, { text }))));
+
+  it("links a known title in prose as a button that opens the thread", () => {
+    const markup = render("I opened #QA PR 245 for the review.");
+    expect(markup).toContain('<button type="button" data-thread-link="qa-245"');
+    expect(markup).toContain('title="Open #QA PR 245"');
+    expect(markup).toContain(">#QA PR 245</button>");
+    expect(markup).not.toContain('data-thread-link="short"');
+  });
+
+  it("leaves code, links, headings and issue numbers alone", () => {
+    const markup = render("`#QA PR 245` in code, [#QA PR 245](https://example.test) as a link, #123 an issue\n\n# QA PR 245\n\nplain");
+    expect(markup).not.toContain("data-thread-link");
+    expect(markup).toContain("<code");
+    // the heading survives as a heading (this renderer draws it as a div), unlinked
+    expect(markup).toContain('font-semibold">QA PR 245</div>');
+  });
+
+  it("does nothing without any visible threads", () => {
+    const markup = renderToStaticMarkup(createElement(StoreProvider, null, createElement(ChatMarkdown, { text: "#QA PR 245" })));
+    expect(markup).not.toContain("data-thread-link");
+    expect(markup).toContain("#QA PR 245");
+  });
 });
 
 describe("Markdown image metadata", () => {
@@ -231,5 +300,132 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain('aria-label="Wrap long lines"');
     expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain("line1\nline2\nline3");
+  });
+});
+
+describe("bidi: message content carries its own direction", () => {
+  const ARABIC = "مرحبا بالعالم";
+
+  it("reads direction from the first strong letter, ignoring weak characters", () => {
+    expect(textDirection("مرحبا")).toBe("rtl");
+    expect(textDirection("hello")).toBe("ltr");
+    expect(textDirection("")).toBe("ltr");
+    // digits, punctuation and emoji are directionally weak — keep scanning
+    expect(textDirection("  «2024» — مرحبا hello")).toBe("rtl");
+    expect(textDirection("🎉 42. hello مرحبا")).toBe("ltr");
+    expect(textDirection("שלום")).toBe("rtl");
+    // the ranges have to hold for every RTL script, not a maintained list:
+    // these span all four blocks Unicode reserves for right-to-left letters
+    expect(textDirection("\u0780")).toBe("rtl"); // Thaana
+    expect(textDirection("\u07CA")).toBe("rtl"); // N'Ko
+    expect(textDirection("\uFB2E")).toBe("rtl"); // Hebrew presentation form
+    expect(textDirection("\u{10D00}")).toBe("rtl"); // Hanifi Rohingya
+    expect(textDirection("\u{10E80}")).toBe("rtl"); // Yezidi
+    expect(textDirection("\u{10D50}")).toBe("rtl"); // Garay (10D40 is a digit)
+    expect(textDirection("\u{10F70}")).toBe("rtl"); // Old Uyghur
+    expect(textDirection("\u{1E900}")).toBe("rtl"); // Adlam
+    // and must not swallow the LTR scripts that sit near those blocks
+    expect(textDirection("\u{11000}\u{11005}")).toBe("ltr"); // Brahmi
+    expect(textDirection("\u0915")).toBe("ltr"); // Devanagari
+    expect(textDirection("\u4E2D")).toBe("ltr"); // Han
+  });
+
+  it("gives every block its own direction instead of the UI's", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: [
+        `# ${ARABIC}`,
+        "",
+        `${ARABIC} paragraph`,
+        "",
+        "An English paragraph stays left-to-right.",
+        "",
+        `> ${ARABIC}`,
+        "",
+        `- ${ARABIC}`,
+        "",
+        `| ${ARABIC} | b |`,
+        "| --- | --- |",
+        `| ${ARABIC} | 2 |`,
+      ].join("\n"),
+    }));
+
+    expect(html).toContain('<div dir="rtl" class="mt-2 text-[16px] font-semibold">');
+    expect(html).toContain('<p dir="rtl">');
+    expect(html).toContain('<p dir="ltr">An English paragraph');
+    expect(html).toContain('<blockquote dir="rtl"');
+    expect(html).toContain('<ul dir="rtl"');
+    expect(html).toContain('<table dir="rtl"');
+  });
+
+  it("keeps a table on one direction so columns and cells stay aligned", () => {
+    // cells must NOT resolve individually: an Arabic header over a Latin
+    // column would hang off the opposite edge from its own data
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `| ${ARABIC} | ms |\n| --- | --- |\n| buildIndex | 340 |`,
+    }));
+    expect(html).toContain('<table dir="rtl"');
+    expect(html).not.toContain("<th dir=");
+    expect(html).not.toContain("<td dir=");
+  });
+
+  it("judges a block by its prose, not by the code inside it", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `\`fs.readFileSync\` ${ARABIC} داخل الحلقة`,
+    }));
+    expect(html).toContain('<p dir="rtl">');
+  });
+
+  it("uses logical box properties so indents and rules follow the text", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `- ${ARABIC}\n\n1. ${ARABIC}\n\n> ${ARABIC}\n\n| a |\n| --- |\n| b |`,
+    }));
+
+    expect(html).toContain("list-disc space-y-1 ps-5");
+    expect(html).toContain("list-decimal space-y-1 ps-5");
+    expect(html).toContain("border-s-2 border-hairline ps-3");
+    expect(html).toContain("px-2 py-1.5 text-start font-semibold");
+    expect(html).not.toMatch(/class="[^"]*\bpl-5\b/);
+    expect(html).not.toMatch(/class="[^"]*\bborder-l-2\b/);
+    expect(html).not.toMatch(/class="[^"]*\btext-left\b/);
+  });
+
+  it("pins code left-to-right and isolates it from the surrounding RTL text", () => {
+    const inline = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `${ARABIC} \`items[0].name\` ${ARABIC}`,
+    }));
+    expect(inline).toContain('<code dir="ltr"');
+    expect(inline).toContain("[unicode-bidi:isolate]");
+
+    const fenced = renderToStaticMarkup(createElement(CodeBlock, {
+      code: "const total = items[0].count + 1;",
+      lang: "ts",
+      streaming: false,
+    }));
+    expect(fenced).toContain('<div dir="ltr"');
+  });
+
+  it("gives links a base direction, not isolation alone", () => {
+    // isolate keeps a link from disturbing the sentence around it, but the
+    // link's own contents still lay out along its inherited direction — a URL
+    // in an RTL paragraph needs an LTR base of its own.
+    const url = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `${ARABIC} <https://example.test/a/b?x=1> ${ARABIC}`,
+    }));
+    expect(url).toContain('dir="auto"');
+
+    // an Arabic label must not be pinned LTR, which is why the anchor
+    // resolves rather than hard-coding a direction
+    const labelled = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `[${ARABIC}](https://example.test/a)`,
+    }));
+    expect(labelled).toContain('dir="auto"');
+
+    // a local path is always left-to-right, so that root is pinned. It needs
+    // a message context: without one the link degrades to a plain label.
+    const path = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `${ARABIC} [report](/Users/maus/out/report.md) ${ARABIC}`,
+      message: { threadId: "thread-1", messageId: "message-1" },
+    }));
+    expect(path).toContain('<span dir="ltr"');
   });
 });

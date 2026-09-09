@@ -97,6 +97,27 @@ describe("control-omb command mapping", () => {
     })).rejects.toThrow("--timeout must be an integer from 1 to 120");
     expect(callTool).not.toHaveBeenCalled();
   });
+
+  it("forwards pinned task IDs for sends, reads, waits, interrupts, and model changes", async () => {
+    const callTool = vi.fn(async (name: string, args: Record<string, unknown>) => ({ name, args }));
+    const dependencies = { callTool: callTool as any, env: { OPENMAUSBOT_URL: "http://127.0.0.1:19999" } };
+    for (const [command, tool, extra] of [
+      ["send", "send_bot_message", ["--text", "hello"]],
+      ["messages", "get_bot_messages", []],
+      ["wait", "wait_for_conversation", []],
+      ["interrupt", "interrupt_conversation", []],
+      ["set-model", "set_bot_model", ["--instance", "claude", "--model", "model-b", "--effort", "high"]],
+    ] as const) {
+      await expect(runControlOmb([command, "--bot", "bot-1", "--task", "task-a", ...extra], dependencies))
+        .resolves.toMatchObject({ name: tool, args: { task_id: "task-a" } });
+    }
+    expect(callTool.mock.calls.at(-1)?.[1]).toEqual({
+      bot_id: "bot-1", task_id: "task-a", instance_id: "claude", model: "model-b", effort: "high",
+    });
+    await expect(runControlOmb(["set-model", "--bot", "bot-1", "--instance", "claude", "--model", "model-b"], {
+      callTool: callTool as any, env: {},
+    })).rejects.toThrow("explicit OpenMausBot instance");
+  });
 });
 
 describe("control-omb isolated verification loop", () => {

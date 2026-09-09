@@ -36,6 +36,7 @@ import { appendNative } from "./native.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { CodexDeviceAuthController } from "./codex-device-auth.ts";
+import { codexAccountEmail } from "./codex-identity.ts";
 
 export { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
 
@@ -1154,11 +1155,15 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         resolve(!err && /^logged in\b/im.test(`${stdout}\n${stderr ?? ""}`)),
       );
     });
+    // Display identity only, so Settings can say whose ChatGPT account the
+    // bots run on; the status command above stays the authority on sign-in.
+    const email = authenticated ? await codexAccountEmail(config.cli, env) : null;
     // childEnv drops OPENAI_API_KEY on purpose — turns run on the ChatGPT login
     return {
       state: "available",
       version,
       authenticated,
+      ...(email ? { account: { email } } : {}),
       update: codexAstraUpdate(version, models, config.cli),
       billing: "subscription",
     };
@@ -1176,6 +1181,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     startAuthentication: () => authentication.start(),
     getAuthentication: (flowId) => authentication.get(flowId),
     cancelAuthentication: () => authentication.cancel(),
+    signOut: () => authentication.signOut(),
     snapshot,
     adapter: {
       provider: DRIVER_KIND,

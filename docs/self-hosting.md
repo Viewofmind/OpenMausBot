@@ -97,6 +97,18 @@ is present. Three ways to make the server reachable from elsewhere:
   fleet issued and skip `login`: the address and connector token are fetched
   at every start and nothing is written to disk. A rejected credential stops
   the start with a clear message rather than serving locally.
+- **Your own domain, still one command:**
+
+  ```sh
+  npx openmausbot serve --domain maus.example.com
+  ```
+
+  Point the domain's A record at this machine and open ports 80 and 443.
+  The server downloads a pinned Caddy once into its data dir, writes the
+  same Caddyfile the Docker stack uses, runs it as a child, and Caddy gets
+  and renews the certificate from Let's Encrypt. On Linux, binding ports 80
+  and 443 as a normal user needs one privilege grant; when Caddy reports the
+  refusal, `serve` prints the exact `setcap` command to run once.
 - **Behind your own proxy or domain:** `npx openmausbot serve --public-url
   https://maus.example.com`, with the proxy rules from "Putting a proxy in
   front".
@@ -125,6 +137,15 @@ may need enabling in ChatGPT security settings or by your workspace admin; see
 [OpenAI's headless authentication guide](https://learn.chatgpt.com/docs/auth#login-on-headless-devices).
 Subscription limits still apply. This browser flow is currently for Codex;
 other providers retain their existing sign-in methods.
+
+Once connected, Settings shows the account email when Codex can report it.
+To switch accounts, open **Manage account and sign-in** under that line
+and choose **Sign out of ChatGPT**: OMB runs `codex logout` on the server as
+the same user and confirms with `codex login status`. New ChatGPT tasks need
+a connected account. Stop running Codex tasks before switching: sign-out does
+not cancel work already in progress. API-key logins are not removed by this
+ChatGPT-specific action. A sign-in another browser is still completing is never
+pulled away; finish or cancel it first.
 
 ## Connect a custom domain in Settings
 
@@ -239,28 +260,54 @@ OMB_DATA_DIR="$HOME/.openmausbot" OMB_PORT=8799 \
   node --experimental-strip-types server/index.ts
 ```
 
-For something durable, run it under systemd:
+For something durable, let the CLI write the service for you:
 
-```ini
-# /etc/systemd/system/openmausbot.service
-[Unit]
-Description=OpenMausBot harness
-After=network.target
-
-[Service]
-User=maus
-WorkingDirectory=/home/maus/OpenMausBot
-Environment=OMB_DATA_DIR=/home/maus/.openmausbot
-Environment=OMB_PORT=8799
-ExecStart=/usr/bin/node --experimental-strip-types server/index.ts
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
+```sh
+npx openmausbot service install --domain maus.example.com   # or --tunnel, --tailscale, or nothing
 ```
 
-Engine CLIs read their logins from the service user's home — sign in as
-that user (`sudo -u maus claude` etc.) before starting the service.
+It renders a systemd unit (Linux) or a launchd agent (macOS) that runs the
+same `openmausbot serve …` with your options, restarts it if it stops, and,
+for `--domain`, grants the unit the capability to bind ports 80 and 443
+without root. The file is written next to your data and the two commands
+that install and start it are printed (they need `sudo` on Linux).
+`openmausbot service uninstall` prints the reverse. Install the package
+permanently first (`npm install -g openmausbot`): a service must not point
+at an `npx` cache that npm may prune.
+
+Engine CLIs read their logins from the service user's home: sign them in
+from Settings → Engines (below), or as that user in a terminal, before you
+rely on routines running unattended.
+
+## Installing the engines without a terminal
+
+Engines whose installer is an npm package (Claude Code, Codex, OpenCode,
+MiniMax, pi) can be installed and updated from **Settings → Engines** when
+npm is on the server's PATH. OMB runs `npm install -g` as its own user into
+`<data dir>/tools/npm`, so nothing needs sudo and nothing touches a global
+prefix; that folder goes ahead of everything else on the engines' PATH, so
+the copy OMB installed is the one bots run. The package name comes from the
+engine's own install descriptor, never from the browser. Engines installed
+by a `curl | bash` script still need the command on the server.
+
+## Signing the engines in without a terminal
+
+On a hosted server, the engine CLIs sign in from Settings → Engines:
+
+- **Codex**: "Connect ChatGPT" shows a one-time code to enter on OpenAI's
+  device page. Once connected, Settings names the account and offers
+  **Sign out of ChatGPT** so a different person can connect their own.
+- **Claude Code**: "Sign in to Claude" opens Anthropic's own sign-in page in
+  your browser; after you sign in it shows a code, which you paste back into
+  Settings. The server hands that code to the unmodified `claude` CLI once and
+  never stores it; the login lands where Claude Code keeps it for the account
+  that runs your bots. This is the sign-in Anthropic permits for a hosted,
+  unmodified Claude Code with your own subscription; the bots then share that
+  subscription's usage limits. Once signed in, **Manage account and sign-in →
+  Sign out of Claude** runs `claude auth logout` for that account's
+  configuration directory, confirmed with `claude auth status`, so a different
+  person can sign in with their own subscription. Stop running Claude tasks
+  before switching accounts: signing out does not cancel them.
 
 ## Using it from your computer
 
@@ -335,6 +382,17 @@ allow-list, and `/pair` on your server offers "Sign in with your email" first.
 ```sh
 OMB_SIGNIN_EMAILS="her@yourcompany.com, @yourcompany.com"   # full access
 OMB_SIGNIN_MEMBER_EMAILS="freelancer@example.com"          # chat and approvals only
+```
+
+Signed in as an admin? Settings → Remote access → **Who can sign in with an
+email** edits the same list in the browser, no command line needed. With the
+npm package, the same thing from the command line, with the server running
+or not, no restart needed:
+
+```sh
+npx openmausbot access add her@yourcompany.com
+npx openmausbot access add freelancer@example.com --chat-only
+npx openmausbot access list
 ```
 
 An entry is an address or `@domain` (everyone at that domain). Admins get

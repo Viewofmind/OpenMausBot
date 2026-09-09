@@ -27,7 +27,7 @@ describe("export-transcript", () => {
       exportedAt: fixedDate,
     });
 
-    expect(markdown).toContain("# Conversation with Coder");
+    expect(markdown).toContain("# Thread with Coder");
     expect(markdown).toContain("No messages in this conversation yet.");
   });
 
@@ -56,7 +56,7 @@ describe("export-transcript", () => {
       exportedAt: fixedDate,
     });
 
-    expect(markdown).toContain("# Conversation with Coder");
+    expect(markdown).toContain("# Thread with Coder");
     expect(markdown).toContain("### **User**");
     expect(markdown).toContain("Hello, can you help me refactor this code?");
     expect(markdown).toContain("### **Coder**");
@@ -98,7 +98,7 @@ describe("export-transcript", () => {
       exportedAt: fixedDate,
     });
 
-    expect(markdown).toContain("# Channel: Project Alpha");
+    expect(markdown).toContain("# Group: Project Alpha");
     expect(markdown).toContain("### **User**");
     expect(markdown).toContain("### **Researcher**");
     expect(markdown).toContain("Research is complete.");

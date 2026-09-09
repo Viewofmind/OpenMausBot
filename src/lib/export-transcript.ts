@@ -69,7 +69,7 @@ export function formatTranscriptMarkdown(options: ExportTranscriptOptions): stri
     includeTools = true,
   } = options;
 
-  const headerTitle = isGroup ? `# Channel: ${markdownLabel(title)}` : `# Conversation with ${markdownLabel(title)}`;
+  const headerTitle = isGroup ? `# Group: ${markdownLabel(title)}` : `# Thread with ${markdownLabel(title)}`;
   const lines: string[] = [
     headerTitle,
     `_Exported on ${formatExportDate(exportedAt)}_`,

@@ -1,5 +1,43 @@
 @import "tailwindcss";
 
+/* Inline mentions keep the surrounding font metrics, including in the
+   textarea mirror. No padding/border/font-weight changes that shift the caret. */
+.mention-highlight {
+  --mention-color: var(--color-ink-secondary);
+
+  color: color-mix(in srgb, var(--mention-color) 30%, var(--color-ink));
+  background: color-mix(in srgb, var(--mention-color) 24%, var(--color-inset));
+  border-radius: 3px;
+  text-decoration: underline;
+  text-decoration-color: var(--mention-color);
+  text-underline-offset: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.mention-editor-mirror {
+  /* Match the native textarea's direction independently for each paragraph. */
+  unicode-bidi: plaintext;
+  padding: 4px;
+  font-size: 15px;
+  line-height: 24px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--color-ink);
+}
+.mention-editor textarea {
+  position: relative;
+  color: transparent;
+  caret-color: var(--color-ink);
+}
+.mention-editor textarea::selection {
+  color: var(--color-ink);
+  background: var(--color-raised-hover);
+}
+@media (forced-colors: active) {
+  .mention-editor-mirror { display: none; }
+  .mention-editor textarea { color: CanvasText; caret-color: CanvasText; }
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
    SKINS
 
@@ -398,6 +436,18 @@
    re-tokenizing. Scope the scheme to code; native controls keep their styling. */
 .chat-md .shiki {
   color-scheme: var(--code-color-scheme);
+}
+
+/* Plain-text message bodies (user turns, webhook tasks, error fallbacks) are
+   written in whatever language the person used, which is independent of the
+   UI language. `plaintext` resolves direction per line from its own first
+   strong character, so a pasted block that mixes an Arabic sentence with an
+   English stack trace lays each line out correctly instead of letting the
+   first line decide for all of them — which is what a single dir="auto"
+   would do. `start` then follows that per-line direction. */
+.chat-text {
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 html,

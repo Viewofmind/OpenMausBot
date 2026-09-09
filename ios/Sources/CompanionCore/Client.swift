@@ -850,6 +850,28 @@ public struct CompanionClient: Sendable {
         return try await send(try makeRequest("GET", "/api/bots", query: query), as: Fleet.self)
     }
 
+    /// The fleet includes only each bot's selected transcript. Recover the
+    /// other threads currently awaiting a person before committing a cold
+    /// snapshot, so their approval cards do not depend on opening the chat.
+    /// Fail the whole refresh on a failed page: advancing the replay cursor
+    /// with a partial snapshot could permanently miss that request.
+    public func fleetForHydration(messages limit: Int = 50) async throws -> (
+        fleet: Fleet, waitingThreads: [String: ThreadPage]
+    ) {
+        try Task.checkCancellation()
+        let fleet = try await fleet(messages: limit)
+        var waitingThreads: [String: ThreadPage] = [:]
+        for bot in fleet.bots {
+            for task in bot.tasks ?? [] where task.activity == "waiting-on-you"
+                && task.threadId != bot.threadId && waitingThreads[task.threadId] == nil {
+                try Task.checkCancellation()
+                waitingThreads[task.threadId] = try await messages(threadId: task.threadId, limit: limit)
+            }
+        }
+        try Task.checkCancellation()
+        return (fleet, waitingThreads)
+    }
+
     /// Scrollback: the page before a message already held.
     public func messages(threadId: String, before: String? = nil, limit: Int = 50) async throws -> ThreadPage {
         var query = [URLQueryItem(name: "limit", value: String(limit))]
@@ -1099,11 +1121,20 @@ public struct CompanionClient: Sendable {
         ).bot
     }
 
-    /// Change only the engine, model and optional reasoning effort. This uses
-    /// the companion's narrow model route rather than the desktop's general
-    /// bot PATCH, which also owns execution policy and computer settings.
-    public func updateModel(botId: String, selection: ModelSelection) async throws -> Bot {
+    /// A captured thread uses the task route, which cannot change siblings or
+    /// the profile default. Omitting it retains the legacy narrow model API.
+    public func updateModel(botId: String, selection: ModelSelection, threadId: String? = nil) async throws -> Bot {
         guard Self.validRouteID(botId) else { throw APIError.badURL }
+        if let threadId {
+            guard Self.validRouteID(threadId) else { throw APIError.badURL }
+            let model = try JSONSerialization.jsonObject(with: JSONEncoder().encode(selection))
+            return try await send(
+                try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: [
+                    "modelSelection": model, "requireAvailableModel": true,
+                ]),
+                as: BotResponse.self
+            ).bot
+        }
         return try await send(
             try makeRequest("PATCH", "/api/bots/\(botId)/model", encodedBody: selection),
             as: BotResponse.self
@@ -1303,8 +1334,10 @@ public struct CompanionClient: Sendable {
         ).bots
     }
 
-    public func send(text: String, toBot botId: String) async throws {
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages", body: ["text": text]))
+    public func send(text: String, toBot botId: String, threadId: String? = nil) async throws {
+        var body = ["text": text]
+        if let threadId { body["threadId"] = threadId }
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages", body: body))
     }
 
     public func send(text: String, toRoom groupId: String) async throws {
@@ -1370,8 +1403,10 @@ public struct CompanionClient: Sendable {
 
     /// Remember a grant so the same tool stops asking. The harness decides
     /// the key and puts it on the card; the phone never derives its own.
-    public func alwaysAllow(botId: String, key: String) async throws {
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/always-allow", body: ["allowKey": key]))
+    public func alwaysAllow(botId: String, key: String, threadId: String? = nil) async throws {
+        var body = ["allowKey": key]
+        if let threadId { body["threadId"] = threadId }
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/always-allow", body: body))
     }
 
     /// Starts one more account authorization for a toolkit. Revocation is
@@ -1416,13 +1451,17 @@ public struct CompanionClient: Sendable {
         ).message
     }
 
-    public func edit(botId: String, messageId: String, text: String) async throws {
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages/\(messageId)/edit", body: ["text": text]))
+    public func edit(botId: String, messageId: String, text: String, threadId: String? = nil) async throws {
+        var body = ["text": text]
+        if let threadId { body["threadId"] = threadId }
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/messages/\(messageId)/edit", body: body))
     }
 
-    public func setActiveBranch(botId: String, messageId: String) async throws -> String {
-        try await send(
-            try makeRequest("POST", "/api/bots/\(botId)/active-branch", body: ["messageId": messageId]),
+    public func setActiveBranch(botId: String, messageId: String, threadId: String? = nil) async throws -> String {
+        var body = ["messageId": messageId]
+        if let threadId { body["threadId"] = threadId }
+        return try await send(
+            try makeRequest("POST", "/api/bots/\(botId)/active-branch", body: body),
             as: ActiveBranchResponse.self
         ).activeLeafId
     }
@@ -1463,8 +1502,8 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("DELETE", "/api/groups/\(groupId)/tasks/\(threadId)"), as: RoomResponse.self).group
     }
 
-    public func interrupt(botId: String) async throws {
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/interrupt"))
+    public func interrupt(botId: String, threadId: String? = nil) async throws {
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/interrupt", body: threadId.map { ["threadId": $0] }))
     }
 
     public func provideCredential(
@@ -1497,8 +1536,8 @@ public struct CompanionClient: Sendable {
         )
     }
 
-    public func markRead(botId: String) async throws {
-        try await send(try makeRequest("POST", "/api/bots/\(botId)/read"))
+    public func markRead(botId: String, threadId: String? = nil) async throws {
+        try await send(try makeRequest("POST", "/api/bots/\(botId)/read", body: threadId.map { ["threadId": $0] }))
     }
 
     public func markRead(roomId: String) async throws {

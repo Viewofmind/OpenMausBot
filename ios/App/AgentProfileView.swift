@@ -41,14 +41,14 @@ struct AgentProfileView: View {
         _crop = State(initialValue: bot.avatarCrop ?? .mascot)
         _voice = State(initialValue: bot.voice ?? "")
         _speakReplies = State(initialValue: bot.speakReplies == true)
-        _selectedInstanceID = State(initialValue: bot.modelSelection.instanceId)
-        _selectedModelID = State(initialValue: bot.modelSelection.model)
-        _selectedEffort = State(initialValue: bot.modelSelection.effort)
-        _savedModel = State(initialValue: bot.modelSelection)
+        _selectedInstanceID = State(initialValue: bot.currentTaskModelSelection.instanceId)
+        _selectedModelID = State(initialValue: bot.currentTaskModelSelection.model)
+        _selectedEffort = State(initialValue: bot.currentTaskModelSelection.effort)
+        _savedModel = State(initialValue: bot.currentTaskModelSelection)
         _baseline = State(initialValue: ProfileFormSnapshot(bot: bot))
     }
 
-    private var current: Bot { session.state.bot(bot.id) ?? bot }
+    private var current: Bot { session.state.bot(bot.id)?.projected(forThread: bot.threadId) ?? bot }
     private var imageGenerationReady: Bool { config?.imageGen?.configured == true }
     private var voiceConfigured: Bool { config?.isTTSConfigured == true }
     private var hasWorkspaceDefaultVoice: Bool { config?.hasWorkspaceDefaultVoice == true }
@@ -373,10 +373,11 @@ struct AgentProfileView: View {
         busy = true
         defer { busy = false }
         if let updated = await session.updateModel(modelDraft, for: current) {
-            selectedInstanceID = updated.modelSelection.instanceId
-            selectedModelID = updated.modelSelection.model
-            selectedEffort = updated.modelSelection.effort
-            savedModel = updated.modelSelection
+            let model = updated.projected(forThread: bot.threadId)?.currentTaskModelSelection ?? modelDraft
+            selectedInstanceID = model.instanceId
+            selectedModelID = model.model
+            selectedEffort = model.effort
+            savedModel = model
         }
     }
 
