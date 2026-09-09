@@ -1,18 +1,7 @@
-/**
- * Repairs near-miss GFM tables in model output before react-markdown parses it.
- *
- * GFM has no partial credit for a table: if the delimiter row's cell count does
- * not match the header's, or the rows arrive without the newlines that separate
- * them, or the header is glued to the paragraph above it, the parser silently
- * falls back to a paragraph. A paragraph collapses every newline into a space,
- * so a nine-column research table renders as one unreadable run of pipes rather
- * than as a table — the failure a reader actually sees.
- *
- * Models emit all three of these often enough that repairing them beats losing
- * the table. Each repair is deliberately narrow: it only rewrites text that is
- * already unambiguously a broken table, so prose that merely contains pipes or
- * dashes is left exactly as written.
- */
+import { fromMarkdown } from "mdast-util-from-markdown";
+
+// Repair top-level paragraphs only. The existing parser owns Markdown block
+// boundaries, so code, headings, lists and quotes keep their original source.
 
 /** A delimiter cell: optional alignment colons around a run of dashes. */
 const DELIMITER_CELL = /^:?-+:?$/;
@@ -33,6 +22,7 @@ const row = (values: string[]): string => `| ${values.join(" | ")} |`;
 
 /** True when every cell of a non-empty line is a delimiter cell. */
 function isDelimiterRow(line: string): boolean {
+  if (!line.includes("|")) return false;
   const parts = cells(line);
   return parts.length > 0 && parts.every((cell) => DELIMITER_CELL.test(cell));
 }
@@ -56,6 +46,7 @@ function fitDelimiter(line: string, count: number): string {
  * the table can actually have.
  */
 function splitInlineTable(line: string): string[] | null {
+  if (!/^ {0,3}\|/.test(line)) return null;
   const match = DELIMITER_RUN.exec(line);
   if (!match) return null;
   const header = line.slice(0, match.index);
@@ -63,23 +54,28 @@ function splitInlineTable(line: string): string[] | null {
   const headers = cells(header);
   // Two columns is the smallest table worth rescuing; below that the pipes are
   // far more likely to be prose (a "yes | no" aside) than a mangled table.
-  if (headers.length < 2) return null;
+  if (headers.length < 2 || !header.trimEnd().endsWith("|")) return null;
   // The delimiter run has to end the line or be followed by more table, never
   // by a sentence that happens to sit after a row of dashes.
-  if (body.trim() !== "" && !body.includes("|")) return null;
+  if (body.trim() !== "" && !body.trimStart().startsWith("|")) return null;
 
-  const lines = [row(headers), row(Array.from({ length: headers.length }, () => "---"))];
+  const lines = [row(headers), fitDelimiter(match[0], headers.length)];
   let chunk: string[] = [];
+  let boundary = false;
   for (const value of cells(body)) {
     // The `| |` that joins two rows on one line reads as an empty cell. Only
     // the one sitting exactly on a row boundary is that artifact; an empty
     // cell the model actually wrote survives, because the boundary consumed
     // its own separator first.
-    if (chunk.length === 0 && value === "") continue;
+    if (boundary) {
+      boundary = false;
+      if (value === "") continue;
+    }
     chunk.push(value);
     if (chunk.length === headers.length) {
       lines.push(row(chunk));
       chunk = [];
+      boundary = true;
     }
   }
   // A trailing short row is padded so the table keeps its rectangle — the
@@ -91,34 +87,23 @@ function splitInlineTable(line: string): string[] | null {
   return lines;
 }
 
-/**
- * Applies the three repairs outside fenced code, where a table is prose and a
- * pipe is just a pipe. Text with no broken table is returned unchanged.
- */
-export function repairMarkdownTables(text: string): string {
-  if (!text.includes("|")) return text;
-
+/** Repairs a paragraph without reinterpreting rows of an established table. */
+function repairParagraph(text: string): string {
   const source = text.split("\n");
   const out: string[] = [];
-  let fence: string | null = null;
+  let inTable = false;
 
-  for (const line of source) {
-    const fenceMark = /^\s*(```+|~~~+)/.exec(line);
-    if (fence) {
-      if (fenceMark && line.trim().startsWith(fence)) fence = null;
+  for (const [index, line] of source.entries()) {
+    if (inTable && line.includes("|")) {
       out.push(line);
       continue;
     }
-    if (fenceMark) {
-      fence = fenceMark[1].slice(0, 3);
-      out.push(line);
-      continue;
-    }
+    inTable = false;
 
     // A whole table mashed onto one line: split it before anything else, so the
     // delimiter and blank-line repairs below see ordinary rows.
     const inlineMatch = DELIMITER_RUN.exec(line);
-    if (inlineMatch && !isDelimiterRow(line)) {
+    if (inlineMatch && !isDelimiterRow(line) && !isDelimiterRow(source[index + 1] ?? "")) {
       const split = splitInlineTable(line);
       if (split) {
         // The header may need separating from the paragraph above it too.
@@ -131,6 +116,7 @@ export function repairMarkdownTables(text: string): string {
     if (isDelimiterRow(line)) {
       const header = out.at(-1) ?? "";
       if (looksLikeRow(header)) {
+        inTable = true;
         // A table cannot interrupt a paragraph — without a blank line above it
         // the header is only a lazy continuation and the table never parses.
         // This applies whatever else the delimiter needs, so it comes first.
@@ -151,4 +137,25 @@ export function repairMarkdownTables(text: string): string {
   }
 
   return out.join("\n");
+}
+
+/** Repair near-miss tables without changing other Markdown block types. */
+export function repairMarkdownTables(text: string): string {
+  if (!DELIMITER_RUN.test(text)) return text;
+  const out: string[] = [];
+  let cursor = 0;
+  for (const node of fromMarkdown(text).children) {
+    if (node.type !== "paragraph") continue;
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start === undefined || end === undefined) continue;
+    const paragraph = text.slice(start, end);
+    // ponytail: escaped pipes and inline-code boundaries are ambiguous here;
+    // leave those paragraphs alone instead of maintaining a second tokenizer.
+    if (/[`\\]/.test(paragraph)) continue;
+    out.push(text.slice(cursor, start), repairParagraph(paragraph));
+    cursor = end;
+  }
+  out.push(text.slice(cursor));
+  return out.join("");
 }

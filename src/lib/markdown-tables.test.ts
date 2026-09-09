@@ -5,6 +5,38 @@ import { repairMarkdownTables } from "./markdown-tables";
 const lines = (text: string) => text.split("\n");
 
 describe("repairMarkdownTables", () => {
+  it.each([
+    "Pros | Cons\n---",
+    "Example:\n\n    | A | B |\n    |---|",
+    "Example:\n\n\t| A | B |\n\t|---|",
+    "Example: `| A | B | |---|---| | 1 | 2 |`",
+    "````md\n```\n| A | B | |---|---| | 1 | 2 |\n````",
+    "> ```md\n> | A | B | |---|---| | 1 | 2 |\n> ```",
+    "- intro\n  | A | B |\n  |---|\n  | 1 | 2 |",
+    "| a \\| b | c |\n| --- | --- |\n| 1 | 2 |",
+    "| A | B |\n| --- | --- |\n| a | b |---|---|",
+    "| A | B | --- | --- |\n| --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 |",
+  ])("preserves existing Markdown structure: %s", (text) => {
+    expect(repairMarkdownTables(text)).toBe(text);
+  });
+
+  it("preserves real empty cells at the beginning of run-on rows", () => {
+    expect(lines(repairMarkdownTables("| A | B | |---|---| | | 2 | | | 4 |"))).toEqual([
+      "| A | B |", "| --- | --- |", "|  | 2 |", "|  | 4 |",
+    ]);
+  });
+
+  it("preserves alignment when splitting a run-on table", () => {
+    expect(lines(repairMarkdownTables("| A | B | |:---|---:| | 1 | 2 |"))[1]).toBe("| :--- | ---: |");
+  });
+
+  it("keeps incomplete fenced examples unchanged at every streaming prefix", () => {
+    const text = "````md\n```\n| A | B | |---|---| | 1 | 2 |\n````";
+    for (let end = 1; end <= text.length; end++) {
+      expect(repairMarkdownTables(text.slice(0, end))).toBe(text.slice(0, end));
+    }
+  });
+
   it("leaves text without pipes untouched", () => {
     const text = "A paragraph — no table here.\n\n- a list item\n- another";
     expect(repairMarkdownTables(text)).toBe(text);
