@@ -296,9 +296,13 @@ export function downloadSnippetFile(filename: string, code: string): void {
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    document.body.appendChild(link);
+    link.click();
+  } finally {
+    link.remove();
+    // Chromium may consume the Blob after the click task. The browser owns
+    // save/cancel feedback; a click is not evidence that the file was saved.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
-

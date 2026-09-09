@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   countLines,
+  downloadSnippetFile,
   formatLineCount,
   getCodeFileExtension,
   getLanguageDisplayName,
@@ -129,12 +130,46 @@ describe("getCodeFileExtension", () => {
     expect(getCodeFileExtension("   ")).toBe("txt");
     expect(getCodeFileExtension(null)).toBe("txt");
     expect(getCodeFileExtension(undefined)).toBe("txt");
+    expect(getCodeFileExtension("averylongunknownlanguageidentifier")).toBe("txt");
+    expect(getCodeFileExtension("../../file")).toBe("txt");
   });
 
   it("uses valid short alphanumeric identifiers directly as extension", () => {
     expect(getCodeFileExtension("zig")).toBe("zig");
     expect(getCodeFileExtension("lua")).toBe("lua");
     expect(getCodeFileExtension("r")).toBe("r");
+  });
+});
+
+describe("downloadSnippetFile", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each([false, true])("cleans up a text download even when clicking fails (%s)", async (fails) => {
+    vi.useFakeTimers();
+    const click = vi.fn(() => { if (fails) throw new Error("Download blocked"); });
+    const link = { href: "", download: "", click, remove: vi.fn() };
+    const appendChild = vi.fn();
+    vi.stubGlobal("document", { createElement: vi.fn(() => link), body: { appendChild } });
+    const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:snippet");
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const code = 'print("hello ✓")\n';
+    if (fails) expect(() => downloadSnippetFile("snippet.py", code)).toThrow("Download blocked");
+    else downloadSnippetFile("snippet.py", code);
+    expect(link.download).toBe("snippet.py");
+    expect(link.href).toBe("blob:snippet");
+    expect(appendChild).toHaveBeenCalledWith(link);
+    expect(click).toHaveBeenCalledOnce();
+    expect(link.remove).toHaveBeenCalledOnce();
+    const blob = create.mock.calls[0][0] as Blob;
+    expect(await blob.text()).toBe(code);
+    expect(blob.type).toBe("text/plain;charset=utf-8");
+    expect(revoke).not.toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(revoke).toHaveBeenCalledWith("blob:snippet");
   });
 });
 
@@ -153,4 +188,3 @@ describe("getSnippetFileName", () => {
     expect(getSnippetFileName("makefile")).toBe("makefile");
   });
 });
-

@@ -186,18 +186,13 @@ export interface CodeBlockProps {
 export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [downloaded, setDownloaded] = useState(false);
   const [wrapLines, setWrapLines] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const downloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       if (copyTimeoutRef.current !== null) {
         clearTimeout(copyTimeoutRef.current);
-      }
-      if (downloadTimeoutRef.current !== null) {
-        clearTimeout(downloadTimeoutRef.current);
       }
     };
   }, []);
@@ -268,11 +263,6 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
   const download = () => {
     const filename = getSnippetFileName(lang);
     downloadSnippetFile(filename, code);
-    setDownloaded(true);
-    if (downloadTimeoutRef.current !== null) {
-      clearTimeout(downloadTimeoutRef.current);
-    }
-    downloadTimeoutRef.current = setTimeout(() => setDownloaded(false), 1500);
   };
 
   const displayLanguage = getLanguageDisplayName(lang);
@@ -313,20 +303,11 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
             type="button"
             onClick={download}
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
-            title={downloaded ? "Snippet saved" : "Download snippet as file"}
-            aria-label={downloaded ? "Snippet saved" : "Download snippet as file"}
+            title="Download snippet as file"
+            aria-label="Download snippet as file"
           >
-            {downloaded ? (
-              <>
-                <Check size={12} className="text-success" aria-hidden="true" />
-                <span className="text-success font-medium hidden sm:inline">Saved!</span>
-              </>
-            ) : (
-              <>
-                <Download size={12} aria-hidden="true" />
-                <span className="hidden sm:inline">Save</span>
-              </>
-            )}
+            <Download size={12} aria-hidden="true" />
+            <span className="hidden sm:inline">Save</span>
           </button>
           <button
             type="button"
