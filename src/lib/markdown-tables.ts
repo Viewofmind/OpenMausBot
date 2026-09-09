@@ -141,7 +141,7 @@ function repairParagraph(text: string): string {
 
 /** Repair near-miss tables without changing other Markdown block types. */
 export function repairMarkdownTables(text: string): string {
-  if (!DELIMITER_RUN.test(text)) return text;
+  if (!text.includes("|")) return text;
   const out: string[] = [];
   let cursor = 0;
   for (const node of fromMarkdown(text).children) {

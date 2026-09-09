@@ -52,6 +52,10 @@ describe("repairMarkdownTables", () => {
     expect(lines(repairMarkdownTables(text))[1]).toBe("| --- | --- | --- |");
   });
 
+  it("repairs delimiter rows without optional outer pipes", () => {
+    expect(repairMarkdownTables("A | B | C\n--- | ---\n1 | 2 | 3")).toBe("A | B | C\n| --- | --- | --- |\n1 | 2 | 3");
+  });
+
   it("trims a delimiter row that has more cells than the header", () => {
     const text = "| A | B |\n|---|---|---|---|\n| 1 | 2 |";
     expect(lines(repairMarkdownTables(text))[1]).toBe("| --- | --- |");
