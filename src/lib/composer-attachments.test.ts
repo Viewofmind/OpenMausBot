@@ -460,6 +460,38 @@ describe("clipboardHasImages", () => {
 });
 
 describe("private document intake", () => {
+  it.each([
+    ["Voice note.opus", "", "audio/opus"],
+    ["Voice note.opus", "audio/ogg; codecs=opus", "audio/ogg"],
+    ["Recording.M4A", "application/octet-stream", "audio/mp4"],
+    ["recording.wav", "audio/x-wav", "audio/x-wav"],
+  ])("uploads %s as audio without a local path", async (name, type, mime) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      path: "/private/attachments/recording.opus", name, bytes: 3,
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    try {
+      const file = new File([new Uint8Array([1, 2, 3])], name, { type });
+      await expect(fileAttachmentFromFile(file)).resolves.toMatchObject({
+        kind: "file", name, path: "/private/attachments/recording.opus", size: 3,
+      });
+      expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/^\/api\/files\?/),
+        expect.objectContaining({ method: "POST", body: file, headers: { "content-type": mime } }));
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("rejects oversized audio before uploading", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    try {
+      const file = new File([new Uint8Array(25 * 1024 * 1024 + 1)], "large.opus", { type: "audio/opus" });
+      await expect(fileAttachmentFromFile(file)).rejects.toMatchObject({ status: 413 });
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it("recognises supported documents by declared mime or filename", () => {
     expect(documentMime({ name: "notes.bin", type: "text/markdown; charset=utf-8" })).toBe("text/markdown");
     expect(documentMime({ name: "REPORT.PDF", type: "" })).toBe("application/pdf");

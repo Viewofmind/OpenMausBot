@@ -6,6 +6,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2, RefreshCw, Search, TriangleAlert, X } from "lucide-react";
 import { api, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import { readCachedInventory, writeCachedInventory } from "@/lib/connected-apps-cache";
 import { managedConnectorUnavailableReason } from "../../shared/connector-availability";
 import { McpServersPanel } from "./McpServersPanel";
@@ -82,7 +84,7 @@ export function disconnectAccountConfirmation(
   account: { id: string; alias?: string },
 ) {
   const identity = account.alias ? `“${account.alias}” (${account.id})` : `“${account.id}”`;
-  return `Disconnect ${identity} from ${service}? Only this ${service} account will be revoked. Your other ${service} accounts will stay connected.`;
+  return t("connectors.disconnectConfirm", { identity, service });
 }
 
 export function connectedAppsMayDisconnect(remoteClient: boolean): boolean {
@@ -100,28 +102,28 @@ export function connectorActionLabel(
   state: { busy: boolean; included: boolean; canContinue: boolean; pending?: boolean; hasAccounts: boolean; failed: boolean },
 ) {
   if (state.busy) return null;
-  if (state.included) return "Included";
-  if (phase === "loading") return "Checking…";
-  if (phase === "error") return "Unavailable";
-  if (state.canContinue) return "Continue";
-  if (state.pending) return "Check status";
-  if (state.hasAccounts) return "Add account";
-  if (state.failed) return "Retry";
-  return "Connect";
+  if (state.included) return t("connectors.action.included");
+  if (phase === "loading") return t("connectors.action.checking");
+  if (phase === "error") return t("connectors.action.unavailable");
+  if (state.canContinue) return t("connectors.action.continue");
+  if (state.pending) return t("connectors.action.checkStatus");
+  if (state.hasAccounts) return t("connectors.action.addAccount");
+  if (state.failed) return t("connectors.action.retry");
+  return t("connectors.action.connect");
 }
 
 export function connectedInventoryCopy(phase: ConnectorInventoryPhase) {
   if (phase === "loading") return {
-    title: "Checking connected apps…",
-    description: "Your accounts will appear here as soon as the secure connection check finishes.",
+    title: t("connectors.empty.loadingTitle"),
+    description: t("connectors.empty.loadingDesc"),
   };
   if (phase === "error") return {
-    title: "Couldn’t load connected apps",
-    description: "Retry the connection check before adding another account.",
+    title: t("connectors.empty.errorTitle"),
+    description: t("connectors.empty.errorDesc"),
   };
   return {
-    title: "No connected apps yet",
-    description: "Connect an app from Marketplace and it will appear here.",
+    title: t("connectors.empty.noneTitle"),
+    description: t("connectors.empty.noneDesc"),
   };
 }
 
@@ -236,7 +238,7 @@ export function PluginsPanel() {
   const [inventoryPhase, setInventoryPhase] = useState<ConnectorInventoryPhase>(
     cachedConnectorStatus === null ? "loading" : "ready",
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | { key: LocaleKey } | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"marketplace" | "connected">("marketplace");
 
@@ -408,7 +410,10 @@ export function PluginsPanel() {
     // asynchronous open, the visible Continue button retries from a direct
     // user gesture using the URL retained in pendingUrls.
     const opened = window.open("", "_blank");
-    if (!opened) throw new Error("Your browser blocked the connection page. Click Continue to open it.");
+    if (!opened) {
+      setError({ key: "connectors.popupBlockedContinue" });
+      return;
+    }
     // Open a same-origin blank page first so the OAuth origin never receives
     // an opener reference, while a real null remains a reliable blocked signal.
     opened.opener = null;
@@ -460,7 +465,7 @@ export function PluginsPanel() {
         // button rendered. Show the label field and refresh only this app.
         setAliasSlug(slug);
         setAliasDraft("");
-        setError("This app already has an account. Add a label such as work or personal to connect another.");
+        setError({ key: "connectors.aliasNeeded" });
         void refreshStatus([slug]);
       } else {
         setError(message);
@@ -503,8 +508,8 @@ export function PluginsPanel() {
       >
         <header className="flex items-start justify-between gap-4 px-6 pb-3 pt-6 sm:px-8 sm:pt-7">
           <div>
-            <h2 id="plugins-title" className="text-[22px] font-semibold tracking-[-0.01em] text-ink">Plugins</h2>
-            <p className="mt-1 text-[13px] text-ink-secondary">Connect apps and your own MCP tools.</p>
+            <h2 id="plugins-title" className="text-[22px] font-semibold tracking-[-0.01em] text-ink">{t("connectors.title")}</h2>
+            <p className="mt-1 text-[13px] text-ink-secondary">{t("connectors.subtitle")}</p>
           </div>
           <div className="flex items-center gap-1">
             {surface === "apps" && (
@@ -512,14 +517,14 @@ export function PluginsPanel() {
                 onClick={() => void loadConnectionInventory(true)}
                 disabled={refreshing}
                 className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-50"
-                title="Refresh connection status"
+                title={t("connectors.refreshTitle")}
               >
                 <RefreshCw size={17} className={cn(refreshing && "animate-spin")} />
               </button>
             )}
             <button
               onClick={close}
-              aria-label="Close plugins"
+              aria-label={t("connectors.closeAria")}
               className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink"
             >
               <X size={21} />
@@ -528,7 +533,7 @@ export function PluginsPanel() {
         </header>
 
         <div className="border-b border-hairline/40 px-6 sm:px-8">
-          <div className="flex gap-6" role="tablist" aria-label="Plugin type">
+          <div className="flex gap-6" role="tablist" aria-label={t("connectors.typeAria")}>
             {(["apps", "mcp"] as const).map((item) => (
               <button
                 key={item}
@@ -541,7 +546,7 @@ export function PluginsPanel() {
                   surface === item ? "border-accent text-ink" : "border-transparent text-ink-secondary hover:text-ink",
                 )}
               >
-                {item === "apps" ? "Connected apps" : "MCP servers"}
+                {item === "apps" ? t("connectors.tab.apps") : t("connectors.tab.mcp")}
               </button>
             ))}
           </div>
@@ -555,14 +560,13 @@ export function PluginsPanel() {
           <div className="mx-6 mb-1 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[12.5px] text-warning sm:mx-8">
             <TriangleAlert size={14} className="mt-px shrink-0" />
             <span>
-              Showing what was connected last time — this Mac's credential store could not be opened just now, so these
-              could not be re-checked. Your apps are still connected; restarting OpenMausBot usually clears this.
+              {t("connectors.stale")}
             </span>
           </div>
         )}
 
         <div className="flex flex-col gap-3 px-6 pb-4 pt-5 sm:flex-row sm:items-center sm:justify-between sm:px-8">
-          <div className="flex w-fit rounded-xl bg-raised/70 p-1" role="tablist" aria-label="Connected apps view">
+          <div className="flex w-fit rounded-xl bg-raised/70 p-1" role="tablist" aria-label={t("connectors.viewAria")}>
             <button
               role="tab"
               aria-selected={tab === "marketplace"}
@@ -572,7 +576,7 @@ export function PluginsPanel() {
                 tab === "marketplace" ? "bg-card text-ink shadow-sm" : "text-ink-secondary hover:text-ink",
               )}
             >
-              Marketplace
+              {t("connectors.tab.marketplace")}
             </button>
             <button
               role="tab"
@@ -583,7 +587,7 @@ export function PluginsPanel() {
                 tab === "connected" ? "bg-card text-ink shadow-sm" : "text-ink-secondary hover:text-ink",
               )}
             >
-              Connected{connectedCount > 0 ? ` ${connectedCount}` : ""}
+              {t("connectors.tab.connected")}{connectedCount > 0 ? ` ${connectedCount}` : ""}
             </button>
           </div>
           <label className="flex h-11 w-full items-center gap-2.5 rounded-xl bg-raised/70 px-3.5 sm:w-[320px]">
@@ -591,8 +595,8 @@ export function PluginsPanel() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search apps"
-              aria-label="Search apps"
+              placeholder={t("connectors.searchPlaceholder")}
+              aria-label={t("connectors.searchPlaceholder")}
               className="min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-secondary focus:outline-none"
             />
           </label>
@@ -603,7 +607,7 @@ export function PluginsPanel() {
             connection service" is advice for someone who never set one up. */}
         {!configured && !stale && (
           <div className="mx-6 mb-1 rounded-xl bg-warning/10 px-4 py-3 text-[13px] text-warning sm:mx-8">
-            Connected apps are temporarily unavailable. Retry after restarting the host, or configure the connection service there.{" "}
+            {t("connectors.notConfigured")}{" "}
             <button
               className={cn("font-medium underline underline-offset-2", remoteClient && "hidden")}
               onClick={() => {
@@ -611,13 +615,13 @@ export function PluginsPanel() {
                 dispatch({ type: "toggleAppSettings", open: true });
               }}
             >
-              Open settings
+              {t("connectors.openSettings")}
             </button>
           </div>
         )}
         {configured && !remoteClient && source === "curated" && mode === "self-hosted" && (
           <div className="mx-6 mb-1 text-[12px] text-ink-secondary sm:mx-8">
-            Showing featured apps.{" "}
+            {t("connectors.featuredBefore")}{" "}
             <button
               className="underline underline-offset-2 hover:text-ink"
               onClick={() => {
@@ -625,22 +629,26 @@ export function PluginsPanel() {
                 dispatch({ type: "toggleAppSettings", open: true });
               }}
             >
-              Update your Composio key
+              {t("connectors.updateKey")}
             </button>{" "}
-            for the full catalog.
+            {t("connectors.featuredAfter")}
           </div>
         )}
-        {error && <div role="alert" className="mx-6 mt-2 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger sm:mx-8">{error}</div>}
+        {error && <div role="alert" className="mx-6 mt-2 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger sm:mx-8">{typeof error === "string" ? error : t(error.key)}</div>}
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-7 pt-5 sm:px-8">
           {cards === null ? (
             <div className="flex items-center justify-center gap-2 py-24 text-[13px] text-ink-secondary">
-              <Loader2 size={14} className="animate-spin" /> Loading catalog…
+              <Loader2 size={14} className="animate-spin" /> {t("connectors.loadingCatalog")}
             </div>
           ) : (
             <div>
               <div className="mb-3 text-[12px] font-medium text-ink-secondary">
-                {tab === "connected" ? "Your connections" : search ? "Search results" : "Available apps"}
+                {tab === "connected"
+                  ? t("connectors.section.yours")
+                  : search
+                    ? t("connectors.section.results")
+                    : t("connectors.section.available")}
               </div>
               <div className="grid grid-cols-1 gap-x-10 md:grid-cols-2">
               {visible.map((card) => {
@@ -655,7 +663,9 @@ export function PluginsPanel() {
                 || (serviceStatus?.connected === true && !accounts.length && !pending && !failed);
               const addingAccount = aliasSlug === card.slug && !pending;
               const busy = busySlug === card.slug;
-              const unavailableReason = managedConnectorUnavailableReason(mode, card.slug);
+              const unavailableReason = managedConnectorUnavailableReason(mode, card.slug)
+                ? t("connectors.selfHostOnlyReason")
+                : null;
               return (
                 <div
                   key={card.slug}
@@ -672,10 +682,10 @@ export function PluginsPanel() {
                         {unavailableReason ?? (
                           pending
                             ? pendingUrls[card.slug]
-                              ? "Finish setup in your browser"
-                              : "Finish setup in your browser, or disconnect the pending account below to start again"
+                              ? t("connectors.finishSetup")
+                              : t("connectors.finishSetupOrDisconnect")
                             : failed && !accounts.length
-                              ? "Authorization expired — try again"
+                              ? t("connectors.authExpired")
                               : card.blurb
                         )}
                       </div>
@@ -703,7 +713,7 @@ export function PluginsPanel() {
                       className="flex min-w-[88px] items-center justify-center gap-1.5 rounded-full bg-raised px-3 py-2 text-[12.5px] text-ink transition-colors hover:bg-raised-hover disabled:opacity-40"
                     >
                       {unavailableReason ? (
-                        "Self-host only"
+                        t("connectors.selfHostOnly")
                       ) : busy ? (
                         <Loader2 size={13} className="mx-auto animate-spin" />
                       ) : (
@@ -742,9 +752,12 @@ export function PluginsPanel() {
                                   disconnectAccount(card.slug, account.id);
                                 }}
                                 className="rounded-md px-2 py-1 text-[11px] text-ink-secondary transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
-                                aria-label={`Disconnect ${account.alias || account.id} from ${card.label}`}
+                                aria-label={t("connectors.disconnectAria", {
+                                  account: account.alias || account.id,
+                                  service: card.label,
+                                })}
                               >
-                                Disconnect
+                                {t("connectors.disconnect")}
                               </button>
                             )}
                           </div>
@@ -759,7 +772,7 @@ export function PluginsPanel() {
                         event.preventDefault();
                         const alias = aliasDraft.trim();
                         if (!alias) {
-                          setError("Enter a label for the account, such as work or personal.");
+                          setError({ key: "connectors.aliasRequired" });
                           return;
                         }
                         void connect(card.slug, alias);
@@ -770,8 +783,10 @@ export function PluginsPanel() {
                         value={aliasDraft}
                         maxLength={64}
                         onChange={(event) => setAliasDraft(event.target.value)}
-                        placeholder="Account label (work, personal…)"
-                        aria-label={accounts.length > 0 ? `Label for another ${card.label} account` : `Label for the new ${card.label} account`}
+                        placeholder={t("connectors.aliasPlaceholder")}
+                        aria-label={accounts.length > 0
+                          ? t("connectors.aliasAriaAnother", { service: card.label })
+                          : t("connectors.aliasAriaNew", { service: card.label })}
                         className="min-w-0 flex-1 rounded-lg bg-raised px-3 py-2 text-[12px] text-ink placeholder:text-ink-secondary focus:outline-none focus:ring-1 focus:ring-accent"
                       />
                       <button
@@ -779,7 +794,7 @@ export function PluginsPanel() {
                         disabled={busy || !aliasDraft.trim()}
                         className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-white disabled:opacity-40"
                       >
-                        Continue
+                        {t("connectors.action.continue")}
                       </button>
                     </form>
                   )}
@@ -792,10 +807,10 @@ export function PluginsPanel() {
           {cards !== null && visible.length === 0 && (
             <div className="flex min-h-56 flex-col items-center justify-center text-center">
               <div className="text-[14px] font-medium text-ink">
-                {tab === "connected" ? connectedEmptyCopy.title : "No apps found"}
+                {tab === "connected" ? connectedEmptyCopy.title : t("connectors.noAppsFound")}
               </div>
               <div className="mt-1 text-[12.5px] text-ink-secondary">
-                {tab === "connected" ? connectedEmptyCopy.description : "Try a different search."}
+                {tab === "connected" ? connectedEmptyCopy.description : t("connectors.tryDifferentSearch")}
               </div>
               {tab === "connected" && inventoryPhase === "error" && (
                 <button
@@ -805,7 +820,7 @@ export function PluginsPanel() {
                   className="mt-4 flex items-center gap-1.5 rounded-lg bg-raised px-3 py-2 text-[12.5px] text-ink transition-colors hover:bg-raised-hover disabled:opacity-50"
                 >
                   <RefreshCw size={13} className={cn(refreshing && "animate-spin")} />
-                  Retry
+                  {t("connectors.action.retry")}
                 </button>
               )}
             </div>

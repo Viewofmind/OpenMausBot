@@ -311,6 +311,8 @@ export interface ProviderSnapshot {
   state: "available" | "unavailable";
   reason?: string;
   authenticated?: boolean;
+  /** Vetted display identity from the provider CLI, never credentials. */
+  account?: { email?: string; organization?: string };
   version?: string | null;
   /** A non-blocking provider update that unlocks newer capabilities. The
    * engine remains usable; renderer surfaces the exact terminal command. */
@@ -349,6 +351,11 @@ export interface EngineInstall {
     label: string;
     downloadBytes: number;
   };
+  /** Settings can install or update this engine on the machine running the
+   * server, as the server's own user, into a directory the app owns. Set by
+   * the registry when the install one-liner is an npm package and npm is on
+   * PATH; never something a client chooses. */
+  server?: { package: string };
 }
 
 export interface ProviderAuthenticationStart {
@@ -356,6 +363,14 @@ export interface ProviderAuthenticationStart {
   flowId: string | null;
   authorizationUrl: string | null;
   expiresAt: string | null;
+  /** A short-lived code to enter only at the provider's authorization URL. */
+  userCode?: string;
+}
+
+export interface ProviderAuthenticationStatus extends Omit<ProviderAuthenticationStart, "phase"> {
+  phase: "waiting" | "succeeded" | "failed" | "expired" | "cancelled";
+  /** Safe, actionable copy; never unfiltered CLI output or credentials. */
+  message?: string;
 }
 
 // ── driver SPI (upstream ProviderDriver — a plain record, not a service) ─
@@ -399,8 +414,12 @@ export interface ProviderInstance {
   /** Optional first-party runtime installation and account setup. */
   readonly installRuntime?: () => Promise<void>;
   readonly startAuthentication?: () => Promise<ProviderAuthenticationStart>;
+  readonly getAuthentication?: (flowId: string) => Promise<ProviderAuthenticationStatus>;
   readonly completeAuthentication?: (flowId: string, callbackUrl: string) => Promise<void>;
   readonly cancelAuthentication?: () => Promise<void>;
+  /** Remove the sign-in the provider CLI stores on this server, so a
+   * different account can connect. Never touches another instance's home. */
+  readonly signOut?: () => Promise<void>;
   readonly adapter: ProviderAdapter;
   snapshot(): Promise<ProviderSnapshot>;
   /** Cheap one-shot text call (upstream TextGeneration) — titles, summaries. */

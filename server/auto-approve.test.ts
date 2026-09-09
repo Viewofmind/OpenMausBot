@@ -222,9 +222,7 @@ describe("autoDecision", () => {
   });
 });
 
-// Full is a decision about the person's OWN sessions with a bot. A turn
-// another bot started is not one, so it runs as Approve for me: the guards
-// card, an unattended sender's block holds, and the fold logs every answer.
+// Full is an explicit grant to the receiving bot, including delegated turns.
 describe("approvalModeForOrigin", () => {
   const person = { peerInitiated: false };
   const peer = { peerInitiated: true };
@@ -235,12 +233,21 @@ describe("approvalModeForOrigin", () => {
     }
   });
 
-  it("runs a peer-started turn on a Full or Custom bot as Approve for me", () => {
-    expect(approvalModeForOrigin("full", peer)).toBe("auto");
+  it("preserves explicit Full for delegated work without elevating other modes", () => {
+    expect(approvalModeForOrigin("full", peer)).toBe("full");
     expect(approvalModeForOrigin("custom", peer)).toBe("auto");
     // and never widens the lower modes
     expect(approvalModeForOrigin("ask", peer)).toBe("ask");
     expect(approvalModeForOrigin("auto", peer)).toBe("auto");
+  });
+
+  it("honors the receiving Full grant for unattended delegated tool permissions", () => {
+    const mode = approvalModeForOrigin("full", peer);
+    for (const [tool, summary] of [["shell", "cmd.exe /c python upload.py"], ["edit", "Run client_edit_file?"], ["shell", "rm -rf build"], ["Read", ".env"]]) {
+      expect(autoVerdict({ approvalMode: mode }, tool, summary, {
+        unattended: true, scope: "local-computer", requiresExplicitApproval: true,
+      }).source).toBe("full-access");
+    }
   });
 });
 
@@ -286,14 +293,13 @@ describe("approvalHeldReason", () => {
     expect(held).not.toContain("Full access");
   });
 
-  it("explains a peer-started Full bot as Auto without promising Full bypasses the origin guard", () => {
+  it("does not describe a peer-started Full bot as paused Auto", () => {
     const held = approvalHeldReason({
       ...auto, unattended: true,
       mode: approvalModeForOrigin("full", { peerInitiated: true }),
       fullAccessAvailable: false,
     });
-    expect(held).toContain("every action asks");
-    expect(held).not.toContain("Full access");
+    expect(held).toBeUndefined();
   });
 
   it("keeps the native and sandbox notes ahead of any mode explanation", () => {

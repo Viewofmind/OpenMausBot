@@ -317,6 +317,34 @@ describe("resolveRequestAuth", () => {
     expect(resolve({ host: "bots.example.com", authorization: `Bearer ${token}` }, "/api/bots").auth?.kind).toBe("session");
   });
 
+  it.each([
+    ["GET", "/api/settings/custom-domain"],
+    ["POST", "/api/settings/custom-domain"],
+    ["DELETE", "/api/settings/custom-domain"],
+    ["GET", "/api/instances/codex/auth/status?flowId=private-device-flow"],
+    ["POST", "/api/instances/codex/auth/start"],
+    ["POST", "/api/instances/codex/auth/cancel"],
+    ["POST", "/api/instances/codex/auth/sign-out"],
+    ["POST", "/api/instances/claude-work/auth/sign-out"],
+    ["POST", "/api/instances/antigravity/auth/complete"],
+  ])("requires admin for server Settings: %s %s", (method, path) => {
+    expect(requiredScope(method, path.split("?")[0]!)).toBe("admin");
+    const client = pairedToken(["client"]);
+    const admin = pairedToken(["admin"]);
+    const headers = { host: "bots.example.com", "x-forwarded-proto": "https", origin: "https://bots.example.com" };
+    // Both app bearer sessions and same-origin browser cookies must enforce
+    // the boundary: a client cannot read login codes or change pairing URLs.
+    const clientCredentials: Record<string, string>[] = [{ authorization: `Bearer ${client}` }, { cookie: `${cookieName}=${client}` }];
+    for (const credential of clientCredentials) {
+      const denied = resolve({ ...headers, ...credential }, path, method);
+      expect(denied.auth).toBeNull();
+      expect(denied.status).toBe(403);
+      expect(denied.error).toContain("lacks the admin scope");
+    }
+    expect(resolve({ ...headers, authorization: `Bearer ${admin}` }, path, method).auth?.kind).toBe("session");
+    expect(resolve(headers, path, method).auth).toBeNull();
+  });
+
   it("explains a dead credential instead of silently falling back, except on loopback", () => {
     const token = pairedToken();
     const session = sessions.authenticate(token);

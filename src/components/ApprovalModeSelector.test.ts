@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { FullAccessWarning } from "./FullAccessWarning";
 
 import {
   ApprovalModeSelector,
@@ -10,6 +11,14 @@ import {
 } from "./ApprovalModeSelector";
 
 describe("approval mode selector", () => {
+  it("discloses delegated work in the Full access confirmation", () => {
+    const html = renderToStaticMarkup(createElement(FullAccessWarning, {
+      open: true, onCancel: () => {}, onConfirm: () => {},
+    }));
+    expect(html).toContain("tasks delegated by your Chief or other bots");
+    expect(html).toContain("does not enable Full access on other bots");
+    expect(html).not.toContain("Requests that come from another bot still get the usual checks");
+  });
   it("matches the four Codex approval levels and their plain-language copy", () => {
     expect(approvalModeOptions().map(({ mode, label, description }) => ({ mode, label, description }))).toEqual([
       {
@@ -79,7 +88,8 @@ describe("approval mode selector", () => {
   });
 
   it("explains Auto fallbacks and does not elevate unknown providers", () => {
-    expect(approvalModeOptionsFor("grokAgent").find((option) => option.mode === "auto")?.description).toContain("behaves like Ask");
+    expect(approvalModeOptionsFor("grokAgent").find((option) => option.mode === "auto")?.description).toContain("provider reviews routine actions");
+    expect(approvalModeOptionsFor("customAgent").find((option) => option.mode === "auto")?.description).toContain("behaves like Ask");
     expect(approvalModeOptionsFor("customAgent").map((option) => option.mode)).toEqual(["ask", "auto"]);
   });
 

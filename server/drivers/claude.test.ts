@@ -144,12 +144,52 @@ describe("ClaudeDriver.decodeConfig", () => {
         },
       }),
     ).rejects.toThrow(/interactive approval broker/);
+    // Settings may sign this account in and out on a hosted server.
+    expect(bypass.startAuthentication).toBeTypeOf("function");
+    expect(bypass.signOut).toBeTypeOf("function");
     await bypass.dispose();
   });
 
   it("gives each collision test a distinct broker pipe path", () => {
     const paths = COLLISION_THREAD_IDS.map(permissionSocketPath);
     expect(new Set(paths).size).toBe(COLLISION_THREAD_IDS.length);
+  });
+
+  it("disposes its account controller while a logout is running", async () => {
+    const home = mkdtempSync(join(tmpdir(), "omb-claude-logout-dispose-"));
+    const cli = join(home, "fake-logout.mjs");
+    const pidPath = join(home, "logout-pid");
+    writeFileSync(cli, [
+      "#!/usr/bin/env node",
+      'import { writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'if (process.argv.slice(2).join(" ") !== "auth logout") process.exit(2);',
+      'writeFileSync(join(process.env.HOME, "logout-pid"), String(process.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join("\n"), { mode: 0o700 });
+    const instance = await ClaudeDriver.create({
+      instanceId: "claude-logout-dispose", displayName: "Fixture", enabled: true,
+      config: { cli, permissionMode: "acceptEdits" },
+      environment: { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: join(home, ".claude") },
+    });
+    const pending = instance.signOut!().catch(() => {});
+    let pid: number | undefined;
+    const alive = (value: number) => { try { process.kill(value, 0); return true; } catch { return false; } };
+    try {
+      await expect.poll(() => existsSync(pidPath), { timeout: 2500 }).toBe(true);
+      pid = Number(readFileSync(pidPath, "utf8"));
+      await instance.dispose();
+      expect(alive(pid)).toBe(false);
+      await expect(instance.signOut!()).rejects.toThrow("provider was removed");
+    } finally {
+      if (pid !== undefined && alive(pid)) {
+        if (process.platform === "win32") process.kill(pid, "SIGKILL");
+        else process.kill(-pid, "SIGKILL");
+      }
+      await pending;
+      await instance.dispose();
+      await removeTempDir(home);
+    }
   });
 
   it("keeps the deterministic path as the first broker candidate", () => {
@@ -400,7 +440,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv).toContain("--permission-prompt-tool");
   });
 
-  it("reapplies Full, Auto, and Ask on the same resumed conversation", async () => {
+  it.each(["claude-sonnet-5", "claude-fable-5"])("reapplies Full, Auto, and Ask on the same resumed %s conversation", async (model) => {
     await create(undefined, {}, { permissionMode: "bypassPermissions" });
     const dump = join(scratch, "approval-transitions.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -408,11 +448,13 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       const { turnId } = await instance.adapter.sendTurn({
         threadId: "t-mode-transitions",
         text: "hello",
+        model,
         approvalMode,
         resumeCursor: "11111111-1111-4111-8111-111111111111",
       });
       await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
       const seen = JSON.parse(readFileSync(dump, "utf8"));
+      expect(seen.argv[seen.argv.indexOf("--model") + 1]).toBe(model);
       expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe(nativeMode);
       expect(seen.argv.includes("--permission-prompt-tool")).toBe(approvalMode !== "full");
       expect(seen.argv).toContain("--resume");
@@ -558,7 +600,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     }
   });
 
-  it("mounts the agents comms proxy as an MCP server and pre-allows its tools", async () => {
+  it.each(["ask", "auto"] as const)("pre-allows the agents comms proxy while retaining native %s approval", async (approvalMode) => {
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -566,6 +608,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({
       threadId: "t-agents",
       text: "hi",
+      approvalMode,
       integrations: {
         agents: {
           command: process.execPath,
@@ -587,6 +630,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.stringify(seen.argv)).not.toContain("tok");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe(approvalMode === "auto" ? "auto" : "default");
+    expect(seen.argv).toContain("--permission-prompt-tool");
     expect(seen.mcpConfig.mcpServers.ogb.alwaysLoad).toBe(true);
   });
 

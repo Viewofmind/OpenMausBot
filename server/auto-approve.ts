@@ -13,27 +13,13 @@
 
 import { approvalModeFor, type ApprovalMode } from "../shared/approval-mode.ts";
 
-/** The mode a turn actually runs under, given where the turn came from.
- *
- * Full and Custom are Codex's: on any other engine they fall to Ask, so a
- * hand-edited record cannot hand Claude a bypass it was never granted.
- *
- * And Full is a decision the person made about THEIR OWN sessions with a
- * bot — "run without asking me". A turn started by another bot is not one
- * of those: the person never saw the request, and the sender may itself be
- * unattended or working off a page it just read. A Full target reached that
- * way runs as Approve for me instead — ordinary requests still flow, the
- * destructive and sensitive guards card, an unattended sender's block holds,
- * and every answer goes through the fold and into the decision log, where a
- * driver-side Full accept never appears. A webhook or scheduled turn on a
- * Full bot is unchanged: the person opted into that, and the docs say so. */
+/** Full access is the person's explicit grant to this receiving bot, including
+ * delegated work. It never inherits the sender's mode or elevates another bot.
+ * Custom is a provider-config choice rather than an app Full-access grant, so
+ * peer-started Custom turns still use Auto and its unattended downgrade.
+ * Provider support and grant confirmation are checked by the caller. */
 export function approvalModeForOrigin(mode: ApprovalMode, origin: { peerInitiated: boolean }): ApprovalMode {
-  // Provider support is settled by supportsApprovalMode at the call site;
-  // this only answers who STARTED the turn. A permissive mode is the
-  // person's grant to the bot they talk to, not to every teammate that can
-  // reach it, so a peer-started turn runs one notch down and still gets the
-  // unattended downgrade after this.
-  if ((mode === "full" || mode === "custom") && origin.peerInitiated) return "auto";
+  if (mode === "custom" && origin.peerInitiated) return "auto";
   return mode;
 }
 

@@ -143,13 +143,19 @@ describe("MCP tool execution", () => {
       return {
         bots: [{
           id: "bot-1", name: "Deckard", title: "Detective", busy: false, activity: "idle",
-          threadId: "task-1", messages: [], tasks: [{ threadId: "task-1", title: "Case", createdAt: 10 }],
+          threadId: "task-1", messages: [], tasks: [{
+            threadId: "task-1", title: "Case", createdAt: 10, busy: false, activity: "idle",
+            modelSelection: { instanceId: "fake", model: "fake-model" },
+          }],
         }],
       };
     });
     const result: any = await handleToolCall("list_bots", {}, fetcher);
     expect(result.bots[0]).toMatchObject({ id: "bot-1", activeTaskId: "task-1", activity: "idle" });
-    expect(result.bots[0].tasks[0]).toMatchObject({ taskId: "task-1", active: true });
+    expect(result.bots[0].tasks[0]).toMatchObject({
+      taskId: "task-1", active: true, busy: false, activity: "idle",
+      modelSelection: { instanceId: "fake", model: "fake-model" },
+    });
     expect(result.bots[0]).not.toHaveProperty("messages");
   });
 
@@ -179,7 +185,7 @@ describe("MCP tool execution", () => {
     expect(result.hasMore).toBe(true);
   });
 
-  it("pins bot and channel sends to the active task", async () => {
+  it("pins bot sends to any owned task and channel sends to the active task", async () => {
     const fetcher = vi.fn(async (path: string, options?: RequestInit) => {
       if (path === "/api/bots?messages=0") return {
         bots: [{
@@ -196,7 +202,10 @@ describe("MCP tool execution", () => {
         }],
       };
       if (path === "/api/bots/bot-1/messages") {
-        expect(JSON.parse(String(options?.body))).toEqual({ text: "Investigate", threadId: "bot-task" });
+        const body = JSON.parse(String(options?.body));
+        expect(body).toEqual(body.text === "Background investigation"
+          ? { text: "Background investigation", threadId: "bot-old" }
+          : { text: "Investigate", threadId: "bot-task" });
         return { ok: true };
       }
       if (path === "/api/groups/channel-1/messages") {
@@ -207,8 +216,11 @@ describe("MCP tool execution", () => {
     });
 
     await expect(handleToolCall("send_bot_message", {
-      bot_id: "bot-1", task_id: "bot-old", text: "Wrong task",
-    }, fetcher)).rejects.toThrow("not active");
+      bot_id: "bot-1", task_id: "not-owned", text: "Wrong task",
+    }, fetcher)).rejects.toThrow("does not belong");
+    await expect(handleToolCall("send_bot_message", {
+      bot_id: "bot-1", task_id: "bot-old", text: "Background investigation",
+    }, fetcher)).resolves.toMatchObject({ success: true, taskId: "bot-old" });
     await expect(handleToolCall("send_channel_message", {
       channel_id: "channel-1", task_id: "channel-old", text: "Wrong task",
     }, fetcher)).rejects.toThrow("not active");
@@ -375,6 +387,82 @@ describe("MCP tool execution", () => {
       target_type: "bot", target_id: "bot-1", timeout_seconds: 1,
     }, fetcher);
     expect(result).toMatchObject({ status: "needs-user", messages: [{ text: "Approve?" }] });
+  });
+
+  it("changes an idle task model while another task of the same bot works", async () => {
+    const modelSelection = { instanceId: "codex", model: "gpt-5.6-sol" };
+    const fetcher = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path === "/api/bots?messages=0") return {
+        bots: [{ id: "bot-1", threadId: "task-a", busy: true, activity: "working", tasks: [
+          { threadId: "task-a", busy: true, activity: "working" },
+          { threadId: "task-b", busy: false, activity: "idle" },
+        ] }],
+      };
+      if (path === "/api/instances") return { instances: [{
+        instanceId: "codex", snapshot: { state: "available" },
+        models: { default: "gpt-5.6-sol", options: [{ id: "gpt-5.6-sol" }] },
+      }] };
+      if (path === "/api/bots/bot-1/tasks/task-b") {
+        expect(options?.method).toBe("PATCH");
+        expect(JSON.parse(String(options?.body))).toEqual({ modelSelection, requireAvailableModel: true });
+        return { task: { threadId: "task-b", busy: false, activity: "idle", modelSelection, resumeCursors: { codex: "secret" } } };
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+    const args = { bot_id: "bot-1", instance_id: "codex", model: "gpt-5.6-sol" };
+    await expect(handleToolCall("set_bot_model", { ...args, task_id: "task-a" }, fetcher)).rejects.toThrow("let it finish");
+    await expect(handleToolCall("set_bot_model", { ...args, task_id: "other-bot-task" }, fetcher)).rejects.toThrow("does not belong");
+    const result: any = await handleToolCall("set_bot_model", { ...args, task_id: "task-b" }, fetcher);
+    expect(result).toMatchObject({ success: true, botId: "bot-1", task: { taskId: "task-b", active: false, modelSelection } });
+    expect(result.task).not.toHaveProperty("resumeCursors");
+  });
+
+  it("keeps waiting on task A after selection moves to B and does not wait for B", async () => {
+    let reads = 0;
+    const fetcher = vi.fn(async (path: string) => {
+      if (path === "/api/bots?messages=0") {
+        reads += 1;
+        return { bots: [{
+          id: "bot-1", threadId: reads === 1 ? "task-a" : "task-b", busy: true, activity: "waiting-on-you",
+          tasks: [
+            { threadId: "task-a", busy: reads < 3, activity: reads < 3 ? "working" : "idle" },
+            { threadId: "task-b", busy: true, activity: "waiting-on-you" },
+          ],
+        }], groups: [] };
+      }
+      if (path === "/api/threads/task-a/messages?limit=10") return { messages: [{ role: "bot", kind: "text", text: "A done" }] };
+      throw new Error(`unexpected path ${path}`);
+    });
+    const result: any = await handleToolCall("wait_for_conversation", {
+      target_type: "bot", target_id: "bot-1", timeout_seconds: 3,
+    }, fetcher);
+    expect(reads).toBe(3);
+    expect(result).toMatchObject({ status: "settled", taskId: "task-a", messages: [{ text: "A done" }] });
+    expect(result.target).toMatchObject({ activeTaskId: "task-b", busy: true });
+  });
+
+  it("interrupts pinned task A while B is selected and refuses an unowned task", async () => {
+    const fetcher = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path === "/api/bots?messages=0") return { bots: [{
+        id: "bot-1", threadId: "task-b", busy: true, tasks: [
+          { threadId: "task-a", busy: true, activity: "working" },
+          { threadId: "task-b", busy: true, activity: "working" },
+        ],
+      }] };
+      if (path === "/api/bots/bot-1/interrupt") {
+        expect(options?.method).toBe("POST");
+        expect(JSON.parse(String(options?.body))).toEqual({ threadId: "task-a" });
+        return { ok: true };
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
+    await expect(handleToolCall("interrupt_conversation", {
+      target_type: "bot", target_id: "bot-1", task_id: "task-a",
+    }, fetcher)).resolves.toEqual({ success: true, targetType: "bot", targetId: "bot-1", taskId: "task-a" });
+    await expect(handleToolCall("interrupt_conversation", {
+      target_type: "bot", target_id: "bot-1", task_id: "another-task",
+    }, fetcher)).rejects.toThrow("does not belong");
+    expect(fetcher.mock.calls.filter(([path]) => path.endsWith("/interrupt"))).toHaveLength(1);
   });
 
   it("reports no-signal as stalled and keeps the frozen task tail", async () => {

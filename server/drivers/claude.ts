@@ -12,11 +12,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, normalize } from "node:path";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
+import { ClaudeLoginController } from "./claude-login-auth.ts";
 
 import type {
   DriverCreateInput,
@@ -48,23 +49,71 @@ import { SPAWNED_PROXIES } from "../proxy-paths.ts";
  * backends over time. Presence checks also accept stale credentials. The CLI's
  * own machine-readable auth command is the source of truth for every backend.
  */
-export function claudeSignedIn(
+function claudeAuthStatus(
+  cli: string,
+  env: NodeJS.ProcessEnv,
+  run: typeof execCli = execCli,
+): Promise<{ authenticated: boolean; account?: ProviderSnapshot["account"] }> {
+  return new Promise((resolve) => {
+    run(cli, ["auth", "status", "--json"], { timeout: 8000, maxBuffer: 65_536, env }, (_error, stdout) => {
+      try {
+        const status: unknown = JSON.parse(stdout);
+        if (!status || typeof status !== "object" || !("loggedIn" in status) || status.loggedIn !== true) {
+          return resolve({ authenticated: false });
+        }
+        // Only display identity fields, never the CLI's full auth response.
+        const identity = status as { email?: unknown; orgName?: unknown };
+        const boundedText = (value: unknown, max: number): string | undefined =>
+          typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\p{Cc}\p{Cf}]/u.test(value)
+            ? value.trim() : undefined;
+        const candidateEmail = boundedText(identity.email, 254);
+        const email = candidateEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(candidateEmail) ? candidateEmail : undefined;
+        const organization = boundedText(identity.orgName, 160);
+        resolve({
+          authenticated: true,
+          ...(email || organization ? { account: { ...(email ? { email } : {}), ...(organization ? { organization } : {}) } } : {}),
+        });
+      } catch {
+        resolve({ authenticated: false });
+      }
+    });
+  });
+}
+
+export async function claudeSignedIn(
   cli: string,
   env: NodeJS.ProcessEnv,
   run: typeof execCli = execCli,
 ): Promise<boolean> {
-  return new Promise((resolve) => {
-    run(cli, ["auth", "status", "--json"], { timeout: 8000, env }, (_error, stdout) => {
-      try {
-        const status: unknown = JSON.parse(stdout);
-        resolve(
-          typeof status === "object" && status !== null && "loggedIn" in status && status.loggedIn === true,
-        );
-      } catch {
-        resolve(false);
-      }
-    });
-  });
+  return (await claudeAuthStatus(cli, env, run)).authenticated;
+}
+
+/** Parent-session credentials/routing that a named account must not inherit.
+ * Shared with terminal sign-in instructions so login and turns select alike. */
+export const CLAUDE_ACCOUNT_ENV_KEYS = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_OAUTH_SCOPES",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+] as const;
+
+/** Resolve the CLI's config location without changing HOME or Keychain. */
+export function resolveClaudeConfigDir(configDir?: string, env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const configured = configDir?.trim() || env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
+  const expanded = configured === "~" ? home : configured.startsWith("~/") ? join(home, configured.slice(2)) : configured;
+  if (!isAbsolute(expanded) || /[\p{Cc}\p{Cf}]/u.test(expanded)) {
+    throw new Error("claude: configDir must be an absolute path or start with ~/");
+  }
+  return normalize(expanded);
 }
 
 /** Whether a stream frame is the CLI reporting that it has no login.
@@ -94,8 +143,22 @@ export function claudeAuthFailure(
 function claudeEnvironment(
   model?: string | null,
   source: NodeJS.ProcessEnv = process.env,
+  configDir?: string,
+  instanceEnvironment: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...source, PATH: augmentedPath(), NPM_CONFIG_LOGLEVEL: "error" };
+  if (configDir?.trim()) {
+    env.CLAUDE_CONFIG_DIR = resolveClaudeConfigDir(configDir, env);
+    for (const key of CLAUDE_ACCOUNT_ENV_KEYS) {
+      // Explicit custom endpoint settings still work; subscription OAuth
+      // always belongs to this account's CLI-managed login, never its parent.
+      if (key.startsWith("CLAUDE_CODE_OAUTH_") || key.endsWith("_FILE_DESCRIPTOR") || !Object.hasOwn(instanceEnvironment, key)) {
+        delete env[key];
+      }
+    }
+  } else if (env.CLAUDE_CONFIG_DIR) {
+    env.CLAUDE_CONFIG_DIR = resolveClaudeConfigDir(undefined, env);
+  }
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
   // The harness process may hold workspace credentials (xai/box/voice keys,
@@ -110,6 +173,8 @@ const DRIVER_KIND = "claudeAgent";
 
 export interface ClaudeConfig {
   cli: string;
+  /** Separate CLI-managed login/settings. Empty uses the normal CLI account. */
+  configDir?: string;
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
   /** Available Claude built-ins. An empty list passes `--tools ""`. */
   tools?: string[];
@@ -144,11 +209,6 @@ async function resolveClaudeTurnModel(
   return resolveInjectId(model, await probeLocalInjects(env)) ?? model;
 }
 
-function claudeConfigDir(env: Record<string, string | undefined>): string {
-  if (env.CLAUDE_CONFIG_DIR) return env.CLAUDE_CONFIG_DIR;
-  return join(env.HOME || env.USERPROFILE || homedir(), ".claude");
-}
-
 function extrasFromUnknown(value: unknown): Array<{ id: string; label: string }> {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
@@ -172,7 +232,7 @@ function extrasFromUnknown(value: unknown): Array<{ id: string; label: string }>
 export function readClaudeModelCatalog(env: Record<string, string | undefined> = process.env) {
   let settings: Record<string, unknown> = {};
   try {
-    settings = JSON.parse(readFileSync(join(claudeConfigDir(env), "settings.json"), "utf8")) as Record<string, unknown>;
+    settings = JSON.parse(readFileSync(join(resolveClaudeConfigDir(undefined, env), "settings.json"), "utf8")) as Record<string, unknown>;
   } catch {
     return STATIC_CLAUDE_MODELS;
   }
@@ -507,8 +567,12 @@ function decodeConfig(raw: unknown): ClaudeConfig {
   }
   const tools = decodeToolList(o.tools, "tools");
   const disallowedTools = decodeToolList(o.disallowedTools, "disallowedTools");
+  if (o.configDir !== undefined && typeof o.configDir !== "string") throw new Error("claude: configDir must be a string");
+  const configDir = typeof o.configDir === "string" ? o.configDir.trim() : undefined;
+  if (configDir) resolveClaudeConfigDir(configDir);
   return {
     cli: typeof o.cli === "string" ? o.cli : "claude",
+    ...(configDir ? { configDir } : {}),
     permissionMode: (mode as ClaudeConfig["permissionMode"]) ?? "acceptEdits",
     ...(tools !== undefined ? { tools } : {}),
     ...(disallowedTools !== undefined ? { disallowedTools } : {}),
@@ -599,7 +663,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
 
   async create(input: DriverCreateInput<ClaudeConfig>): Promise<ProviderInstance> {
     const { instanceId, config } = input;
-    const catalogEnv: Record<string, string | undefined> = { ...process.env, ...input.environment };
+    const environment = (model?: string | null) =>
+      claudeEnvironment(model, { ...process.env, ...input.environment }, config.configDir, input.environment);
+    const catalogEnv = environment();
     let models = STATIC_CLAUDE_MODELS;
     const refreshModels = async () => {
       try {
@@ -749,7 +815,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (config.disallowedTools?.length) {
         args.push("--disallowedTools", config.disallowedTools.join(","));
       }
-      const turnEnvironment: NodeJS.ProcessEnv = { ...process.env, ...input.environment };
+      const turnEnvironment = environment();
       const turnModel = await resolveClaudeTurnModel(turn.model, turnEnvironment);
       const injected = applyClaudeInject({ ...turnEnvironment }, turnModel);
       if (injected.model) args.push("--model", injected.model);
@@ -850,7 +916,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         args.push("--allowedTools", allowed.join(","));
       }
 
-      const env = claudeEnvironment(turnModel, turnEnvironment);
+      const env = environment(turnModel);
       // Our approvals and browser credentials expire at the user-turn
       // boundary. Native background workers cannot outlive that boundary;
       // parallel bot work must use the harness's durable delegate_bot path.
@@ -867,6 +933,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         cwd,
         model: injected.model ?? null,
         base: env.ANTHROPIC_BASE_URL ?? null,
+        configDir: env.CLAUDE_CONFIG_DIR ?? null,
       });
 
       // Reuse the live process when it is idle, unchanged, and is the session
@@ -1316,19 +1383,23 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       return writeUser(s, threadId, claudeUserMessage(text, undefined));
     };
 
+    // Sign in from Settings: the unmodified CLI's own login, driven over pipes
+    // (server/drivers/claude-login-auth.ts). Same environment as every turn.
+    const login = new ClaudeLoginController({ cli: config.cli, environment, onAuthenticated: async () => { await refreshModels(); } });
+
     const snapshot = async (): Promise<ProviderSnapshot> => {
-      const env = claudeEnvironment(undefined, { ...process.env, ...input.environment });
+      const env = environment();
       const version = await new Promise<string | null>((resolve) => {
         execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
           resolve(err ? null : stdout.trim()),
         );
       });
       if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
-      const authenticated = await claudeSignedIn(config.cli, env);
+      const auth = await claudeAuthStatus(config.cli, env);
       // claudeEnvironment strips ANTHROPIC_API_KEY, so turns run on the
       // CLI's own login (Pro/Max): the cost it reports is what the call
       // WOULD bill, not a charge
-      return { state: "available", version, authenticated, billing: "subscription" };
+      return { state: "available", version, ...auth, billing: "subscription" };
     };
 
     /** One-shot Claude call with the prompt on stdin, never argv. Approval
@@ -1342,7 +1413,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           ["-p", "--model", "claude-haiku-4-5", "--output-format", "text"],
           {
             stdio: ["pipe", "pipe", "pipe"],
-            env: claudeEnvironment("claude-haiku-4-5", { ...process.env, ...input.environment }),
+            env: environment("claude-haiku-4-5"),
           },
         );
         let stdout = "";
@@ -1399,6 +1470,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       },
       refreshModels,
       snapshot,
+      startAuthentication: () => login.start(),
+      getAuthentication: (flowId) => login.get(flowId),
+      completeAuthentication: (flowId, code) => login.complete(flowId, code),
+      cancelAuthentication: () => login.cancel(),
+      signOut: () => login.signOut(),
       adapter: {
         provider: DRIVER_KIND,
         capabilities: {
@@ -1442,9 +1518,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       generateText: (prompt) => generateReview(prompt),
       reviewPermission: generateReview,
       dispose: async () => {
-        for (const { stop } of active.values()) stop();
-        for (const threadId of [...sessions.keys()]) closeSession(threadId, "dispose");
-        listeners.clear();
+        try {
+          await login.dispose();
+        } finally {
+          for (const { stop } of active.values()) stop();
+          for (const threadId of [...sessions.keys()]) closeSession(threadId, "dispose");
+          listeners.clear();
+        }
       },
     };
   },

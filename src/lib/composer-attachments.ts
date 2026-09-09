@@ -135,6 +135,21 @@ const DOCUMENT_MIMES: Readonly<Record<string, string>> = {
 
 const ACCEPTED_DOCUMENT_MIMES = new Set(Object.values(DOCUMENT_MIMES));
 
+const AUDIO_MIMES_BY_EXTENSION: Readonly<Record<string, string>> = {
+  opus: "audio/opus",
+  ogg: "audio/ogg",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  aac: "audio/aac",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  webm: "audio/webm",
+};
+const ACCEPTED_AUDIO_MIMES = new Set([
+  ...Object.values(AUDIO_MIMES_BY_EXTENSION),
+  "audio/x-m4a", "audio/x-wav", "audio/wave", "audio/x-flac",
+]);
+
 export function documentMime(file: Pick<File, "name" | "type">): string | null {
   const declared = file.type.split(";", 1)[0]!.trim().toLowerCase();
   if (ACCEPTED_DOCUMENT_MIMES.has(declared)) return declared;
@@ -321,11 +336,14 @@ export async function imageAttachmentFromFile(
   };
 }
 
-/** Copy a supported document into the private attachment store. The prompt
+/** Copy a supported document or audio file into the private attachment store. The prompt
  * then carries the same durable path for the local agent and paired phones,
  * instead of exposing an arbitrary Finder path to the companion route. */
 export async function fileAttachmentFromFile(file: File): Promise<FileAttachment | null> {
-  const mime = documentMime(file);
+  const declared = file.type.split(";", 1)[0]!.trim().toLowerCase();
+  const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+  const mime = documentMime(file) ??
+    (ACCEPTED_AUDIO_MIMES.has(declared) ? declared : AUDIO_MIMES_BY_EXTENSION[extension]);
   if (!mime) return null;
   if (file.size > FILE_MAX_BYTES) {
     throw Object.assign(new Error(`${file.name} exceeds 25 MB`), { status: 413 });
@@ -609,8 +627,8 @@ const TRANSCRIPT_ATTACHMENT_TAG =
   /^<attached-(image|file)[\t ]+path="([^"\r\n]*)"(?:[\t ]+name="([^"\r\n]*)")?[\t ]*\/>[\t ]*$/;
 
 /** Split a stored user message into its display text and attachments for
- * transcript rendering. Prompt-only tags never show in the bubble. */
-export function splitTranscriptAttachments(text: string): TranscriptAttachments {
+ * transcript rendering. Markdown exports preserve whitespace; bubbles trim it. */
+export function splitTranscriptAttachments(text: string, trimDisplay = true): TranscriptAttachments {
   const images: TranscriptImageAttachment[] = [];
   const files: TranscriptFileAttachment[] = [];
   let display = "";
@@ -667,7 +685,7 @@ export function splitTranscriptAttachments(text: string): TranscriptAttachments 
     cursor = wholeLineEnd;
   }
 
-  return { display: display.trim(), images, files };
+  return { display: trimDisplay ? display.trim() : display, images, files };
 }
 
 /** Kept for callers outside the desktop bundle that used the old helper. */
@@ -789,7 +807,7 @@ export async function intakeFiles<T extends DroppedFile & { type: string }>(
   const rejectedNames = results.flatMap((result) => result.rejectedNames);
   const uploadErrors = results.flatMap((result) => result.uploadError ? [result.uploadError] : []);
   const pathless = rejectedNames.length
-    ? `${rejectedNames.join(", ")} — that file has no path on disk. Save it first, then attach it from Finder.`
+    ? `Unable to attach ${rejectedNames.join(", ")}. Choose a supported image, document, or audio file.`
     : null;
   const failed = uploadErrors.length ? uploadErrors.join("; ") : null;
   return {
