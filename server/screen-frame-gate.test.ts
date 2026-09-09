@@ -55,6 +55,28 @@ describe("screenTouchingTool", () => {
     expect(screenTouchingTool("computer__computer_status")).toBe(false);
   });
 
+  it.each(["local_vm", "computer-use", "vm2", `v${"m".repeat(31)}`])(
+    "accepts the valid %s namespace in both mounted spellings",
+    (namespace) => {
+      for (const prefix of [`mcp__${namespace}__`, `${namespace}__`]) {
+        expect(screenTouchingTool(`${prefix}screenshot`)).toBe(true);
+        expect(screenSurfaceForTool(`${prefix}screenshot`)).toBe("computer");
+        expect(screenTouchingTool(`${prefix}agent_browser_open`)).toBe(true);
+        expect(screenSurfaceForTool(`${prefix}agent_browser_open`)).toBe("browser");
+        for (const tool of ["computer_exec", "computer_status", "agent_browser_snapshot", "wait_for"])
+          expect(screenTouchingTool(`${prefix}${tool}`)).toBe(false);
+      }
+    },
+  );
+
+  it("preserves legacy MCP names without accepting invalid desktop namespaces", () => {
+    expect(screenTouchingTool("mcp__legacy.server__screenshot")).toBe(true);
+    expect(screenTouchingTool("MCP__LOCAL_VM__SCREENSHOT")).toBe(true);
+    expect(screenTouchingTool("legacy.server__screenshot")).toBe(false);
+    expect(screenTouchingTool(`${"v".repeat(33)}__screenshot`)).toBe(false);
+    expect(screenTouchingTool("2vm__screenshot")).toBe(false);
+  });
+
   it("takes Codex's bare names and pi's server_tool names", () => {
     expect(screenTouchingTool("click")).toBe(true);
     expect(screenTouchingTool("hotkey")).toBe(true);
@@ -135,8 +157,10 @@ describe("screenSurfaceForTool", () => {
   it.each(["browser_click", "browser_fill"])("keeps desktop %s on the computer across drivers", (tool) => {
     expect(screenSurfaceForTool(`mcp__computer__${tool}`)).toBe("computer");
     expect(screenSurfaceForTool(`computer_${tool}`)).toBe("computer");
+    expect(screenSurfaceForTool(`computer__${tool}`)).toBe("computer");
     expect(screenSurfaceForTool(tool)).toBe("computer");
     expect(screenSurfaceForTool(`mcp__browser__${tool}`)).toBe("browser");
+    expect(screenSurfaceForTool(`browser__${tool}`)).toBe("browser");
     expect(screenSurfaceForTool(`browser_agent_${tool}`)).toBe("browser");
   });
 
