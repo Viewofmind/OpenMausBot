@@ -45,6 +45,7 @@ import { stateForBot } from "@/lib/mascot";
 import { showWorkingDots } from "@/lib/turn-tail";
 import { liveActivityLabel } from "@/lib/live-activity";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { RawMarkdownView, RawToggleAction } from "./RawMarkdownToggle";
 import { ThreadChip } from "./ThreadChip";
 import { ThreadRefText } from "./ThreadRefs";
 import { OptionCard, shouldHideOnboardingCard } from "./OptionCard";
@@ -325,6 +326,7 @@ function Bubble({
   const user = message.role === "user";
   const mentionPeers = useMemo(() => state.bots.filter((peer) => peer.id !== bot.id), [state.bots, bot.id]);
   const [expanded, setExpanded] = useState(false);
+  const [viewRaw, setViewRaw] = useState(false);
   const text = message.text ?? "";
   const webhookView = user ? webhookMessageView(text) : null;
   const attachments = user && !webhookView ? splitTranscriptAttachments(text) : null;
@@ -465,7 +467,7 @@ function Bubble({
               )}
             </>
           ) : (
-            <MessageBoundary fallbackText={text || t("chat.generatedImage")}>
+            <MessageBoundary key={viewRaw ? "raw" : "rendered"} fallbackText={text || t("chat.generatedImage")}>
               {message.attachments?.length ? (
                 <AttachedImageGallery
                   paths={message.attachments.map((attachment) => attachment.path)}
@@ -473,7 +475,11 @@ function Bubble({
                   eager={eagerAttachments}
                 />
               ) : null}
-              {text ? <ChatMarkdown text={text} mentionPeers={mentionPeers} message={{ threadId: bot.threadId, messageId: message.id }} /> : null}
+              {viewRaw && text ? (
+                <RawMarkdownView text={text} />
+              ) : text ? (
+                <ChatMarkdown text={text} mentionPeers={mentionPeers} message={{ threadId: bot.threadId, messageId: message.id }} />
+              ) : null}
             </MessageBoundary>
           )}
         </div>
@@ -481,6 +487,7 @@ function Bubble({
           <>
             <div className="flex flex-col gap-0.5 self-end pb-0.5">
               {text && <CopyButton text={text} />}
+              {text && <RawToggleAction active={viewRaw} onToggle={() => setViewRaw((r) => !r)} />}
               {message.kind === "text" && text && (
                 <SpeakButton text={text} botId={bot.id} messageId={message.id} voiceId={bot.voice} />
               )}

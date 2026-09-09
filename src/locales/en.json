@@ -307,6 +307,8 @@
   "chat.timeline.title": "Execution timeline",
   "chat.timeline.titleRunning": "Execution timeline · running",
   "chat.copyMessage": "Copy message",
+  "chat.showRawMarkdown": "Show raw markdown",
+  "chat.showRenderedMarkdown": "Show rendered markdown",
   "chat.retry": "Retry",
   "chat.send": "Send",
   "chat.editMessage": "Edit message",
