@@ -322,7 +322,9 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("2 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain('title="Copy code"');
+    expect(html).toContain('title="Download snippet as file"');
     expect(html).toContain('type="button"');
   });
 
@@ -351,6 +353,7 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("4 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain("line1\nline2\nline3");
   });
 });

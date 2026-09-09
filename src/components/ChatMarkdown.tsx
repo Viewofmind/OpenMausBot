@@ -21,7 +21,13 @@ import remarkGfm from "remark-gfm";
 import { Check, Copy, Download, LoaderCircle, RotateCcw, WrapText } from "lucide-react";
 import { remarkMentions, type MentionPeer } from "@/lib/mentions";
 
-import { countLines, formatLineCount, getLanguageDisplayName } from "../lib/code-block";
+import {
+  countLines,
+  downloadSnippetFile,
+  formatLineCount,
+  getLanguageDisplayName,
+  getSnippetFileName,
+} from "../lib/code-block";
 import { repairMarkdownTables } from "../lib/markdown-tables";
 import { remarkThreadRefs } from "../lib/thread-refs";
 import { MarkdownImagePreview, useLocalFileSave, type MessageAttachmentContext } from "./AttachmentPreview";
@@ -255,6 +261,11 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
       });
   };
 
+  const download = () => {
+    const filename = getSnippetFileName(lang);
+    downloadSnippetFile(filename, code);
+  };
+
   const displayLanguage = getLanguageDisplayName(lang);
   const lineCount = countLines(code);
 
@@ -291,6 +302,16 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
           </button>
           <button
             type="button"
+            onClick={download}
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
+            title="Download snippet as file"
+            aria-label="Download snippet as file"
+          >
+            <Download size={12} aria-hidden="true" />
+            <span className="hidden sm:inline">Save</span>
+          </button>
+          <button
+            type="button"
             onClick={copy}
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
             title={copied ? "Copied to clipboard" : "Copy code"}
@@ -299,12 +320,12 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
             {copied ? (
               <>
                 <Check size={12} className="text-success" aria-hidden="true" />
-                <span className="text-success font-medium">Copied!</span>
+                <span className="text-success font-medium hidden sm:inline">Copied!</span>
               </>
             ) : (
               <>
                 <Copy size={12} aria-hidden="true" />
-                <span>Copy</span>
+                <span className="hidden sm:inline">Copy</span>
               </>
             )}
           </button>
