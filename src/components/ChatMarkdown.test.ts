@@ -55,6 +55,31 @@ describe("mention highlighting", () => {
   });
 });
 
+describe("repaired tables", () => {
+  it("renders a table whose delimiter row is a cell short of its header", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("<th");
+  });
+  it("renders a table that arrived welded onto one line", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Lead-in prose\n| A | B | |---|---| | 1 | 2 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("Lead-in prose");
+  });
+  it("keeps a message holding an image byte-for-byte, offsets intact", () => {
+    // MarkdownImagePreview resolves the attachment by source offset, so the
+    // repair must not move it; the broken table stays broken by design.
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "![shot](https://example.test/a.png)\n\n| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).not.toContain("<table");
+  });
+});
+
 it("requests both code palettes for skin-aware highlighting", async () => {
   const originalUseEffect = (await vi.importActual<typeof React>("react")).useEffect;
   const effects: React.EffectCallback[] = [];
