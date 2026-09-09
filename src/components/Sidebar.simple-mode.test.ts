@@ -54,6 +54,27 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("bot-first sidebar", () => {
+  it.each([
+    { enabled: true, density: "comfortable", size: 32, spacing: ["gap-2", "py-2", "pl-6"] },
+    { enabled: true, density: "compact", size: 26, spacing: ["gap-1.5", "py-1", "pl-6"] },
+    { enabled: true, density: "icons", size: 44, spacing: ["justify-center", "px-1", "py-1.5"] },
+    { enabled: false, density: "comfortable", size: 56, spacing: ["gap-3", "py-2.5", "pl-2"] },
+    { enabled: false, density: "compact", size: 40, spacing: ["gap-2", "py-1.5", "pl-2"] },
+    { enabled: false, density: "icons", size: 44, spacing: ["justify-center", "px-1", "py-1.5"] },
+  ] as const)("sizes bot portraits and row spacing in $density density with threads $enabled", ({ enabled, density, size, spacing }) => {
+    fixture.showThreads = enabled;
+    for (const avatar of [{}, { avatarUrl: "/api/attachments/portrait.png", avatarCrop: "circle" as const }]) {
+      let tree: ReactNode;
+      function Capture() { tree = BotListItem({ ...rowProps(density), bot: { ...bot, ...avatar } }); return tree; }
+      const markup = renderToStaticMarkup(createElement(Capture));
+      const row = findElement(tree, "data-sidebar-bot-row", bot.id)!;
+      expect(String(row.props.className).split(" ")).toEqual(expect.arrayContaining([...spacing]));
+      expect(markup).toContain(avatar.avatarUrl
+        ? `width="${size}" height="${size}"`
+        : `width="${size}px" height="${size}px"`);
+    }
+  });
+
   for (const enabled of [true, false]) {
     it.each(densities)(`opens the last selected conversation on mouse or keyboard, %s density, threads ${enabled ? "on" : "off"}`, (density) => {
       fixture.showThreads = enabled;

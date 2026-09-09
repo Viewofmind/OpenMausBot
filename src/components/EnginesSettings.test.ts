@@ -62,6 +62,44 @@ describe("Settings → Engines → Codex", () => {
   });
 });
 
+describe("Settings → Engines → setup cards", () => {
+  it("preserves one-click server installs and updates inside engine cards", () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { userAgent: "Linux" });
+    fixture.bots = [];
+    fixture.instances = [{
+      instanceId: "kimi", displayName: "Kimi", driverKind: "kimiAgent", cliDefault: "kimi",
+      snapshot: { state: "unavailable" }, models: { default: "model", options: [] },
+      install: { server: { package: "kimi-fixture" }, command: { linux: "npm install -g kimi-fixture" } },
+    }];
+    expect(renderToStaticMarkup(createElement(EnginesSettings))).toContain("Install Kimi on this server");
+    fixture.instances[0].snapshot = {
+      state: "available", authenticated: true,
+      update: { title: "Kimi update available", message: "A newer version is available.", command: "npm install -g kimi-fixture@latest" },
+    };
+    const html = renderToStaticMarkup(createElement(EnginesSettings));
+    expect(html).toContain("Update Kimi on this server");
+    expect(html).not.toContain("Install Kimi on this server");
+  });
+
+  it("exposes managed Antigravity setup and keeps custom engines free of cloud sign-in", () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { userAgent: "Linux" });
+    fixture.bots = [];
+    fixture.instances = [{
+      instanceId: "agy", displayName: "Antigravity", driverKind: "antigravityAgent", cliDefault: "agy",
+      snapshot: { state: "available", authenticated: false }, models: { default: "model", options: [] },
+      install: { managed: { label: "Install Antigravity", downloadBytes: 10 } },
+    }];
+    const html = renderToStaticMarkup(createElement(EnginesSettings));
+    expect(html).toContain("Sign in with Google");
+    expect(html).toContain("Set up");
+    expect(html).toContain("CLI path and updates");
+    fixture.instances[0].access = "custom";
+    expect(renderToStaticMarkup(createElement(EnginesSettings))).not.toContain("Sign in with Google");
+  });
+});
+
 describe("Settings → Engines → Claude accounts", () => {
   function claude(authenticated?: boolean, isDefault = false): InstanceInfo {
     return {

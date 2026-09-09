@@ -34,6 +34,7 @@
 import readline from "node:readline";
 
 import { CREDENTIAL_TARGETS, isCredentialTargetId } from "../../shared/credential-request.ts";
+import { agentToolAnnotations } from "../agent-tool-policy.ts";
 
 const HARNESS = process.env.OMB_HARNESS_URL ?? "http://127.0.0.1:8799";
 const BOT_ID = process.env.OMB_BOT_ID ?? "";
@@ -652,7 +653,10 @@ const TOOLS = [
       required: ["action", "skill_md", "source"],
     },
   },
-];
+].map((tool) => {
+  const annotations = agentToolAnnotations(tool.name);
+  return annotations ? { ...tool, annotations } : tool;
+});
 
 const SKILL_TOOL_NAMES = new Set(["skills_list", "skill_manage"]);
 const AVAILABLE_TOOLS = SKILL_AUTHORING_ENABLED

@@ -364,11 +364,14 @@ export function EngineSetup({
   instance,
   className,
   intent = "cloud",
+  unframed = false,
 }: {
   instance: InstanceInfo;
   className?: string;
   /** `inject` installs the CLI but deliberately skips cloud sign-in. */
   intent?: "cloud" | "inject";
+  /** The containing engine disclosure already supplies the card surface. */
+  unframed?: boolean;
 }) {
   const install = instance.install;
   const installCommand = installCommandFor(install);
@@ -402,7 +405,7 @@ export function EngineSetup({
   // token) and intentionally have no install descriptor.
   if (!install) {
     return (
-      <div className={cn("rounded-xl border border-hairline/40 bg-control/30 p-3", className)}>
+      <div className={cn(!unframed && "rounded-xl border border-hairline/40 bg-control/30 p-3", className)}>
         <div className="text-[13px] font-semibold text-ink">{t("engineSetup.notReady", { name: instance.displayName })}</div>
         <p className="mt-1 text-[12px] leading-relaxed text-ink-secondary">
           {instance.snapshot.reason ?? t("engineSetup.noReason")}
@@ -412,7 +415,7 @@ export function EngineSetup({
   }
 
   return (
-    <div className={cn("rounded-xl border border-hairline/40 bg-control/30 p-3", className)}>
+    <div className={cn(!unframed && "rounded-xl border border-hairline/40 bg-control/30 p-3", className)}>
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-inset text-ink-secondary">
           {signInOnly ? <LogIn size={14} /> : <Download size={14} />}

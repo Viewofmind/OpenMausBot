@@ -339,6 +339,30 @@ describe("agents-proxy MCP surface", () => {
     expect(credential.description).toContain("Never claim a secure field opened unless this request succeeds");
   });
 
+  it("advertises read annotations only for the reviewed built-in reads", async () => {
+    const list = await rpc("tools/list");
+    const readNames = [
+      "list_bots", "list_rooms", "check_delegation", "wait_delegation", "list_threads",
+      "session_search", "session_read", "list_routines", "skills_list",
+    ];
+    expect(list.result.tools.filter((tool: any) => tool.annotations?.readOnlyHint)
+      .map((tool: any) => tool.name)).toEqual(readNames);
+    for (const tool of list.result.tools) {
+      if (readNames.includes(tool.name)) {
+        expect(tool.annotations).toEqual({
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        });
+      } else {
+        // Proposals and credential requests create durable cards; they are
+        // writes even though a later confirmation applies the requested change.
+        expect(tool.annotations).toBeUndefined();
+      }
+    }
+  });
+
   it("publishes a flat routine schedule schema that survives provider conversion", async () => {
     const list = await rpc("tools/list");
     const create = list.result.tools.find((t: { name: string }) => t.name === "propose_routine");

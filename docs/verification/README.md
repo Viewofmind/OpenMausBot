@@ -72,6 +72,9 @@ using the real renderer and an isolated fake-engine server.
 The [server settings recipe](server-settings.md) checks browser provider sign-in
 with an offline CLI and custom-domain validation without touching live accounts.
 
+The [engine library fixture](engines-ui.md) checks onboarding and Settings cards,
+responsive layouts, theme contrast, and status refreshes without losing drafts.
+
 The [mention fixture](mentions.md) checks candidate selection, composer highlighting,
 sent mentions, multiline scrolling and responsive wrapping in real chat views.
 

@@ -481,7 +481,7 @@ export function SettingsModal() {
         aria-modal="true"
         aria-labelledby="app-settings-title"
         tabIndex={-1}
-        className="flex h-[560px] max-h-[calc(100dvh-24px)] w-full max-w-[860px] overflow-hidden rounded-2xl border border-hairline/50 bg-panel shadow-2xl outline-none"
+        className={cn("flex max-h-[calc(100dvh-24px)] w-full overflow-hidden rounded-2xl border border-hairline/50 bg-panel shadow-2xl outline-none", section === "engines" ? "h-[720px] max-w-[1040px]" : "h-[560px] max-w-[860px]")}
       >
         {/* section nav */}
         <span id="app-settings-title" className="sr-only">{t("settings.title")}</span>
@@ -613,9 +613,7 @@ export function SettingsModal() {
             )}
 
             {section === "engines" && (
-              <Card title={t("settings.engines.title")} subtitle={t("settings.engines.subtitle")}>
-                <EnginesSettings />
-              </Card>
+              <EnginesSettings />
             )}
 
             {section === "companion" && (

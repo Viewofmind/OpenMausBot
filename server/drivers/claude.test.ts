@@ -440,7 +440,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv).toContain("--permission-prompt-tool");
   });
 
-  it("reapplies Full, Auto, and Ask on the same resumed conversation", async () => {
+  it.each(["claude-sonnet-5", "claude-fable-5"])("reapplies Full, Auto, and Ask on the same resumed %s conversation", async (model) => {
     await create(undefined, {}, { permissionMode: "bypassPermissions" });
     const dump = join(scratch, "approval-transitions.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -448,11 +448,13 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       const { turnId } = await instance.adapter.sendTurn({
         threadId: "t-mode-transitions",
         text: "hello",
+        model,
         approvalMode,
         resumeCursor: "11111111-1111-4111-8111-111111111111",
       });
       await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
       const seen = JSON.parse(readFileSync(dump, "utf8"));
+      expect(seen.argv[seen.argv.indexOf("--model") + 1]).toBe(model);
       expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe(nativeMode);
       expect(seen.argv.includes("--permission-prompt-tool")).toBe(approvalMode !== "full");
       expect(seen.argv).toContain("--resume");
@@ -598,7 +600,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     }
   });
 
-  it("mounts the agents comms proxy as an MCP server and pre-allows its tools", async () => {
+  it.each(["ask", "auto"] as const)("pre-allows the agents comms proxy while retaining native %s approval", async (approvalMode) => {
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -606,6 +608,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({
       threadId: "t-agents",
       text: "hi",
+      approvalMode,
       integrations: {
         agents: {
           command: process.execPath,
@@ -627,6 +630,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.stringify(seen.argv)).not.toContain("tok");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe(approvalMode === "auto" ? "auto" : "default");
+    expect(seen.argv).toContain("--permission-prompt-tool");
     expect(seen.mcpConfig.mcpServers.ogb.alwaysLoad).toBe(true);
   });
 
